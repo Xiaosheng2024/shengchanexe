@@ -44,6 +44,10 @@ SCAN = "扫码"
 SCREW = "螺丝"
 
 
+class ShortToolResponseError(ValueError):
+    pass
+
+
 @dataclass
 class ProcessStep:
     name: str
@@ -790,6 +794,8 @@ class QualityControlWindow(QMainWindow):
             self.tool_status_label.setText(f"连接失败：{exc}")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
             return
+        except ShortToolResponseError:
+            return
         except ValueError as exc:
             self.tool_status_label.setText(f"响应错误：{exc}")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
@@ -837,7 +843,7 @@ class QualityControlWindow(QMainWindow):
             response = sock.recv(1024)
 
         if len(response) < 11:
-            raise ValueError("数据长度不足")
+            raise ShortToolResponseError("数据长度不足")
         transaction_id, protocol_id, _, response_unit, function_code = struct.unpack(">HHHBB", response[:8])
         if transaction_id != self.tool_transaction_id or protocol_id != 0 or response_unit != unit_id:
             raise ValueError("报文头不匹配")
@@ -1151,7 +1157,7 @@ class QualityControlWindow(QMainWindow):
 def main():
     app = QApplication(sys.argv)
     window = QualityControlWindow()
-    window.show()
+    window.showMaximized()
     sys.exit(app.exec_())
 
 
