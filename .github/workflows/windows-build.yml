@@ -6,6 +6,9 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
   build-windows:
     runs-on: windows-latest
@@ -33,3 +36,11 @@ jobs:
         with:
           name: QualityControlSystem-windows
           path: dist/QualityControlSystem.exe
+
+      - name: Publish latest Windows exe
+        uses: softprops/action-gh-release@v2
+        if: github.ref == 'refs/heads/main'
+        with:
+          tag_name: windows-latest
+          name: Windows Latest
+          files: dist/QualityControlSystem.exe
