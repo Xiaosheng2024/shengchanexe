@@ -205,10 +205,10 @@ class QualityControlWindow(QMainWindow):
         self.tool_unit_input.setValue(1)
         self.tool_register_input = QSpinBox()
         self.tool_register_input.setRange(0, 65535)
-        self.tool_register_input.setValue(20)
+        self.tool_register_input.setValue(100)
         self.tool_ok_value_input = QSpinBox()
         self.tool_ok_value_input.setRange(0, 65535)
-        self.tool_ok_value_input.setValue(1)
+        self.tool_ok_value_input.setValue(2)
         self.tool_connect_btn = QPushButton("连接")
         self.tool_connect_btn.clicked.connect(self.toggle_tool_connection)
         self.tool_status_label = QLabel("未连接")
@@ -574,12 +574,25 @@ class QualityControlWindow(QMainWindow):
             return
 
         ok_value = self.tool_ok_value_input.value()
-        ok_now = value == ok_value or (ok_value == 1 and bool(value & 0x0001))
-        self.tool_status_label.setText(f"寄存器值：{value}，OK={'是' if ok_now else '否'}")
+        ok_now = value == ok_value
+        status_text = self.tightening_status_text(value)
+        self.tool_status_label.setText(f"状态：{value}-{status_text}，OK={'是' if ok_now else '否'}")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
         if ok_now and not self.last_tool_ok:
             self.handle_screw_ok()
         self.last_tool_ok = ok_now
+
+    def tightening_status_text(self, value: int) -> str:
+        status_map = {
+            0: "准备",
+            1: "作业中",
+            2: "OK",
+            3: "NG",
+            4: "暂停",
+            5: "正转",
+            6: "反转",
+        }
+        return status_map.get(value, "未知")
 
     def read_modbus_tcp_register(self, host: str, port: int, unit_id: int, register_address: int) -> int:
         if not host:
