@@ -1078,8 +1078,25 @@ class QualityControlWindow(QMainWindow):
                 "completed": completed,
             }
         )
+        if self.online_mode and barcode:
+            self.post_scan_record_to_server(step, result, barcode, note, now)
         if self.history_dialog is not None and self.history_dialog.isVisible():
             self.refresh_history_tables()
+
+    def post_scan_record_to_server(self, step: ProcessStep, result: str, barcode: str, note: str, created_at: datetime):
+        payload = {
+            "project": self.current_project.name,
+            "station": self.current_station.name,
+            "barcode": barcode,
+            "step": step.name,
+            "result": result,
+            "note": note,
+            "created_at": created_at.isoformat(timespec="seconds"),
+        }
+        try:
+            self.api_post("/api/scan-records", payload)
+        except Exception:
+            pass
 
     def refresh_history_tables(self):
         if self.history_dialog is None:

@@ -1,0 +1,6 @@
+__pycache__/
+*.pyc
+quality_control.db
+dist/
+build/
+*.spec
