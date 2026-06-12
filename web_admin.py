@@ -24,6 +24,14 @@ HTML = r"""<!doctype html>
     nav { background: white; border-right: 1px solid #d1d5db; padding: 16px; }
     nav button { width: 100%; display: block; text-align: left; padding: 14px 16px; border: 0; border-radius: 6px; background: transparent; font-size: 17px; cursor: pointer; }
     nav button.active { background: #2563eb; color: white; font-weight: 700; }
+    .tree-title { margin: 18px 0 8px; color: #374151; font-weight: 700; }
+    .tree-node { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1.3; }
+    .tree-node:hover { background: #eff6ff; }
+    .tree-node.active { background: #2563eb; color: white; font-weight: 700; }
+    .tree-project { margin-top: 6px; }
+    .tree-station { margin-left: 14px; }
+    .tree-step { margin-left: 28px; color: #4b5563; }
+    .tree-step.active { color: white; }
     main { padding: 18px; }
     .page { display: none; }
     .page.active { display: block; }
@@ -50,6 +58,8 @@ HTML = r"""<!doctype html>
       <button class="tab" data-page="stationPage">工位管理</button>
       <button class="tab" data-page="stepPage">工序规则管理</button>
       <button class="tab" data-page="recordPage">扫描记录查询</button>
+      <div class="tree-title">项目 / 工位 / 规则</div>
+      <div id="menuTree"></div>
     </nav>
     <main>
       <div class="status" id="status"></div>
@@ -68,7 +78,7 @@ HTML = r"""<!doctype html>
           <p class="hint">最大层级：项目。支持新增、修改、删除；删除项目会清理下属工位、工序和记录。</p>
         </div>
         <div class="panel">
-          <h2>项目列表</h2>
+          <h2>项目列表 <span class="hint" id="selectedProjectText"></span></h2>
           <table>
             <thead><tr><th>ID</th><th>项目名称</th><th>工位数量</th><th>创建时间</th><th>操作</th></tr></thead>
             <tbody id="projectRows"></tbody>
@@ -92,7 +102,7 @@ HTML = r"""<!doctype html>
           <p class="hint">中间层级：工位。桌面端在线模式会按项目和工位下载对应工序。</p>
         </div>
         <div class="panel">
-          <h2>工位列表</h2>
+          <h2>工位列表 <span class="hint" id="selectedStationProjectText"></span></h2>
           <table>
             <thead><tr><th>项目</th><th>工位</th><th>创建时间</th><th>操作</th></tr></thead>
             <tbody id="stationRows"></tbody>
@@ -106,9 +116,9 @@ HTML = r"""<!doctype html>
           <input id="stepId" type="hidden">
           <div class="toolbar">
             <label>项目</label>
-            <select id="stepProject" onchange="refreshStationOptions()"></select>
+            <select id="stepProject" onchange="onStepProjectChanged()"></select>
             <label>工位</label>
-            <select id="stepStation"></select>
+            <select id="stepStation" onchange="onStepStationChanged()"></select>
           </div>
           <div class="toolbar">
             <label>工序名称</label>
@@ -139,7 +149,7 @@ HTML = r"""<!doctype html>
           <p class="hint">最小层级：工序规则。功能分为条码扫描和螺丝数量；顺序越小越先执行。</p>
         </div>
         <div class="panel">
-          <h2>当前工位工序</h2>
+          <h2>当前工位工序 <span class="hint" id="selectedStationText"></span></h2>
           <button class="secondary" onclick="loadSteps()">刷新工序</button>
           <table>
             <thead><tr><th>顺序</th><th>工序名称</th><th>功能</th><th>螺丝数量</th><th>截取位</th><th>检测内容</th><th>操作</th></tr></thead>
@@ -182,6 +192,8 @@ HTML = r"""<!doctype html>
 
   <script>
     let fullData = {projects: []};
+    let selectedProjectId = null;
+    let selectedStationId = null;
 
     function showStatus(text) {
       document.getElementById("status").textContent = text || "";
@@ -216,6 +228,8 @@ HTML = r"""<!doctype html>
 
     async function refreshAll() {
       fullData = await api("/api/projects/full");
+      keepValidSelection();
+      renderMenuTree();
       renderProjects();
       renderStations();
       refreshProjectOptions();
@@ -223,18 +237,108 @@ HTML = r"""<!doctype html>
       loadSteps();
     }
 
+    function keepValidSelection() {
+      if (!fullData.projects.length) {
+        selectedProjectId = null;
+        selectedStationId = null;
+        return;
+      }
+      let project = fullData.projects.find(item => item.id === selectedProjectId);
+      if (!project) {
+        project = fullData.projects[0];
+        selectedProjectId = project.id;
+      }
+      let station = project.stations.find(item => item.id === selectedStationId);
+      if (!station) {
+        station = project.stations[0] || null;
+        selectedStationId = station ? station.id : null;
+      }
+    }
+
+    function currentProject() {
+      return fullData.projects.find(item => item.id === selectedProjectId) || null;
+    }
+
+    function currentStation() {
+      const project = currentProject();
+      return project ? project.stations.find(item => item.id === selectedStationId) || null : null;
+    }
+
+    function setActivePage(pageId) {
+      document.querySelectorAll(".tab").forEach(item => item.classList.toggle("active", item.dataset.page === pageId));
+      document.querySelectorAll(".page").forEach(item => item.classList.toggle("active", item.id === pageId));
+    }
+
+    function selectProject(id) {
+      selectedProjectId = id;
+      const project = currentProject();
+      selectedStationId = project && project.stations[0] ? project.stations[0].id : null;
+      resetProjectForm();
+      resetStationForm();
+      resetStepForm();
+      renderMenuTree();
+      renderProjects();
+      renderStations();
+      refreshProjectOptions();
+      refreshStationOptions();
+      setActivePage("projectPage");
+    }
+
+    function selectStation(projectId, stationId) {
+      selectedProjectId = projectId;
+      selectedStationId = stationId;
+      resetStationForm();
+      resetStepForm();
+      renderMenuTree();
+      renderProjects();
+      renderStations();
+      refreshProjectOptions();
+      refreshStationOptions();
+      setActivePage("stationPage");
+    }
+
+    function selectStep(projectId, stationId, stepId) {
+      selectedProjectId = projectId;
+      selectedStationId = stationId;
+      renderMenuTree();
+      refreshProjectOptions();
+      refreshStationOptions();
+      editStep(stepId);
+      setActivePage("stepPage");
+    }
+
+    function renderMenuTree() {
+      const tree = fullData.projects.map(project => {
+        const projectActive = project.id === selectedProjectId;
+        const stationHtml = project.stations.map(station => {
+          const stationActive = station.id === selectedStationId;
+          const steps = station.steps || [];
+          const stepHtml = steps.map(step =>
+            `<div class="tree-node tree-step" onclick="selectStep(${project.id}, ${station.id}, ${step.id})">规则：${htmlEscape(step.name)}</div>`
+          ).join("");
+          return `<div class="tree-node tree-station ${stationActive ? "active" : ""}" onclick="selectStation(${project.id}, ${station.id})">工位：${htmlEscape(station.name)}</div>${stationActive ? stepHtml : ""}`;
+        }).join("");
+        return `<div class="tree-node tree-project ${projectActive ? "active" : ""}" onclick="selectProject(${project.id})">项目：${htmlEscape(project.name)}</div>${projectActive ? stationHtml : ""}`;
+      }).join("");
+      document.getElementById("menuTree").innerHTML = tree || `<div class="hint">暂无项目</div>`;
+      const project = currentProject();
+      const station = currentStation();
+      document.getElementById("selectedProjectText").textContent = project ? `当前：${project.name}` : "";
+      document.getElementById("selectedStationProjectText").textContent = project ? `当前项目：${project.name}` : "";
+      document.getElementById("selectedStationText").textContent = station ? `当前：${project.name} / ${station.name}` : "";
+    }
+
     function renderProjects() {
       const rows = fullData.projects.map(project =>
-        `<tr><td>${project.id}</td><td>${htmlEscape(project.name)}</td><td>${project.stations.length}</td><td>${project.created_at}</td><td><button class="secondary" onclick="editProject(${project.id})">编辑</button> <button class="danger" onclick="deleteProject(${project.id})">删除</button></td></tr>`
+        `<tr><td>${project.id}</td><td>${htmlEscape(project.name)}</td><td>${project.stations.length}</td><td>${project.created_at}</td><td><button class="secondary" onclick="selectProject(${project.id})">选择</button> <button class="secondary" onclick="editProject(${project.id})">编辑</button> <button class="danger" onclick="deleteProject(${project.id})">删除</button></td></tr>`
       ).join("");
       document.getElementById("projectRows").innerHTML = rows || `<tr><td colspan="5">暂无项目</td></tr>`;
     }
 
     function renderStations() {
-      const rows = fullData.projects.flatMap(project =>
-        project.stations.map(station =>
-          `<tr><td>${htmlEscape(project.name)}</td><td>${htmlEscape(station.name)}</td><td>${station.created_at}</td><td><button class="secondary" onclick="editStation(${station.id})">编辑</button> <button class="danger" onclick="deleteStation(${station.id})">删除</button></td></tr>`
-        )
+      const project = currentProject();
+      const rows = (project ? project.stations : []).map(station =>
+        `<tr><td>${htmlEscape(project.name)}</td><td>${htmlEscape(station.name)}</td><td>${station.created_at}</td><td><button class="secondary" onclick="selectStation(${project.id}, ${station.id})">选择</button> <button class="secondary" onclick="editStation(${station.id})">编辑</button> <button class="danger" onclick="deleteStation(${station.id})">删除</button></td></tr>`
       ).join("");
       document.getElementById("stationRows").innerHTML = rows || `<tr><td colspan="4">暂无工位</td></tr>`;
     }
@@ -242,17 +346,33 @@ HTML = r"""<!doctype html>
     function refreshProjectOptions() {
       ["stationProject", "stepProject"].forEach(id => {
         const select = document.getElementById(id);
-        const current = select.value;
         select.innerHTML = fullData.projects.map(project => `<option value="${project.id}">${project.name}</option>`).join("");
-        if (current) select.value = current;
+        if (selectedProjectId) select.value = selectedProjectId;
       });
     }
 
     function refreshStationOptions() {
-      const projectId = Number(document.getElementById("stepProject").value);
+      const projectId = Number(document.getElementById("stepProject").value || selectedProjectId);
       const project = fullData.projects.find(item => item.id === projectId) || fullData.projects[0];
       const select = document.getElementById("stepStation");
       select.innerHTML = project ? project.stations.map(station => `<option value="${station.id}">${station.name}</option>`).join("") : "";
+      if (selectedStationId) select.value = selectedStationId;
+      loadSteps();
+    }
+
+    function onStepProjectChanged() {
+      selectedProjectId = Number(document.getElementById("stepProject").value);
+      const project = currentProject();
+      selectedStationId = project && project.stations[0] ? project.stations[0].id : null;
+      renderMenuTree();
+      renderStations();
+      refreshStationOptions();
+    }
+
+    function onStepStationChanged() {
+      selectedStationId = Number(document.getElementById("stepStation").value);
+      renderMenuTree();
+      renderStations();
       loadSteps();
     }
 
@@ -266,14 +386,22 @@ HTML = r"""<!doctype html>
       });
       document.getElementById("projectName").value = "";
       showStatus("项目已添加");
-      refreshAll();
+      await refreshAll();
+      const project = fullData.projects.find(item => item.name === name);
+      if (project) selectProject(project.id);
     }
 
     function editProject(id) {
       const project = fullData.projects.find(item => item.id === id);
       if (!project) return;
+      selectedProjectId = project.id;
+      selectedStationId = project.stations[0] ? project.stations[0].id : null;
       document.getElementById("projectId").value = project.id;
       document.getElementById("projectName").value = project.name;
+      renderMenuTree();
+      renderStations();
+      refreshProjectOptions();
+      refreshStationOptions();
       showStatus("正在编辑项目");
     }
 
@@ -298,7 +426,7 @@ HTML = r"""<!doctype html>
     }
 
     async function addStation() {
-      const project_id = Number(document.getElementById("stationProject").value);
+      const project_id = Number(document.getElementById("stationProject").value || selectedProjectId);
       const name = document.getElementById("stationName").value.trim();
       if (!name) return showStatus("工位名称不能为空");
       await api("/api/stations", {
@@ -308,7 +436,10 @@ HTML = r"""<!doctype html>
       });
       document.getElementById("stationName").value = "";
       showStatus("工位已添加");
-      refreshAll();
+      await refreshAll();
+      const project = fullData.projects.find(item => item.id === project_id);
+      const station = project ? project.stations.find(item => item.name === name) : null;
+      if (station) selectStation(project_id, station.id);
     }
 
     function findStation(id) {
@@ -322,9 +453,13 @@ HTML = r"""<!doctype html>
     function editStation(id) {
       const {project, station} = findStation(id);
       if (!station) return;
+      selectedProjectId = project.id;
+      selectedStationId = station.id;
       document.getElementById("stationId").value = station.id;
       document.getElementById("stationProject").value = project.id;
       document.getElementById("stationName").value = station.name;
+      renderMenuTree();
+      renderStations();
       showStatus("正在编辑工位");
     }
 
@@ -356,19 +491,9 @@ HTML = r"""<!doctype html>
     }
 
     async function addStep() {
-      const station_id = Number(document.getElementById("stepStation").value);
-      const type = document.getElementById("stepType").value;
-      const payload = {
-        station_id,
-        name: document.getElementById("stepName").value.trim(),
-        type,
-        step_order: Number(document.getElementById("stepOrder").value || 1),
-        required_count: type === "螺丝" ? Number(document.getElementById("requiredCount").value || 0) : 0,
-        barcode_start: Number(document.getElementById("barcodeStart").value || 1),
-        barcode_end: Number(document.getElementById("barcodeEnd").value || 7),
-        expected_content: document.getElementById("expectedContent").value.trim()
-      };
+      const payload = stepPayload();
       if (!payload.name) return showStatus("工序名称不能为空");
+      if (!payload.station_id) return showStatus("请先选择工位");
       await api("/api/steps", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
@@ -382,7 +507,7 @@ HTML = r"""<!doctype html>
     function stepPayload() {
       const type = document.getElementById("stepType").value;
       return {
-        station_id: Number(document.getElementById("stepStation").value),
+        station_id: Number(document.getElementById("stepStation").value || selectedStationId),
         name: document.getElementById("stepName").value.trim(),
         type,
         step_order: Number(document.getElementById("stepOrder").value || 1),
@@ -465,6 +590,8 @@ HTML = r"""<!doctype html>
       if (!confirm(`确定删除项目“${name}”吗？该项目下的工位、工序和记录也会删除。`)) return;
       await api(`/api/projects/${id}`, {method: "DELETE"});
       showStatus("项目已删除");
+      selectedProjectId = null;
+      selectedStationId = null;
       refreshAll();
     }
 
@@ -474,6 +601,7 @@ HTML = r"""<!doctype html>
       if (!confirm(`确定删除工位“${name}”吗？该工位下的工序和记录也会删除。`)) return;
       await api(`/api/stations/${id}`, {method: "DELETE"});
       showStatus("工位已删除");
+      selectedStationId = null;
       refreshAll();
     }
 
@@ -790,6 +918,8 @@ def list_projects_full():
                 (project["id"],),
             ).fetchall()
             project["stations"] = [row_to_dict(row) for row in stations]
+            for station in project["stations"]:
+                station["steps"] = list_steps(station["id"])
     return projects
 
 
