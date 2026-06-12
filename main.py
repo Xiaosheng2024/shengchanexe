@@ -3,17 +3,22 @@ import socket
 import struct
 import subprocess
 import sys
+import json
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass, field
-from datetime import date, datetime
+from datetime import datetime
 from typing import List, Optional
 
-from PyQt5.QtCore import QDate, Qt, QTimer
+from PyQt5.QtCore import QDateTime, Qt, QTimer
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
     QComboBox,
     QDateEdit,
+    QDateTimeEdit,
     QDialog,
     QFormLayout,
     QGridLayout,
@@ -27,6 +32,7 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
+    QStackedWidget,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -75,15 +81,32 @@ class ProductConfig:
             step.reset()
 
 
+@dataclass
+class StationConfig:
+    name: str
+    product: ProductConfig
+
+
+@dataclass
+class ProjectConfig:
+    name: str
+    stations: List[StationConfig] = field(default_factory=list)
+
+
 class QualityControlWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("生产工艺过程质量控制系统")
         self.resize(1280, 820)
 
-        self.products = self.default_products()
-        self.current_product: ProductConfig = self.products[0]
+        self.projects = self.default_projects()
+        self.current_project: ProjectConfig = self.projects[0]
+        self.current_station: StationConfig = self.current_project.stations[0]
+        self.products = [station.product for station in self.current_project.stations]
+        self.current_product: ProductConfig = self.current_station.product
         self.current_step_index = 0
+        self.online_mode = False
+        self.current_barcode = ""
         self.screw_blocks: List[QLabel] = []
         self.warning_dialogs: List[QMessageBox] = []
         self.finished_part_count = 0
@@ -92,6 +115,7 @@ class QualityControlWindow(QMainWindow):
         self.step_started_at = datetime.now()
         self.settings_dialog: Optional[QDialog] = None
         self.history_dialog: Optional[QDialog] = None
+        self.manage_dialog: Optional[QDialog] = None
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
         self.tool_poll_timer = QTimer(self)
@@ -100,20 +124,27 @@ class QualityControlWindow(QMainWindow):
         self.last_tool_ok = False
 
         self.build_ui()
-        self.load_product(self.current_product.name)
+        self.refresh_project_station_selectors()
+        self.load_station(self.current_project.name, self.current_station.name)
 
-    def default_products(self) -> List[ProductConfig]:
-        return [
-            ProductConfig(
-                "汽车前中控面板X04C 灰色",
-                [
-                    ProcessStep("扫码A零件", SCAN, barcode_start=1, barcode_end=1, expected_content="A"),
-                    ProcessStep("扫码B零件条码", SCAN, barcode_start=1, barcode_end=1, expected_content="B"),
-                    ProcessStep("打螺丝10颗", SCREW, required_count=10),
-                    ProcessStep("扫码C零件", SCAN, barcode_start=1, barcode_end=1, expected_content="C"),
-                ],
+    def default_projects(self) -> List[ProjectConfig]:
+        stations = []
+        for index in range(1, 10):
+            stations.append(
+                StationConfig(
+                    f"工位{index}",
+                    ProductConfig(
+                        f"汽车前中控面板X04C 灰色 - 工位{index}",
+                        [
+                            ProcessStep("扫码A零件", SCAN, barcode_start=1, barcode_end=1, expected_content="A"),
+                            ProcessStep("扫码B零件条码", SCAN, barcode_start=1, barcode_end=1, expected_content="B"),
+                            ProcessStep("打螺丝10颗", SCREW, required_count=10),
+                            ProcessStep("扫码C零件", SCAN, barcode_start=1, barcode_end=1, expected_content="C"),
+                        ],
+                    ),
+                )
             )
-        ]
+        return [ProjectConfig("默认项目", stations)]
 
     def build_ui(self):
         root = QWidget()
@@ -126,6 +157,33 @@ class QualityControlWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 26px; font-weight: 700; padding: 8px;")
         root_layout.addWidget(title)
+
+        mode_box = QGroupBox("运行模式 / 工位选择")
+        mode_layout = QHBoxLayout(mode_box)
+        self.mode_combo = QComboBox()
+        self.mode_combo.addItems(["离线模式", "在线模式"])
+        self.mode_combo.currentTextChanged.connect(self.change_mode)
+        self.api_base_input = QLineEdit("http://127.0.0.1:8000")
+        self.api_base_input.setPlaceholderText("网页端接口地址")
+        self.project_combo = QComboBox()
+        self.project_combo.currentTextChanged.connect(self.on_project_selected)
+        self.station_combo = QComboBox()
+        self.station_combo.currentTextChanged.connect(self.on_station_selected)
+        sync_projects_btn = QPushButton("同步项目工位")
+        sync_projects_btn.clicked.connect(self.sync_online_projects)
+        download_btn = QPushButton("下载配置")
+        download_btn.clicked.connect(self.download_online_config)
+        for label_text, widget in [
+            ("模式", self.mode_combo),
+            ("接口", self.api_base_input),
+            ("项目", self.project_combo),
+            ("工位", self.station_combo),
+        ]:
+            mode_layout.addWidget(QLabel(label_text))
+            mode_layout.addWidget(widget)
+        mode_layout.addWidget(sync_projects_btn)
+        mode_layout.addWidget(download_btn)
+        root_layout.addWidget(mode_box)
 
         content = QHBoxLayout()
         content.setSpacing(14)
@@ -234,10 +292,13 @@ class QualityControlWindow(QMainWindow):
         window_row = QHBoxLayout()
         settings_btn = QPushButton("设置功能")
         settings_btn.clicked.connect(self.open_settings_dialog)
+        manage_btn = QPushButton("管理页面")
+        manage_btn.clicked.connect(self.open_manage_dialog)
         history_btn = QPushButton("历史记录 / 统计报表")
         history_btn.clicked.connect(self.open_history_dialog)
         window_row.addStretch(1)
         window_row.addWidget(settings_btn)
+        window_row.addWidget(manage_btn)
         window_row.addWidget(history_btn)
         root_layout.addLayout(window_row)
 
@@ -321,6 +382,154 @@ class QualityControlWindow(QMainWindow):
         self.product_combo.addItems([product.name for product in self.products])
         self.refresh_product_list()
 
+    def change_mode(self, text: str):
+        self.online_mode = text == "在线模式"
+        self.message_label.setText("在线模式：请先下载配置" if self.online_mode else "离线模式：使用本地配置")
+
+    def refresh_project_station_selectors(self):
+        self.project_combo.blockSignals(True)
+        self.project_combo.clear()
+        self.project_combo.addItems([project.name for project in self.projects])
+        self.project_combo.setCurrentText(self.current_project.name)
+        self.project_combo.blockSignals(False)
+        self.refresh_station_selector()
+
+    def refresh_station_selector(self):
+        self.station_combo.blockSignals(True)
+        self.station_combo.clear()
+        self.station_combo.addItems([station.name for station in self.current_project.stations])
+        self.station_combo.setCurrentText(self.current_station.name)
+        self.station_combo.blockSignals(False)
+
+    def on_project_selected(self, project_name: str):
+        if not project_name:
+            return
+        project = next((item for item in self.projects if item.name == project_name), None)
+        if project is None:
+            return
+        self.current_project = project
+        self.current_station = project.stations[0]
+        self.refresh_station_selector()
+        self.load_station(project.name, self.current_station.name)
+
+    def on_station_selected(self, station_name: str):
+        if station_name:
+            self.load_station(self.current_project.name, station_name)
+
+    def load_station(self, project_name: str, station_name: str):
+        project = next((item for item in self.projects if item.name == project_name), None)
+        if project is None:
+            return
+        station = next((item for item in project.stations if item.name == station_name), None)
+        if station is None:
+            return
+        self.current_project = project
+        self.current_station = station
+        self.current_product = station.product
+        self.products = [station.product for station in project.stations]
+        if hasattr(self, "product_combo"):
+            self.product_combo.blockSignals(True)
+            self.product_combo.clear()
+            self.product_combo.addItems([product.name for product in self.products])
+            self.product_combo.setCurrentText(self.current_product.name)
+            self.product_combo.blockSignals(False)
+            self.product_name_input.setText(self.current_product.name)
+            self.refresh_product_list()
+        self.reset_current_product(update_table=True)
+
+    def download_online_config(self):
+        if not self.online_mode:
+            self.message_label.setText("当前是离线模式，不需要下载配置")
+            return
+        project_name = self.project_combo.currentText().strip()
+        station_name = self.station_combo.currentText().strip()
+        if not project_name or not station_name:
+            self.message_label.setText("请先选择项目和工位")
+            return
+        try:
+            data = self.api_get(f"/api/projects/{urllib.parse.quote(project_name)}/stations/{urllib.parse.quote(station_name)}/config")
+            product = self.product_from_api(data)
+        except Exception as exc:
+            QMessageBox.warning(self, "下载配置失败", str(exc))
+            return
+        self.current_station.product = product
+        self.load_station(project_name, station_name)
+        self.message_label.setText("在线配置已下载")
+
+    def sync_online_projects(self):
+        if not self.online_mode:
+            self.message_label.setText("当前是离线模式，不需要同步项目工位")
+            return
+        try:
+            data = self.api_get("/api/projects")
+            projects = []
+            for project_item in data.get("projects", []):
+                stations = []
+                for station_name in project_item.get("stations", []):
+                    stations.append(
+                        StationConfig(
+                            station_name,
+                            ProductConfig(
+                                f"{project_item.get('name', '项目')} - {station_name}",
+                                [ProcessStep("扫码首件条码", SCAN)],
+                            ),
+                        )
+                    )
+                if stations:
+                    projects.append(ProjectConfig(project_item.get("name", "未命名项目"), stations))
+        except Exception as exc:
+            QMessageBox.warning(self, "同步失败", str(exc))
+            return
+        if not projects:
+            QMessageBox.warning(self, "同步失败", "接口未返回项目工位")
+            return
+        self.projects = projects
+        self.current_project = projects[0]
+        self.current_station = projects[0].stations[0]
+        self.refresh_project_station_selectors()
+        self.refresh_manage_project_combos()
+        self.load_station(self.current_project.name, self.current_station.name)
+        self.message_label.setText("项目工位已同步，请选择工位后下载配置")
+
+    def product_from_api(self, data: dict) -> ProductConfig:
+        steps = []
+        for item in data.get("steps", []):
+            step_type = item.get("type", SCAN)
+            steps.append(
+                ProcessStep(
+                    name=item.get("name", "未命名工序"),
+                    step_type=step_type,
+                    required_count=int(item.get("required_count", 0)),
+                    barcode_start=int(item.get("barcode_start", 1)),
+                    barcode_end=int(item.get("barcode_end", 7)),
+                    expected_content=item.get("expected_content", ""),
+                )
+            )
+        if not steps:
+            raise ValueError("接口未返回工序 steps")
+        return ProductConfig(data.get("product_name", self.current_product.name), steps)
+
+    def api_url(self, path: str) -> str:
+        base = self.api_base_input.text().strip().rstrip("/")
+        if not base:
+            raise ValueError("网页端接口地址为空")
+        return base + path
+
+    def api_get(self, path: str) -> dict:
+        with urllib.request.urlopen(self.api_url(path), timeout=3) as response:
+            return json.loads(response.read().decode("utf-8"))
+
+    def api_post(self, path: str, payload: dict) -> dict:
+        data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
+        request = urllib.request.Request(
+            self.api_url(path),
+            data=data,
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        with urllib.request.urlopen(request, timeout=3) as response:
+            return json.loads(response.read().decode("utf-8") or "{}")
+
     def open_settings_dialog(self):
         self.settings_dialog.show()
         self.settings_dialog.raise_()
@@ -334,6 +543,122 @@ class QualityControlWindow(QMainWindow):
         self.history_dialog.raise_()
         self.history_dialog.activateWindow()
 
+    def open_manage_dialog(self):
+        if self.manage_dialog is None:
+            self.build_manage_dialog()
+        self.manage_dialog.show()
+        self.manage_dialog.raise_()
+        self.manage_dialog.activateWindow()
+
+    def build_manage_dialog(self):
+        self.manage_dialog = QDialog(self)
+        self.manage_dialog.setWindowTitle("管理页面")
+        self.manage_dialog.resize(980, 560)
+        layout = QHBoxLayout(self.manage_dialog)
+
+        menu = QListWidget()
+        menu.addItems(["项目添加", "工位添加", "工序规则添加"])
+        menu.setFixedWidth(180)
+        menu.setStyleSheet(
+            "QListWidget { font-size: 18px; }"
+            "QListWidget::item { padding: 14px; }"
+            "QListWidget::item:selected { background: #2563eb; color: white; }"
+        )
+        pages = QStackedWidget()
+        layout.addWidget(menu)
+        layout.addWidget(pages, 1)
+
+        pages.addWidget(self.build_project_manage_page())
+        pages.addWidget(self.build_station_manage_page())
+        pages.addWidget(self.build_step_rule_manage_page())
+        menu.currentRowChanged.connect(pages.setCurrentIndex)
+        menu.setCurrentRow(0)
+
+    def build_project_manage_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        form = QFormLayout()
+        self.manage_project_name_input = QLineEdit()
+        form.addRow("项目名称", self.manage_project_name_input)
+        layout.addLayout(form)
+        add_btn = QPushButton("添加项目")
+        add_btn.clicked.connect(self.manage_add_project)
+        layout.addWidget(add_btn)
+        layout.addStretch(1)
+        return page
+
+    def build_station_manage_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        form = QFormLayout()
+        self.manage_station_project_combo = QComboBox()
+        self.manage_station_name_input = QLineEdit()
+        self.manage_station_name_input.setPlaceholderText("例如：工位10")
+        form.addRow("所属项目", self.manage_station_project_combo)
+        form.addRow("工位名称", self.manage_station_name_input)
+        layout.addLayout(form)
+        add_btn = QPushButton("添加工位")
+        add_btn.clicked.connect(self.manage_add_station)
+        layout.addWidget(add_btn)
+        layout.addStretch(1)
+        self.refresh_manage_project_combos()
+        return page
+
+    def build_step_rule_manage_page(self) -> QWidget:
+        page = QWidget()
+        layout = QVBoxLayout(page)
+        note = QLabel("工序规则添加请先在主界面选择项目/工位，再打开“设置功能”维护该工位的扫码规则、螺丝数量和工序顺序。")
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 18px; color: #374151;")
+        layout.addWidget(note)
+        open_settings_btn = QPushButton("打开设置功能")
+        open_settings_btn.clicked.connect(self.open_settings_dialog)
+        layout.addWidget(open_settings_btn)
+        layout.addStretch(1)
+        return page
+
+    def refresh_manage_project_combos(self):
+        if not hasattr(self, "manage_station_project_combo"):
+            return
+        self.manage_station_project_combo.clear()
+        self.manage_station_project_combo.addItems([project.name for project in self.projects])
+
+    def manage_add_project(self):
+        name = self.manage_project_name_input.text().strip()
+        if not name:
+            QMessageBox.warning(self, "提示", "项目名称不能为空")
+            return
+        if any(project.name == name for project in self.projects):
+            QMessageBox.warning(self, "提示", "项目名称已存在")
+            return
+        product = ProductConfig(f"{name} 默认产品 - 工位1", [ProcessStep("扫码首件条码", SCAN)])
+        project = ProjectConfig(name, [StationConfig("工位1", product)])
+        self.projects.append(project)
+        self.current_project = project
+        self.current_station = project.stations[0]
+        self.refresh_project_station_selectors()
+        self.refresh_manage_project_combos()
+        self.load_station(project.name, self.current_station.name)
+
+    def manage_add_station(self):
+        project_name = self.manage_station_project_combo.currentText()
+        station_name = self.manage_station_name_input.text().strip()
+        if not station_name:
+            QMessageBox.warning(self, "提示", "工位名称不能为空")
+            return
+        project = next((item for item in self.projects if item.name == project_name), None)
+        if project is None:
+            return
+        if any(station.name == station_name for station in project.stations):
+            QMessageBox.warning(self, "提示", "工位名称已存在")
+            return
+        product = ProductConfig(f"{project_name} 默认产品 - {station_name}", [ProcessStep("扫码首件条码", SCAN)])
+        project.stations.append(StationConfig(station_name, product))
+        self.current_project = project
+        self.current_station = project.stations[-1]
+        self.refresh_project_station_selectors()
+        self.load_station(project.name, station_name)
+
     def build_history_dialog(self):
         self.history_dialog = QDialog(self)
         self.history_dialog.setWindowTitle("历史记录 / 工序时间统计报表")
@@ -341,12 +666,23 @@ class QualityControlWindow(QMainWindow):
         layout = QVBoxLayout(self.history_dialog)
 
         filter_row = QHBoxLayout()
-        filter_row.addWidget(QLabel("查询日期"))
-        self.history_date_edit = QDateEdit()
-        self.history_date_edit.setCalendarPopup(True)
-        self.history_date_edit.setDate(QDate.currentDate())
-        self.history_date_edit.dateChanged.connect(self.refresh_history_tables)
-        filter_row.addWidget(self.history_date_edit)
+        self.history_start_edit = QDateTimeEdit()
+        self.history_start_edit.setCalendarPopup(True)
+        self.history_start_edit.setDateTime(QDateTime.currentDateTime().addDays(-1))
+        self.history_start_edit.dateTimeChanged.connect(self.refresh_history_tables)
+        self.history_end_edit = QDateTimeEdit()
+        self.history_end_edit.setCalendarPopup(True)
+        self.history_end_edit.setDateTime(QDateTime.currentDateTime())
+        self.history_end_edit.dateTimeChanged.connect(self.refresh_history_tables)
+        self.history_barcode_input = QLineEdit()
+        self.history_barcode_input.setPlaceholderText("输入条码搜索")
+        self.history_barcode_input.textChanged.connect(self.refresh_history_tables)
+        filter_row.addWidget(QLabel("开始时间"))
+        filter_row.addWidget(self.history_start_edit)
+        filter_row.addWidget(QLabel("结束时间"))
+        filter_row.addWidget(self.history_end_edit)
+        filter_row.addWidget(QLabel("条码"))
+        filter_row.addWidget(self.history_barcode_input)
         refresh_btn = QPushButton("刷新查询")
         refresh_btn.clicked.connect(self.refresh_history_tables)
         filter_row.addWidget(refresh_btn)
@@ -355,9 +691,9 @@ class QualityControlWindow(QMainWindow):
 
         history_box = QGroupBox("历史记录")
         history_layout = QVBoxLayout(history_box)
-        self.history_table = QTableWidget(0, 8)
+        self.history_table = QTableWidget(0, 11)
         self.history_table.setHorizontalHeaderLabels(
-            ["时间", "产品", "工序", "功能", "结果", "条码/信号", "耗时秒", "说明"]
+            ["时间", "项目", "工位", "产品", "工序", "功能", "结果", "条码", "信号", "耗时秒", "说明"]
         )
         self.history_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.history_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
@@ -366,8 +702,10 @@ class QualityControlWindow(QMainWindow):
 
         report_box = QGroupBox("工序时间统计报表")
         report_layout = QVBoxLayout(report_box)
-        self.report_table = QTableWidget(0, 5)
-        self.report_table.setHorizontalHeaderLabels(["产品", "工序", "完成次数", "总耗时秒", "平均耗时秒"])
+        self.report_table = QTableWidget(0, 7)
+        self.report_table.setHorizontalHeaderLabels(
+            ["项目", "工位", "产品", "工序", "完成次数", "总耗时秒", "平均耗时秒"]
+        )
         self.report_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
         self.report_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         report_layout.addWidget(self.report_table)
@@ -411,6 +749,7 @@ class QualityControlWindow(QMainWindow):
         self.current_step_index = 0
         self.step_started_at = datetime.now()
         self.last_voice_step_key = None
+        self.current_barcode = ""
         self.barcode_input.clear()
         self.message_label.setText("等待第1工序条码进入")
         if update_table:
@@ -516,6 +855,11 @@ class QualityControlWindow(QMainWindow):
             self.speak("条码错误")
             self.show_auto_close_warning("扫码错误", message)
             return
+
+        if not self.current_barcode:
+            if self.online_mode and not self.verify_previous_station_complete(barcode):
+                return
+            self.current_barcode = barcode
 
         self.add_history_record(step, "完成", barcode, "扫码复核通过", completed=True)
         self.play_ok_sound()
@@ -629,9 +973,11 @@ class QualityControlWindow(QMainWindow):
         self.current_step_index += 1
         if self.current_step_index >= len(self.current_product.steps):
             self.finished_part_count += 1
+            self.report_station_complete()
             self.message_label.setText("所有工序完成，系统已重新开始等待第1工序条码进入")
             self.current_product.reset()
             self.current_step_index = 0
+            self.current_barcode = ""
         self.step_started_at = datetime.now()
         self.last_voice_step_key = None
         self.refresh_work_area()
@@ -639,6 +985,52 @@ class QualityControlWindow(QMainWindow):
             QTimer.singleShot(prompt_delay_ms, self.prompt_current_step_start)
         else:
             self.prompt_current_step_start()
+
+    def station_number(self, station_name: str) -> int:
+        digits = "".join(ch for ch in station_name if ch.isdigit())
+        return int(digits) if digits else 1
+
+    def previous_station_name(self) -> str:
+        number = self.station_number(self.current_station.name)
+        return f"工位{max(number - 1, 1)}"
+
+    def verify_previous_station_complete(self, barcode: str) -> bool:
+        if self.station_number(self.current_station.name) <= 1:
+            return True
+        try:
+            query = urllib.parse.urlencode(
+                {
+                    "project": self.current_project.name,
+                    "barcode": barcode,
+                    "previous_station": self.previous_station_name(),
+                }
+            )
+            data = self.api_get(f"/api/station-completions/check?{query}")
+        except Exception as exc:
+            message = f"前工位完成状态查询失败：{exc}"
+            self.message_label.setText(message)
+            self.show_auto_close_warning("工位验证失败", message)
+            return False
+        if data.get("completed"):
+            return True
+        message = f"条码 {barcode} 未完成 {self.previous_station_name()}，禁止进入 {self.current_station.name}"
+        self.message_label.setText(message)
+        self.show_auto_close_warning("前工位未完成", message)
+        return False
+
+    def report_station_complete(self):
+        if not self.online_mode or not self.current_barcode:
+            return
+        payload = {
+            "project": self.current_project.name,
+            "station": self.current_station.name,
+            "barcode": self.current_barcode,
+            "completed_at": datetime.now().isoformat(timespec="seconds"),
+        }
+        try:
+            self.api_post("/api/station-completions", payload)
+        except Exception as exc:
+            self.message_label.setText(f"工位完成上报失败：{exc}")
 
     def prompt_current_step_start(self):
         step = self.current_step()
@@ -669,14 +1061,18 @@ class QualityControlWindow(QMainWindow):
     def add_history_record(self, step: ProcessStep, result: str, source: str, note: str, completed: bool):
         now = datetime.now()
         duration = (now - self.step_started_at).total_seconds()
+        barcode = source if step.step_type == SCAN else self.current_barcode
         self.history_records.append(
             {
                 "time": now,
+                "project": self.current_project.name,
+                "station": self.current_station.name,
                 "product": self.current_product.name,
                 "step": step.name,
                 "type": step.step_type,
                 "result": result,
                 "source": source,
+                "barcode": barcode,
                 "duration": duration,
                 "note": note,
                 "completed": completed,
@@ -685,16 +1081,18 @@ class QualityControlWindow(QMainWindow):
         if self.history_dialog is not None and self.history_dialog.isVisible():
             self.refresh_history_tables()
 
-    def selected_history_date(self) -> date:
-        if not hasattr(self, "history_date_edit"):
-            return datetime.now().date()
-        return self.history_date_edit.date().toPyDate()
-
     def refresh_history_tables(self):
         if self.history_dialog is None:
             return
-        selected_date = self.selected_history_date()
-        records = [record for record in self.history_records if record["time"].date() == selected_date]
+        start_time = self.history_start_edit.dateTime().toPyDateTime()
+        end_time = self.history_end_edit.dateTime().toPyDateTime()
+        barcode_keyword = self.history_barcode_input.text().strip()
+        records = [
+            record
+            for record in self.history_records
+            if start_time <= record["time"] <= end_time
+            and (not barcode_keyword or barcode_keyword in record.get("barcode", ""))
+        ]
 
         self.history_table.setRowCount(0)
         for record in records:
@@ -702,10 +1100,13 @@ class QualityControlWindow(QMainWindow):
             self.history_table.insertRow(row)
             values = [
                 record["time"].strftime("%Y-%m-%d %H:%M:%S"),
+                record["project"],
+                record["station"],
                 record["product"],
                 record["step"],
                 record["type"],
                 record["result"],
+                record.get("barcode", ""),
                 record["source"],
                 f"{record['duration']:.1f}",
                 record["note"],
@@ -717,18 +1118,18 @@ class QualityControlWindow(QMainWindow):
         for record in records:
             if not record["completed"]:
                 continue
-            key = (record["product"], record["step"])
+            key = (record["project"], record["station"], record["product"], record["step"])
             if key not in stats:
                 stats[key] = {"count": 0, "duration": 0.0}
             stats[key]["count"] += 1
             stats[key]["duration"] += record["duration"]
 
         self.report_table.setRowCount(0)
-        for (product, step_name), stat in stats.items():
+        for (project, station, product, step_name), stat in stats.items():
             row = self.report_table.rowCount()
             self.report_table.insertRow(row)
             avg = stat["duration"] / stat["count"] if stat["count"] else 0
-            values = [product, step_name, stat["count"], f"{stat['duration']:.1f}", f"{avg:.1f}"]
+            values = [project, station, product, step_name, stat["count"], f"{stat['duration']:.1f}", f"{avg:.1f}"]
             for column, value in enumerate(values):
                 self.report_table.setItem(row, column, QTableWidgetItem(str(value)))
 
