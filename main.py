@@ -32,7 +32,6 @@ from PyQt5.QtWidgets import (
     QMainWindow,
     QMessageBox,
     QPushButton,
-    QStackedWidget,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -115,7 +114,6 @@ class QualityControlWindow(QMainWindow):
         self.step_started_at = datetime.now()
         self.settings_dialog: Optional[QDialog] = None
         self.history_dialog: Optional[QDialog] = None
-        self.manage_dialog: Optional[QDialog] = None
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
         self.tool_poll_timer = QTimer(self)
@@ -292,13 +290,10 @@ class QualityControlWindow(QMainWindow):
         window_row = QHBoxLayout()
         settings_btn = QPushButton("设置功能")
         settings_btn.clicked.connect(self.open_settings_dialog)
-        manage_btn = QPushButton("管理页面")
-        manage_btn.clicked.connect(self.open_manage_dialog)
         history_btn = QPushButton("历史记录 / 统计报表")
         history_btn.clicked.connect(self.open_history_dialog)
         window_row.addStretch(1)
         window_row.addWidget(settings_btn)
-        window_row.addWidget(manage_btn)
         window_row.addWidget(history_btn)
         root_layout.addLayout(window_row)
 
@@ -487,7 +482,6 @@ class QualityControlWindow(QMainWindow):
         self.current_project = projects[0]
         self.current_station = projects[0].stations[0]
         self.refresh_project_station_selectors()
-        self.refresh_manage_project_combos()
         self.load_station(self.current_project.name, self.current_station.name)
         self.message_label.setText("项目工位已同步，请选择工位后下载配置")
 
@@ -542,122 +536,6 @@ class QualityControlWindow(QMainWindow):
         self.history_dialog.show()
         self.history_dialog.raise_()
         self.history_dialog.activateWindow()
-
-    def open_manage_dialog(self):
-        if self.manage_dialog is None:
-            self.build_manage_dialog()
-        self.manage_dialog.show()
-        self.manage_dialog.raise_()
-        self.manage_dialog.activateWindow()
-
-    def build_manage_dialog(self):
-        self.manage_dialog = QDialog(self)
-        self.manage_dialog.setWindowTitle("管理页面")
-        self.manage_dialog.resize(980, 560)
-        layout = QHBoxLayout(self.manage_dialog)
-
-        menu = QListWidget()
-        menu.addItems(["项目添加", "工位添加", "工序规则添加"])
-        menu.setFixedWidth(180)
-        menu.setStyleSheet(
-            "QListWidget { font-size: 18px; }"
-            "QListWidget::item { padding: 14px; }"
-            "QListWidget::item:selected { background: #2563eb; color: white; }"
-        )
-        pages = QStackedWidget()
-        layout.addWidget(menu)
-        layout.addWidget(pages, 1)
-
-        pages.addWidget(self.build_project_manage_page())
-        pages.addWidget(self.build_station_manage_page())
-        pages.addWidget(self.build_step_rule_manage_page())
-        menu.currentRowChanged.connect(pages.setCurrentIndex)
-        menu.setCurrentRow(0)
-
-    def build_project_manage_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        form = QFormLayout()
-        self.manage_project_name_input = QLineEdit()
-        form.addRow("项目名称", self.manage_project_name_input)
-        layout.addLayout(form)
-        add_btn = QPushButton("添加项目")
-        add_btn.clicked.connect(self.manage_add_project)
-        layout.addWidget(add_btn)
-        layout.addStretch(1)
-        return page
-
-    def build_station_manage_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        form = QFormLayout()
-        self.manage_station_project_combo = QComboBox()
-        self.manage_station_name_input = QLineEdit()
-        self.manage_station_name_input.setPlaceholderText("例如：工位10")
-        form.addRow("所属项目", self.manage_station_project_combo)
-        form.addRow("工位名称", self.manage_station_name_input)
-        layout.addLayout(form)
-        add_btn = QPushButton("添加工位")
-        add_btn.clicked.connect(self.manage_add_station)
-        layout.addWidget(add_btn)
-        layout.addStretch(1)
-        self.refresh_manage_project_combos()
-        return page
-
-    def build_step_rule_manage_page(self) -> QWidget:
-        page = QWidget()
-        layout = QVBoxLayout(page)
-        note = QLabel("工序规则添加请先在主界面选择项目/工位，再打开“设置功能”维护该工位的扫码规则、螺丝数量和工序顺序。")
-        note.setWordWrap(True)
-        note.setStyleSheet("font-size: 18px; color: #374151;")
-        layout.addWidget(note)
-        open_settings_btn = QPushButton("打开设置功能")
-        open_settings_btn.clicked.connect(self.open_settings_dialog)
-        layout.addWidget(open_settings_btn)
-        layout.addStretch(1)
-        return page
-
-    def refresh_manage_project_combos(self):
-        if not hasattr(self, "manage_station_project_combo"):
-            return
-        self.manage_station_project_combo.clear()
-        self.manage_station_project_combo.addItems([project.name for project in self.projects])
-
-    def manage_add_project(self):
-        name = self.manage_project_name_input.text().strip()
-        if not name:
-            QMessageBox.warning(self, "提示", "项目名称不能为空")
-            return
-        if any(project.name == name for project in self.projects):
-            QMessageBox.warning(self, "提示", "项目名称已存在")
-            return
-        product = ProductConfig(f"{name} 默认产品 - 工位1", [ProcessStep("扫码首件条码", SCAN)])
-        project = ProjectConfig(name, [StationConfig("工位1", product)])
-        self.projects.append(project)
-        self.current_project = project
-        self.current_station = project.stations[0]
-        self.refresh_project_station_selectors()
-        self.refresh_manage_project_combos()
-        self.load_station(project.name, self.current_station.name)
-
-    def manage_add_station(self):
-        project_name = self.manage_station_project_combo.currentText()
-        station_name = self.manage_station_name_input.text().strip()
-        if not station_name:
-            QMessageBox.warning(self, "提示", "工位名称不能为空")
-            return
-        project = next((item for item in self.projects if item.name == project_name), None)
-        if project is None:
-            return
-        if any(station.name == station_name for station in project.stations):
-            QMessageBox.warning(self, "提示", "工位名称已存在")
-            return
-        product = ProductConfig(f"{project_name} 默认产品 - {station_name}", [ProcessStep("扫码首件条码", SCAN)])
-        project.stations.append(StationConfig(station_name, product))
-        self.current_project = project
-        self.current_station = project.stations[-1]
-        self.refresh_project_station_selectors()
-        self.load_station(project.name, station_name)
 
     def build_history_dialog(self):
         self.history_dialog = QDialog(self)

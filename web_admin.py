@@ -34,6 +34,7 @@ HTML = r"""<!doctype html>
     input, select { height: 38px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 15px; min-width: 160px; }
     button.primary { height: 38px; padding: 0 18px; border: 0; border-radius: 6px; background: #2563eb; color: white; font-size: 15px; font-weight: 700; cursor: pointer; }
     button.secondary { height: 38px; padding: 0 18px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; font-size: 15px; cursor: pointer; }
+    button.danger { height: 38px; padding: 0 18px; border: 0; border-radius: 6px; background: #dc2626; color: white; font-size: 15px; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; background: white; }
     th, td { border: 1px solid #e5e7eb; padding: 10px; text-align: left; font-size: 14px; }
     th { background: #f9fafb; }
@@ -45,9 +46,9 @@ HTML = r"""<!doctype html>
   <header><h1>生产工艺过程质量控制系统 - 管理后台</h1></header>
   <div class="layout">
     <nav>
-      <button class="tab active" data-page="projectPage">项目添加</button>
-      <button class="tab" data-page="stationPage">工位添加</button>
-      <button class="tab" data-page="stepPage">工序规则添加</button>
+      <button class="tab active" data-page="projectPage">项目管理</button>
+      <button class="tab" data-page="stationPage">工位管理</button>
+      <button class="tab" data-page="stepPage">工序规则管理</button>
       <button class="tab" data-page="recordPage">扫描记录查询</button>
     </nav>
     <main>
@@ -55,13 +56,16 @@ HTML = r"""<!doctype html>
 
       <section id="projectPage" class="page active">
         <div class="panel">
-          <h2>项目添加</h2>
+          <h2>项目管理</h2>
           <div class="toolbar">
+            <input id="projectId" type="hidden">
             <label>项目名称</label>
             <input id="projectName" placeholder="例如：X04C中控面板">
             <button class="primary" onclick="addProject()">添加项目</button>
+            <button class="primary" onclick="updateProject()">保存修改</button>
+            <button class="secondary" onclick="resetProjectForm()">取消编辑</button>
           </div>
-          <p class="hint">最大层级：项目。一个项目下面可以添加多个工位。</p>
+          <p class="hint">最大层级：项目。支持新增、修改、删除；删除项目会清理下属工位、工序和记录。</p>
         </div>
         <div class="panel">
           <h2>项目列表</h2>
@@ -74,13 +78,16 @@ HTML = r"""<!doctype html>
 
       <section id="stationPage" class="page">
         <div class="panel">
-          <h2>工位添加</h2>
+          <h2>工位管理</h2>
           <div class="toolbar">
+            <input id="stationId" type="hidden">
             <label>所属项目</label>
             <select id="stationProject"></select>
             <label>工位名称</label>
             <input id="stationName" placeholder="例如：工位1">
             <button class="primary" onclick="addStation()">添加工位</button>
+            <button class="primary" onclick="updateStation()">保存修改</button>
+            <button class="secondary" onclick="resetStationForm()">取消编辑</button>
           </div>
           <p class="hint">中间层级：工位。桌面端在线模式会按项目和工位下载对应工序。</p>
         </div>
@@ -95,7 +102,8 @@ HTML = r"""<!doctype html>
 
       <section id="stepPage" class="page">
         <div class="panel">
-          <h2>工序规则添加</h2>
+          <h2>工序规则管理</h2>
+          <input id="stepId" type="hidden">
           <div class="toolbar">
             <label>项目</label>
             <select id="stepProject" onchange="refreshStationOptions()"></select>
@@ -126,7 +134,9 @@ HTML = r"""<!doctype html>
             <input id="requiredCount" type="number" min="1" value="10">
           </div>
           <button class="primary" onclick="addStep()">添加工序规则</button>
-          <p class="hint">最小层级：工序规则。功能分为条码扫描和螺丝数量。</p>
+          <button class="primary" onclick="updateStep()">保存修改</button>
+          <button class="secondary" onclick="resetStepForm()">取消编辑</button>
+          <p class="hint">最小层级：工序规则。功能分为条码扫描和螺丝数量；顺序越小越先执行。</p>
         </div>
         <div class="panel">
           <h2>当前工位工序</h2>
@@ -142,6 +152,7 @@ HTML = r"""<!doctype html>
         <div class="panel">
           <h2>扫描记录查询</h2>
           <div class="toolbar">
+            <input id="recordId" type="hidden">
             <label>条码</label>
             <input id="recordBarcode" placeholder="支持模糊搜索">
             <label>开始时间</label>
@@ -149,6 +160,16 @@ HTML = r"""<!doctype html>
             <label>结束时间</label>
             <input id="recordEnd" type="datetime-local">
             <button class="primary" onclick="loadRecords()">查询</button>
+          </div>
+          <div class="toolbar">
+            <label>修改条码</label>
+            <input id="recordEditBarcode" placeholder="选择记录后修改">
+            <label>结果</label>
+            <input id="recordEditResult" placeholder="完成 / 扫码错误">
+            <label>说明</label>
+            <input id="recordEditNote" placeholder="记录说明">
+            <button class="primary" onclick="updateRecord()">保存记录修改</button>
+            <button class="secondary" onclick="resetRecordForm()">取消编辑</button>
           </div>
           <table>
             <thead><tr><th>时间</th><th>项目</th><th>工位</th><th>条码</th><th>工序</th><th>结果</th><th>说明</th><th>操作</th></tr></thead>
@@ -174,6 +195,16 @@ HTML = r"""<!doctype html>
       return data;
     }
 
+    function htmlEscape(value) {
+      return String(value ?? "").replace(/[&<>"']/g, ch => ({
+        "&": "&amp;",
+        "<": "&lt;",
+        ">": "&gt;",
+        '"': "&quot;",
+        "'": "&#39;"
+      }[ch]));
+    }
+
     document.querySelectorAll(".tab").forEach(btn => {
       btn.addEventListener("click", () => {
         document.querySelectorAll(".tab").forEach(item => item.classList.remove("active"));
@@ -194,7 +225,7 @@ HTML = r"""<!doctype html>
 
     function renderProjects() {
       const rows = fullData.projects.map(project =>
-        `<tr><td>${project.id}</td><td>${project.name}</td><td>${project.stations.length}</td><td>${project.created_at}</td><td><button class="secondary" onclick="deleteProject(${project.id}, '${project.name}')">删除</button></td></tr>`
+        `<tr><td>${project.id}</td><td>${htmlEscape(project.name)}</td><td>${project.stations.length}</td><td>${project.created_at}</td><td><button class="secondary" onclick="editProject(${project.id})">编辑</button> <button class="danger" onclick="deleteProject(${project.id})">删除</button></td></tr>`
       ).join("");
       document.getElementById("projectRows").innerHTML = rows || `<tr><td colspan="5">暂无项目</td></tr>`;
     }
@@ -202,7 +233,7 @@ HTML = r"""<!doctype html>
     function renderStations() {
       const rows = fullData.projects.flatMap(project =>
         project.stations.map(station =>
-          `<tr><td>${project.name}</td><td>${station.name}</td><td>${station.created_at}</td><td><button class="secondary" onclick="deleteStation(${station.id}, '${station.name}')">删除</button></td></tr>`
+          `<tr><td>${htmlEscape(project.name)}</td><td>${htmlEscape(station.name)}</td><td>${station.created_at}</td><td><button class="secondary" onclick="editStation(${station.id})">编辑</button> <button class="danger" onclick="deleteStation(${station.id})">删除</button></td></tr>`
         )
       ).join("");
       document.getElementById("stationRows").innerHTML = rows || `<tr><td colspan="4">暂无工位</td></tr>`;
@@ -238,6 +269,34 @@ HTML = r"""<!doctype html>
       refreshAll();
     }
 
+    function editProject(id) {
+      const project = fullData.projects.find(item => item.id === id);
+      if (!project) return;
+      document.getElementById("projectId").value = project.id;
+      document.getElementById("projectName").value = project.name;
+      showStatus("正在编辑项目");
+    }
+
+    function resetProjectForm() {
+      document.getElementById("projectId").value = "";
+      document.getElementById("projectName").value = "";
+    }
+
+    async function updateProject() {
+      const id = document.getElementById("projectId").value;
+      const name = document.getElementById("projectName").value.trim();
+      if (!id) return showStatus("请先在项目列表点击编辑");
+      if (!name) return showStatus("项目名称不能为空");
+      await api(`/api/projects/${id}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({name})
+      });
+      resetProjectForm();
+      showStatus("项目已修改");
+      refreshAll();
+    }
+
     async function addStation() {
       const project_id = Number(document.getElementById("stationProject").value);
       const name = document.getElementById("stationName").value.trim();
@@ -249,6 +308,44 @@ HTML = r"""<!doctype html>
       });
       document.getElementById("stationName").value = "";
       showStatus("工位已添加");
+      refreshAll();
+    }
+
+    function findStation(id) {
+      for (const project of fullData.projects) {
+        const station = project.stations.find(item => item.id === id);
+        if (station) return {project, station};
+      }
+      return {};
+    }
+
+    function editStation(id) {
+      const {project, station} = findStation(id);
+      if (!station) return;
+      document.getElementById("stationId").value = station.id;
+      document.getElementById("stationProject").value = project.id;
+      document.getElementById("stationName").value = station.name;
+      showStatus("正在编辑工位");
+    }
+
+    function resetStationForm() {
+      document.getElementById("stationId").value = "";
+      document.getElementById("stationName").value = "";
+    }
+
+    async function updateStation() {
+      const id = document.getElementById("stationId").value;
+      const project_id = Number(document.getElementById("stationProject").value);
+      const name = document.getElementById("stationName").value.trim();
+      if (!id) return showStatus("请先在工位列表点击编辑");
+      if (!name) return showStatus("工位名称不能为空");
+      await api(`/api/stations/${id}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({project_id, name})
+      });
+      resetStationForm();
+      showStatus("工位已修改");
       refreshAll();
     }
 
@@ -282,15 +379,69 @@ HTML = r"""<!doctype html>
       refreshAll();
     }
 
+    function stepPayload() {
+      const type = document.getElementById("stepType").value;
+      return {
+        station_id: Number(document.getElementById("stepStation").value),
+        name: document.getElementById("stepName").value.trim(),
+        type,
+        step_order: Number(document.getElementById("stepOrder").value || 1),
+        required_count: type === "螺丝" ? Number(document.getElementById("requiredCount").value || 0) : 0,
+        barcode_start: Number(document.getElementById("barcodeStart").value || 1),
+        barcode_end: Number(document.getElementById("barcodeEnd").value || 7),
+        expected_content: document.getElementById("expectedContent").value.trim()
+      };
+    }
+
+    function fillStepForm(step) {
+      document.getElementById("stepId").value = step.id || "";
+      document.getElementById("stepName").value = step.name || "";
+      document.getElementById("stepType").value = step.type || "扫码";
+      document.getElementById("stepOrder").value = step.step_order || 1;
+      document.getElementById("requiredCount").value = step.required_count || 10;
+      document.getElementById("barcodeStart").value = step.barcode_start || 1;
+      document.getElementById("barcodeEnd").value = step.barcode_end || 7;
+      document.getElementById("expectedContent").value = step.expected_content || "";
+      toggleStepFields();
+    }
+
+    function resetStepForm() {
+      fillStepForm({type: "扫码", step_order: 1, required_count: 10, barcode_start: 1, barcode_end: 7});
+    }
+
+    async function editStep(id) {
+      const stationId = Number(document.getElementById("stepStation").value);
+      const data = await api(`/api/stations/${stationId}/steps`);
+      const step = data.steps.find(item => item.id === id);
+      if (!step) return;
+      fillStepForm(step);
+      showStatus("正在编辑工序规则");
+    }
+
+    async function updateStep() {
+      const id = document.getElementById("stepId").value;
+      if (!id) return showStatus("请先在工序列表点击编辑");
+      const payload = stepPayload();
+      if (!payload.name) return showStatus("工序名称不能为空");
+      await api(`/api/steps/${id}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify(payload)
+      });
+      resetStepForm();
+      showStatus("工序规则已修改");
+      refreshAll();
+    }
+
     async function loadSteps() {
       const stationId = Number(document.getElementById("stepStation").value);
       if (!stationId) {
-        document.getElementById("stepRows").innerHTML = `<tr><td colspan="6">请选择工位</td></tr>`;
+        document.getElementById("stepRows").innerHTML = `<tr><td colspan="7">请选择工位</td></tr>`;
         return;
       }
       const data = await api(`/api/stations/${stationId}/steps`);
       document.getElementById("stepRows").innerHTML = data.steps.map(step =>
-        `<tr><td>${step.step_order}</td><td>${step.name}</td><td>${step.type}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${step.expected_content || ""}</td><td><button class="secondary" onclick="deleteStep(${step.id}, '${step.name}')">删除</button></td></tr>`
+        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${step.type}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${htmlEscape(step.expected_content || "")}</td><td><button class="secondary" onclick="editStep(${step.id})">编辑</button> <button class="danger" onclick="deleteStep(${step.id})">删除</button></td></tr>`
       ).join("") || `<tr><td colspan="7">暂无工序</td></tr>`;
     }
 
@@ -304,29 +455,74 @@ HTML = r"""<!doctype html>
       if (end) params.set("end", end);
       const data = await api(`/api/scan-records?${params.toString()}`);
       document.getElementById("recordRows").innerHTML = data.records.map(record =>
-        `<tr><td>${record.created_at}</td><td>${record.project}</td><td>${record.station}</td><td>${record.barcode}</td><td>${record.step || ""}</td><td>${record.result}</td><td>${record.note || ""}</td><td><button class="secondary" onclick="deleteRecord(${record.id})">删除</button></td></tr>`
+        `<tr><td>${record.created_at}</td><td>${htmlEscape(record.project)}</td><td>${htmlEscape(record.station)}</td><td>${htmlEscape(record.barcode)}</td><td>${htmlEscape(record.step || "")}</td><td>${htmlEscape(record.result)}</td><td>${htmlEscape(record.note || "")}</td><td><button class="secondary" onclick="editRecord(${record.id})">编辑</button> <button class="danger" onclick="deleteRecord(${record.id})">删除</button></td></tr>`
       ).join("") || `<tr><td colspan="8">暂无记录</td></tr>`;
     }
 
-    async function deleteProject(id, name) {
+    async function deleteProject(id) {
+      const project = fullData.projects.find(item => item.id === id);
+      const name = project ? project.name : id;
       if (!confirm(`确定删除项目“${name}”吗？该项目下的工位、工序和记录也会删除。`)) return;
       await api(`/api/projects/${id}`, {method: "DELETE"});
       showStatus("项目已删除");
       refreshAll();
     }
 
-    async function deleteStation(id, name) {
+    async function deleteStation(id) {
+      const {station} = findStation(id);
+      const name = station ? station.name : id;
       if (!confirm(`确定删除工位“${name}”吗？该工位下的工序和记录也会删除。`)) return;
       await api(`/api/stations/${id}`, {method: "DELETE"});
       showStatus("工位已删除");
       refreshAll();
     }
 
-    async function deleteStep(id, name) {
+    async function deleteStep(id) {
+      const stationId = Number(document.getElementById("stepStation").value);
+      const data = await api(`/api/stations/${stationId}/steps`);
+      const step = data.steps.find(item => item.id === id);
+      const name = step ? step.name : id;
       if (!confirm(`确定删除工序“${name}”吗？`)) return;
       await api(`/api/steps/${id}`, {method: "DELETE"});
       showStatus("工序已删除");
       refreshAll();
+    }
+
+    function resetRecordForm() {
+      document.getElementById("recordId").value = "";
+      document.getElementById("recordEditBarcode").value = "";
+      document.getElementById("recordEditResult").value = "";
+      document.getElementById("recordEditNote").value = "";
+    }
+
+    async function editRecord(id) {
+      const params = new URLSearchParams();
+      params.set("id", id);
+      const data = await api(`/api/scan-records?${params.toString()}`);
+      const record = data.records[0];
+      if (!record) return;
+      document.getElementById("recordId").value = record.id;
+      document.getElementById("recordEditBarcode").value = record.barcode;
+      document.getElementById("recordEditResult").value = record.result;
+      document.getElementById("recordEditNote").value = record.note || "";
+      showStatus("正在编辑扫描记录");
+    }
+
+    async function updateRecord() {
+      const id = document.getElementById("recordId").value;
+      if (!id) return showStatus("请先在记录列表点击编辑");
+      await api(`/api/scan-records/${id}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          barcode: document.getElementById("recordEditBarcode").value.trim(),
+          result: document.getElementById("recordEditResult").value.trim(),
+          note: document.getElementById("recordEditNote").value.trim()
+        })
+      });
+      resetRecordForm();
+      showStatus("扫描记录已修改");
+      loadRecords();
     }
 
     async function deleteRecord(id) {
@@ -443,7 +639,7 @@ def json_response(handler, payload, status=200):
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Access-Control-Allow-Origin", "*")
-    handler.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+    handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
@@ -479,6 +675,14 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             self.route_post()
+        except sqlite3.IntegrityError as exc:
+            json_response(self, {"error": f"数据重复或不合法：{exc}"}, 400)
+        except Exception as exc:
+            json_response(self, {"error": str(exc)}, 500)
+
+    def do_PUT(self):
+        try:
+            self.route_put()
         except sqlite3.IntegrityError as exc:
             json_response(self, {"error": f"数据重复或不合法：{exc}"}, 400)
         except Exception as exc:
@@ -525,6 +729,21 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, add_station_completion(payload))
         elif path == "/api/scan-records":
             json_response(self, add_scan_record(payload))
+        else:
+            json_response(self, {"error": "not found"}, 404)
+
+    def route_put(self):
+        path = urlparse(self.path).path
+        payload = read_json(self)
+        parts = path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "projects":
+            json_response(self, update_project(int(parts[2]), payload))
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "stations":
+            json_response(self, update_station(int(parts[2]), payload))
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "steps":
+            json_response(self, update_step(int(parts[2]), payload))
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "scan-records":
+            json_response(self, update_scan_record(int(parts[2]), payload))
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -583,6 +802,15 @@ def add_project(payload):
         return {"id": cursor.lastrowid, "name": name}
 
 
+def update_project(project_id, payload):
+    name = payload.get("name", "").strip()
+    if not name:
+        raise ValueError("项目名称不能为空")
+    with get_conn() as conn:
+        conn.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+    return {"ok": True}
+
+
 def add_station(payload):
     project_id = int(payload.get("project_id", 0))
     name = payload.get("name", "").strip()
@@ -594,6 +822,19 @@ def add_station(payload):
             (project_id, name, now_text()),
         )
         return {"id": cursor.lastrowid, "name": name}
+
+
+def update_station(station_id, payload):
+    project_id = int(payload.get("project_id", 0))
+    name = payload.get("name", "").strip()
+    if not project_id or not name:
+        raise ValueError("项目和工位名称不能为空")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE stations SET project_id = ?, name = ? WHERE id = ?",
+            (project_id, name, station_id),
+        )
+    return {"ok": True}
 
 
 def delete_project(project_id):
@@ -652,6 +893,37 @@ def add_step(payload):
             ),
         )
         return {"id": cursor.lastrowid}
+
+
+def update_step(step_id, payload):
+    name = payload.get("name", "").strip()
+    step_type = payload.get("type", "扫码")
+    station_id = int(payload.get("station_id", 0))
+    if not station_id or not name:
+        raise ValueError("工位和工序名称不能为空")
+    if step_type not in ("扫码", "螺丝"):
+        raise ValueError("功能只能是扫码或螺丝")
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE steps
+            SET station_id = ?, step_order = ?, name = ?, type = ?, required_count = ?,
+                barcode_start = ?, barcode_end = ?, expected_content = ?
+            WHERE id = ?
+            """,
+            (
+                station_id,
+                int(payload.get("step_order", 1)),
+                name,
+                step_type,
+                int(payload.get("required_count", 0)),
+                int(payload.get("barcode_start", 1)),
+                int(payload.get("barcode_end", 7)),
+                payload.get("expected_content", ""),
+                step_id,
+            ),
+        )
+    return {"ok": True}
 
 
 def list_steps(station_id):
@@ -785,12 +1057,29 @@ def add_scan_record(payload):
     return {"ok": True}
 
 
+def update_scan_record(record_id, payload):
+    barcode = payload.get("barcode", "").strip()
+    result = payload.get("result", "").strip()
+    note = payload.get("note", "")
+    if not barcode:
+        raise ValueError("条码不能为空")
+    if not result:
+        raise ValueError("结果不能为空")
+    with get_conn() as conn:
+        conn.execute(
+            "UPDATE scan_records SET barcode = ?, result = ?, note = ? WHERE id = ?",
+            (barcode, result, note, record_id),
+        )
+    return {"ok": True}
+
+
 def delete_scan_record(record_id):
     with get_conn() as conn:
         conn.execute("DELETE FROM scan_records WHERE id = ?", (record_id,))
 
 
 def list_scan_records(query):
+    record_id = query.get("id", [""])[0]
     barcode = query.get("barcode", [""])[0]
     start = query.get("start", [""])[0]
     end = query.get("end", [""])[0]
@@ -802,6 +1091,9 @@ def list_scan_records(query):
         WHERE 1=1
     """
     params = []
+    if record_id:
+        sql += " AND scan_records.id = ?"
+        params.append(record_id)
     if barcode:
         sql += " AND scan_records.barcode LIKE ?"
         params.append(f"%{barcode}%")
