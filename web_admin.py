@@ -25,9 +25,12 @@ HTML = r"""<!doctype html>
     nav button { width: 100%; display: block; text-align: left; padding: 14px 16px; border: 0; border-radius: 6px; background: transparent; font-size: 17px; cursor: pointer; }
     nav button.active { background: #2563eb; color: white; font-weight: 700; }
     .tree-title { margin: 18px 0 8px; color: #374151; font-weight: 700; }
-    .tree-node { padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1.3; }
+    .tree-node { display: flex; align-items: center; gap: 6px; padding: 8px 10px; border-radius: 6px; cursor: pointer; font-size: 14px; line-height: 1.3; }
     .tree-node:hover { background: #eff6ff; }
     .tree-node.active { background: #2563eb; color: white; font-weight: 700; }
+    .tree-toggle { display: inline-flex; align-items: center; justify-content: center; width: 18px; height: 18px; border: 1px solid #9ca3af; border-radius: 3px; background: white; color: #111827; font-weight: 700; font-family: monospace; flex: 0 0 18px; }
+    .tree-spacer { width: 18px; flex: 0 0 18px; }
+    .tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tree-project { margin-top: 6px; }
     .tree-station { margin-left: 14px; }
     .tree-step { margin-left: 28px; color: #4b5563; }
@@ -194,6 +197,8 @@ HTML = r"""<!doctype html>
     let fullData = {projects: []};
     let selectedProjectId = null;
     let selectedStationId = null;
+    const expandedProjects = new Set();
+    const expandedStations = new Set();
 
     function showStatus(text) {
       document.getElementById("status").textContent = text || "";
@@ -248,11 +253,13 @@ HTML = r"""<!doctype html>
         project = fullData.projects[0];
         selectedProjectId = project.id;
       }
+      expandedProjects.add(selectedProjectId);
       let station = project.stations.find(item => item.id === selectedStationId);
       if (!station) {
         station = project.stations[0] || null;
         selectedStationId = station ? station.id : null;
       }
+      if (selectedStationId) expandedStations.add(selectedStationId);
     }
 
     function currentProject() {
@@ -271,8 +278,10 @@ HTML = r"""<!doctype html>
 
     function selectProject(id) {
       selectedProjectId = id;
+      expandedProjects.add(id);
       const project = currentProject();
       selectedStationId = project && project.stations[0] ? project.stations[0].id : null;
+      if (selectedStationId) expandedStations.add(selectedStationId);
       resetProjectForm();
       resetStationForm();
       resetStepForm();
@@ -287,6 +296,8 @@ HTML = r"""<!doctype html>
     function selectStation(projectId, stationId) {
       selectedProjectId = projectId;
       selectedStationId = stationId;
+      expandedProjects.add(projectId);
+      expandedStations.add(stationId);
       resetStationForm();
       resetStepForm();
       renderMenuTree();
@@ -300,6 +311,8 @@ HTML = r"""<!doctype html>
     function selectStep(projectId, stationId, stepId) {
       selectedProjectId = projectId;
       selectedStationId = stationId;
+      expandedProjects.add(projectId);
+      expandedStations.add(stationId);
       renderMenuTree();
       refreshProjectOptions();
       refreshStationOptions();
@@ -307,18 +320,37 @@ HTML = r"""<!doctype html>
       setActivePage("stepPage");
     }
 
+    function toggleProject(event, projectId) {
+      event.stopPropagation();
+      if (expandedProjects.has(projectId)) expandedProjects.delete(projectId);
+      else expandedProjects.add(projectId);
+      renderMenuTree();
+    }
+
+    function toggleStation(event, projectId, stationId) {
+      event.stopPropagation();
+      expandedProjects.add(projectId);
+      if (expandedStations.has(stationId)) expandedStations.delete(stationId);
+      else expandedStations.add(stationId);
+      renderMenuTree();
+    }
+
     function renderMenuTree() {
       const tree = fullData.projects.map(project => {
         const projectActive = project.id === selectedProjectId;
+        const projectExpanded = expandedProjects.has(project.id);
+        const projectSign = projectExpanded ? "-" : "+";
         const stationHtml = project.stations.map(station => {
           const stationActive = station.id === selectedStationId;
+          const stationExpanded = expandedStations.has(station.id);
+          const stationSign = stationExpanded ? "-" : "+";
           const steps = station.steps || [];
           const stepHtml = steps.map(step =>
-            `<div class="tree-node tree-step" onclick="selectStep(${project.id}, ${station.id}, ${step.id})">规则：${htmlEscape(step.name)}</div>`
+            `<div class="tree-node tree-step" onclick="selectStep(${project.id}, ${station.id}, ${step.id})"><span class="tree-spacer"></span><span class="tree-label">规则：${htmlEscape(step.name)}</span></div>`
           ).join("");
-          return `<div class="tree-node tree-station ${stationActive ? "active" : ""}" onclick="selectStation(${project.id}, ${station.id})">工位：${htmlEscape(station.name)}</div>${stationActive ? stepHtml : ""}`;
+          return `<div class="tree-node tree-station ${stationActive ? "active" : ""}" onclick="selectStation(${project.id}, ${station.id})"><span class="tree-toggle" onclick="toggleStation(event, ${project.id}, ${station.id})">${stationSign}</span><span class="tree-label">工位：${htmlEscape(station.name)}</span></div>${stationExpanded ? stepHtml : ""}`;
         }).join("");
-        return `<div class="tree-node tree-project ${projectActive ? "active" : ""}" onclick="selectProject(${project.id})">项目：${htmlEscape(project.name)}</div>${projectActive ? stationHtml : ""}`;
+        return `<div class="tree-node tree-project ${projectActive ? "active" : ""}" onclick="selectProject(${project.id})"><span class="tree-toggle" onclick="toggleProject(event, ${project.id})">${projectSign}</span><span class="tree-label">项目：${htmlEscape(project.name)}</span></div>${projectExpanded ? stationHtml : ""}`;
       }).join("");
       document.getElementById("menuTree").innerHTML = tree || `<div class="hint">暂无项目</div>`;
       const project = currentProject();
@@ -388,7 +420,10 @@ HTML = r"""<!doctype html>
       showStatus("项目已添加");
       await refreshAll();
       const project = fullData.projects.find(item => item.name === name);
-      if (project) selectProject(project.id);
+      if (project) {
+        expandedProjects.add(project.id);
+        selectProject(project.id);
+      }
     }
 
     function editProject(id) {
@@ -439,7 +474,11 @@ HTML = r"""<!doctype html>
       await refreshAll();
       const project = fullData.projects.find(item => item.id === project_id);
       const station = project ? project.stations.find(item => item.name === name) : null;
-      if (station) selectStation(project_id, station.id);
+      if (station) {
+        expandedProjects.add(project_id);
+        expandedStations.add(station.id);
+        selectStation(project_id, station.id);
+      }
     }
 
     function findStation(id) {
@@ -501,6 +540,7 @@ HTML = r"""<!doctype html>
       });
       document.getElementById("stepName").value = "";
       showStatus("工序规则已添加");
+      expandedStations.add(payload.station_id);
       refreshAll();
     }
 
@@ -555,6 +595,7 @@ HTML = r"""<!doctype html>
       });
       resetStepForm();
       showStatus("工序规则已修改");
+      expandedStations.add(payload.station_id);
       refreshAll();
     }
 
