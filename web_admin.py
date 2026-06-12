@@ -66,7 +66,7 @@ HTML = r"""<!doctype html>
         <div class="panel">
           <h2>项目列表</h2>
           <table>
-            <thead><tr><th>ID</th><th>项目名称</th><th>工位数量</th><th>创建时间</th></tr></thead>
+            <thead><tr><th>ID</th><th>项目名称</th><th>工位数量</th><th>创建时间</th><th>操作</th></tr></thead>
             <tbody id="projectRows"></tbody>
           </table>
         </div>
@@ -87,7 +87,7 @@ HTML = r"""<!doctype html>
         <div class="panel">
           <h2>工位列表</h2>
           <table>
-            <thead><tr><th>项目</th><th>工位</th><th>创建时间</th></tr></thead>
+            <thead><tr><th>项目</th><th>工位</th><th>创建时间</th><th>操作</th></tr></thead>
             <tbody id="stationRows"></tbody>
           </table>
         </div>
@@ -132,7 +132,7 @@ HTML = r"""<!doctype html>
           <h2>当前工位工序</h2>
           <button class="secondary" onclick="loadSteps()">刷新工序</button>
           <table>
-            <thead><tr><th>顺序</th><th>工序名称</th><th>功能</th><th>螺丝数量</th><th>截取位</th><th>检测内容</th></tr></thead>
+            <thead><tr><th>顺序</th><th>工序名称</th><th>功能</th><th>螺丝数量</th><th>截取位</th><th>检测内容</th><th>操作</th></tr></thead>
             <tbody id="stepRows"></tbody>
           </table>
         </div>
@@ -151,7 +151,7 @@ HTML = r"""<!doctype html>
             <button class="primary" onclick="loadRecords()">查询</button>
           </div>
           <table>
-            <thead><tr><th>时间</th><th>项目</th><th>工位</th><th>条码</th><th>工序</th><th>结果</th><th>说明</th></tr></thead>
+            <thead><tr><th>时间</th><th>项目</th><th>工位</th><th>条码</th><th>工序</th><th>结果</th><th>说明</th><th>操作</th></tr></thead>
             <tbody id="recordRows"></tbody>
           </table>
         </div>
@@ -194,18 +194,18 @@ HTML = r"""<!doctype html>
 
     function renderProjects() {
       const rows = fullData.projects.map(project =>
-        `<tr><td>${project.id}</td><td>${project.name}</td><td>${project.stations.length}</td><td>${project.created_at}</td></tr>`
+        `<tr><td>${project.id}</td><td>${project.name}</td><td>${project.stations.length}</td><td>${project.created_at}</td><td><button class="secondary" onclick="deleteProject(${project.id}, '${project.name}')">删除</button></td></tr>`
       ).join("");
-      document.getElementById("projectRows").innerHTML = rows || `<tr><td colspan="4">暂无项目</td></tr>`;
+      document.getElementById("projectRows").innerHTML = rows || `<tr><td colspan="5">暂无项目</td></tr>`;
     }
 
     function renderStations() {
       const rows = fullData.projects.flatMap(project =>
         project.stations.map(station =>
-          `<tr><td>${project.name}</td><td>${station.name}</td><td>${station.created_at}</td></tr>`
+          `<tr><td>${project.name}</td><td>${station.name}</td><td>${station.created_at}</td><td><button class="secondary" onclick="deleteStation(${station.id}, '${station.name}')">删除</button></td></tr>`
         )
       ).join("");
-      document.getElementById("stationRows").innerHTML = rows || `<tr><td colspan="3">暂无工位</td></tr>`;
+      document.getElementById("stationRows").innerHTML = rows || `<tr><td colspan="4">暂无工位</td></tr>`;
     }
 
     function refreshProjectOptions() {
@@ -290,8 +290,8 @@ HTML = r"""<!doctype html>
       }
       const data = await api(`/api/stations/${stationId}/steps`);
       document.getElementById("stepRows").innerHTML = data.steps.map(step =>
-        `<tr><td>${step.step_order}</td><td>${step.name}</td><td>${step.type}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${step.expected_content || ""}</td></tr>`
-      ).join("") || `<tr><td colspan="6">暂无工序</td></tr>`;
+        `<tr><td>${step.step_order}</td><td>${step.name}</td><td>${step.type}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${step.expected_content || ""}</td><td><button class="secondary" onclick="deleteStep(${step.id}, '${step.name}')">删除</button></td></tr>`
+      ).join("") || `<tr><td colspan="7">暂无工序</td></tr>`;
     }
 
     async function loadRecords() {
@@ -304,8 +304,36 @@ HTML = r"""<!doctype html>
       if (end) params.set("end", end);
       const data = await api(`/api/scan-records?${params.toString()}`);
       document.getElementById("recordRows").innerHTML = data.records.map(record =>
-        `<tr><td>${record.created_at}</td><td>${record.project}</td><td>${record.station}</td><td>${record.barcode}</td><td>${record.step || ""}</td><td>${record.result}</td><td>${record.note || ""}</td></tr>`
-      ).join("") || `<tr><td colspan="7">暂无记录</td></tr>`;
+        `<tr><td>${record.created_at}</td><td>${record.project}</td><td>${record.station}</td><td>${record.barcode}</td><td>${record.step || ""}</td><td>${record.result}</td><td>${record.note || ""}</td><td><button class="secondary" onclick="deleteRecord(${record.id})">删除</button></td></tr>`
+      ).join("") || `<tr><td colspan="8">暂无记录</td></tr>`;
+    }
+
+    async function deleteProject(id, name) {
+      if (!confirm(`确定删除项目“${name}”吗？该项目下的工位、工序和记录也会删除。`)) return;
+      await api(`/api/projects/${id}`, {method: "DELETE"});
+      showStatus("项目已删除");
+      refreshAll();
+    }
+
+    async function deleteStation(id, name) {
+      if (!confirm(`确定删除工位“${name}”吗？该工位下的工序和记录也会删除。`)) return;
+      await api(`/api/stations/${id}`, {method: "DELETE"});
+      showStatus("工位已删除");
+      refreshAll();
+    }
+
+    async function deleteStep(id, name) {
+      if (!confirm(`确定删除工序“${name}”吗？`)) return;
+      await api(`/api/steps/${id}`, {method: "DELETE"});
+      showStatus("工序已删除");
+      refreshAll();
+    }
+
+    async function deleteRecord(id) {
+      if (!confirm("确定删除这条扫描记录吗？")) return;
+      await api(`/api/scan-records/${id}`, {method: "DELETE"});
+      showStatus("记录已删除");
+      loadRecords();
     }
 
     refreshAll().catch(err => showStatus(err.message));
@@ -456,6 +484,12 @@ class AdminHandler(BaseHTTPRequestHandler):
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 
+    def do_DELETE(self):
+        try:
+            self.route_delete()
+        except Exception as exc:
+            json_response(self, {"error": str(exc)}, 500)
+
     def route_get(self):
         parsed = urlparse(self.path)
         path = parsed.path
@@ -491,6 +525,24 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, add_station_completion(payload))
         elif path == "/api/scan-records":
             json_response(self, add_scan_record(payload))
+        else:
+            json_response(self, {"error": "not found"}, 404)
+
+    def route_delete(self):
+        path = urlparse(self.path).path
+        parts = path.strip("/").split("/")
+        if len(parts) == 3 and parts[0] == "api" and parts[1] == "projects":
+            delete_project(int(parts[2]))
+            json_response(self, {"ok": True})
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "stations":
+            delete_station(int(parts[2]))
+            json_response(self, {"ok": True})
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "steps":
+            delete_step(int(parts[2]))
+            json_response(self, {"ok": True})
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "scan-records":
+            delete_scan_record(int(parts[2]))
+            json_response(self, {"ok": True})
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -542,6 +594,34 @@ def add_station(payload):
             (project_id, name, now_text()),
         )
         return {"id": cursor.lastrowid, "name": name}
+
+
+def delete_project(project_id):
+    with get_conn() as conn:
+        station_rows = conn.execute("SELECT id FROM stations WHERE project_id = ?", (project_id,)).fetchall()
+        station_ids = [row["id"] for row in station_rows]
+        for station_id in station_ids:
+            delete_station_with_conn(conn, station_id)
+        conn.execute("DELETE FROM scan_records WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM station_completions WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+
+
+def delete_station(station_id):
+    with get_conn() as conn:
+        delete_station_with_conn(conn, station_id)
+
+
+def delete_station_with_conn(conn, station_id):
+    conn.execute("DELETE FROM steps WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM scan_records WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM station_completions WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM stations WHERE id = ?", (station_id,))
+
+
+def delete_step(step_id):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM steps WHERE id = ?", (step_id,))
 
 
 def add_step(payload):
@@ -705,6 +785,11 @@ def add_scan_record(payload):
     return {"ok": True}
 
 
+def delete_scan_record(record_id):
+    with get_conn() as conn:
+        conn.execute("DELETE FROM scan_records WHERE id = ?", (record_id,))
+
+
 def list_scan_records(query):
     barcode = query.get("barcode", [""])[0]
     start = query.get("start", [""])[0]
@@ -731,6 +816,7 @@ def list_scan_records(query):
         rows = conn.execute(sql, params).fetchall()
     return [
         {
+            "id": row["id"],
             "created_at": row["created_at"],
             "project": row["project"] or "",
             "station": row["station"] or "",
