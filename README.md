@@ -19,6 +19,20 @@ pip3 install PyQt5
 python3 main.py
 ```
 
+## 模块结构
+
+```text
+main.py                         桌面端启动入口
+desktop_app/window.py           PyQt5 主窗口和界面流程
+desktop_app/tool_client.py      螺钉枪 Modbus TCP 通讯
+shared/models.py                项目、工位、产品、工序共享数据模型
+web_admin.py                    网页管理端启动入口
+web_admin_app/server.py         HTTP 路由和接口响应
+web_admin_app/services.py       项目/工位/工序/记录增删改查业务
+web_admin_app/database.py       SQLite 数据库连接、建表和初始化数据
+web_admin_app/admin_page.py     网页管理端前端页面模板
+```
+
 ## 网页端管理后台
 
 启动后端和管理页面：
