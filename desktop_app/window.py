@@ -11,6 +11,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QCheckBox,
     QComboBox,
     QDateEdit,
     QDateTimeEdit,
@@ -117,6 +118,9 @@ class QualityControlWindow(QMainWindow):
         sync_projects_btn.clicked.connect(self.sync_online_projects)
         download_btn = QPushButton("下载配置")
         download_btn.clicked.connect(self.download_online_config)
+        self.degraded_mode_checkbox = QCheckBox("降级模式（跳过上道工位校验）")
+        self.degraded_mode_checkbox.setToolTip("勾选后不检查上道工位是否完成，只检测当前工位自己的工序")
+        self.degraded_mode_checkbox.stateChanged.connect(self.change_degraded_mode)
         for label_text, widget in [
             ("模式", self.mode_combo),
             ("接口", self.api_base_input),
@@ -127,6 +131,8 @@ class QualityControlWindow(QMainWindow):
             mode_layout.addWidget(widget)
         mode_layout.addWidget(sync_projects_btn)
         mode_layout.addWidget(download_btn)
+        mode_layout.addStretch(1)
+        mode_layout.addWidget(self.degraded_mode_checkbox)
         root_layout.addWidget(mode_box)
 
         content = QHBoxLayout()
@@ -326,6 +332,12 @@ class QualityControlWindow(QMainWindow):
     def change_mode(self, text: str):
         self.online_mode = text == "在线模式"
         self.message_label.setText("在线模式：请先下载配置" if self.online_mode else "离线模式：使用本地配置")
+
+    def change_degraded_mode(self):
+        if self.degraded_mode_checkbox.isChecked():
+            self.message_label.setText("降级模式已开启：不检查上道工位，只检测当前工位")
+        else:
+            self.message_label.setText("降级模式已关闭")
 
     def refresh_project_station_selectors(self):
         self.project_combo.blockSignals(True)
@@ -681,7 +693,7 @@ class QualityControlWindow(QMainWindow):
             return
 
         if not self.current_barcode:
-            if self.online_mode and not self.verify_previous_station_complete(barcode):
+            if self.should_check_previous_station() and not self.verify_previous_station_complete(barcode):
                 return
             self.current_barcode = barcode
 
@@ -812,6 +824,9 @@ class QualityControlWindow(QMainWindow):
         self.message_label.setText(message)
         self.show_auto_close_warning("前工位未完成", message)
         return False
+
+    def should_check_previous_station(self) -> bool:
+        return self.online_mode and not self.degraded_mode_checkbox.isChecked()
 
     def report_station_complete(self):
         if not self.online_mode or not self.current_barcode:
