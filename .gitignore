@@ -1,6 +1,8 @@
 __pycache__/
+.DS_Store
 *.pyc
 quality_control.db
 dist/
 build/
 *.spec
+offline_wheels/

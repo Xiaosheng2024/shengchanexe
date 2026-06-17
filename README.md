@@ -41,6 +41,12 @@ web_admin_app/admin_page.py     网页管理端前端页面模板
 python3 web_admin.py
 ```
 
+Windows 上也可以一条命令启动网页服务：
+
+```bat
+deploy\start_web_service.bat
+```
+
 浏览器打开：
 
 ```text
@@ -63,6 +69,38 @@ http://127.0.0.1:8000
 
 ```text
 http://127.0.0.1:8000
+```
+
+## 离线部署
+
+客户现场无法访问外网时，先在开发电脑执行：
+
+```bat
+deploy\download_offline_deps.bat
+```
+
+然后把整个项目目录复制到 U 盘，再复制到客户电脑。客户电脑执行：
+
+```bat
+deploy\install_offline_deps.bat
+```
+
+启动网页服务：
+
+```bat
+deploy\start_web_service.bat
+```
+
+同时启动网页服务和桌面端：
+
+```bat
+deploy\start_all.bat
+```
+
+详细说明见：
+
+```text
+deploy\README_OFFLINE.md
 ```
 
 ## Windows 打包
