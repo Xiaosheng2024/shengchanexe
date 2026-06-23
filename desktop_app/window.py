@@ -162,6 +162,14 @@ class QualityControlWindow(QMainWindow):
         self.current_step_label.setStyleSheet("font-size: 22px; color: #2563eb;")
         right_layout.addWidget(self.current_step_label)
 
+        self.main_barcode_label = QLabel("当前主条码：未扫描")
+        self.main_barcode_label.setAlignment(Qt.AlignCenter)
+        self.main_barcode_label.setStyleSheet(
+            "font-size: 24px; font-weight: 700; padding: 14px;"
+            "background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; color: #1d4ed8;"
+        )
+        right_layout.addWidget(self.main_barcode_label)
+
         stats_row = QHBoxLayout()
         self.finished_count_label = QLabel("已生成零件数：0")
         self.scan_error_count_label = QLabel("扫码错误总数：0")
@@ -646,6 +654,7 @@ class QualityControlWindow(QMainWindow):
             self.step_list.addItem(item)
 
         self.product_label.setText(self.current_product.name)
+        self.main_barcode_label.setText(f"当前主条码：{self.current_barcode or '未扫描'}")
         self.finished_count_label.setText(f"已生成零件数：{self.finished_part_count}")
         self.scan_error_count_label.setText(f"扫码错误总数：{self.scan_error_count}")
         current_step = self.current_step()

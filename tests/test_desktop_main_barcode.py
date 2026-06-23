@@ -36,17 +36,21 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         )
         window.current_station.product = window.current_product
         window.reset_current_product(update_table=True)
+        self.assertEqual(window.main_barcode_label.text(), "当前主条码：未扫描")
 
         window.barcode_input.setText("MAIN-001")
         window.handle_scan()
         self.assertEqual(window.current_barcode, "MAIN-001")
+        self.assertEqual(window.main_barcode_label.text(), "当前主条码：MAIN-001")
 
         window.barcode_input.setText("PART-001")
         window.handle_scan()
         self.assertEqual(window.current_barcode, "MAIN-001")
+        self.assertEqual(window.main_barcode_label.text(), "当前主条码：MAIN-001")
 
         window.handle_screw_ok()
         self.assertEqual(window.current_barcode, "")
+        self.assertEqual(window.main_barcode_label.text(), "当前主条码：未扫描")
         self.assertEqual(window.current_step_index, 0)
 
     def test_online_station_two_blocks_when_previous_station_is_not_complete(self):
@@ -66,6 +70,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.handle_scan()
 
         self.assertEqual(window.current_barcode, "")
+        self.assertEqual(window.main_barcode_label.text(), "当前主条码：未扫描")
         self.assertEqual(window.current_step_index, 0)
         self.assertEqual(window.message_label.text(), "上一工位未完成，不能进行当前工位")
 
