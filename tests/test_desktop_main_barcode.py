@@ -87,6 +87,18 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertTrue(product.steps[0].is_main_barcode)
         self.assertFalse(product.steps[1].is_main_barcode)
 
+    def test_settings_product_selection_syncs_main_station_selector(self):
+        window = self.make_window()
+        target_station = window.current_project.stations[1]
+
+        window.load_product(target_station.product.name)
+
+        self.assertIs(window.current_station, target_station)
+        self.assertIs(window.current_product, target_station.product)
+        self.assertEqual(window.station_combo.currentText(), target_station.name)
+        self.assertEqual(window.current_step_index, 0)
+        self.assertEqual(window.product_label.text(), target_station.product.name)
+
 
 if __name__ == "__main__":
     unittest.main()

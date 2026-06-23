@@ -588,11 +588,25 @@ class QualityControlWindow(QMainWindow):
         product = next((item for item in self.products if item.name == product_name), None)
         if product is None:
             return
+        project, station = self.find_station_by_product(product)
+        if station is not None:
+            self.current_project = project
+            self.current_station = station
+            self.refresh_project_station_selectors()
+            self.load_station(project.name, station.name)
+            return
         self.current_product = product
         self.ensure_main_barcode(self.current_product, notify=True)
         self.product_name_input.setText(product.name)
         self.sync_product_selectors(product.name)
         self.reset_current_product(update_table=True)
+
+    def find_station_by_product(self, product: ProductConfig):
+        for project in self.projects:
+            for station in project.stations:
+                if station.product is product:
+                    return project, station
+        return None, None
 
     def sync_product_selectors(self, product_name: str):
         combo_index = self.product_combo.findText(product_name)
