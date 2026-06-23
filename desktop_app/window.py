@@ -66,7 +66,6 @@ class QualityControlWindow(QMainWindow):
         self.tool_poll_timer = QTimer(self)
         self.tool_poll_timer.timeout.connect(self.poll_tool_ok_signal)
         self.tool_client = ToolModbusClient()
-        self.last_tool_ok = False
 
         self.build_ui()
         self.refresh_project_station_selectors()
@@ -211,12 +210,33 @@ class QualityControlWindow(QMainWindow):
         self.tool_unit_input = QSpinBox()
         self.tool_unit_input.setRange(1, 247)
         self.tool_unit_input.setValue(1)
-        self.tool_register_input = QSpinBox()
-        self.tool_register_input.setRange(0, 65535)
-        self.tool_register_input.setValue(100)
+        self.tool_status_register_input = QSpinBox()
+        self.tool_status_register_input.setRange(0, 65535)
+        self.tool_status_register_input.setValue(100)
         self.tool_ok_value_input = QSpinBox()
         self.tool_ok_value_input.setRange(0, 65535)
         self.tool_ok_value_input.setValue(2)
+        self.tool_ng_value_input = QSpinBox()
+        self.tool_ng_value_input.setRange(0, 65535)
+        self.tool_ng_value_input.setValue(3)
+        self.tool_trigger_register_input = QSpinBox()
+        self.tool_trigger_register_input.setRange(0, 65535)
+        self.tool_trigger_register_input.setValue(53)
+        self.tool_trigger_value_input = QSpinBox()
+        self.tool_trigger_value_input.setRange(0, 65535)
+        self.tool_trigger_value_input.setValue(1)
+        self.tool_trigger_reset_value_input = QSpinBox()
+        self.tool_trigger_reset_value_input.setRange(0, 65535)
+        self.tool_trigger_reset_value_input.setValue(0)
+        self.tool_control_register_input = QSpinBox()
+        self.tool_control_register_input.setRange(0, 65535)
+        self.tool_control_register_input.setValue(4)
+        self.tool_on_value_input = QSpinBox()
+        self.tool_on_value_input.setRange(0, 65535)
+        self.tool_on_value_input.setValue(2)
+        self.tool_off_value_input = QSpinBox()
+        self.tool_off_value_input.setRange(0, 65535)
+        self.tool_off_value_input.setValue(1)
         self.tool_connect_btn = QPushButton("连接")
         self.tool_connect_btn.clicked.connect(self.toggle_tool_connection)
         self.tool_status_label = QLabel("未连接")
@@ -225,8 +245,11 @@ class QualityControlWindow(QMainWindow):
             ("IP", self.tool_ip_input),
             ("端口", self.tool_port_input),
             ("站号", self.tool_unit_input),
-            ("OK寄存器", self.tool_register_input),
+            ("状态地址", self.tool_status_register_input),
             ("OK值", self.tool_ok_value_input),
+            ("NG值", self.tool_ng_value_input),
+            ("触发地址", self.tool_trigger_register_input),
+            ("开关地址", self.tool_control_register_input),
         ]:
             tool_layout.addWidget(QLabel(label_text))
             tool_layout.addWidget(widget)
@@ -715,6 +738,7 @@ class QualityControlWindow(QMainWindow):
             step.completed_count = step.required_count
             step.done = True
             self.add_history_record(step, "完成", "螺钉枪OK", "螺丝数量已满足", completed=True)
+            self.close_tool_for_screw_step()
             self.speak("螺丝已完成")
             self.message_label.setText(f"{step.name} 已完成 {step.required_count}/{step.required_count}")
             self.advance_step(prompt_delay_ms=1600)
@@ -725,7 +749,6 @@ class QualityControlWindow(QMainWindow):
     def toggle_tool_connection(self):
         if self.tool_poll_timer.isActive():
             self.tool_poll_timer.stop()
-            self.last_tool_ok = False
             self.tool_connect_btn.setText("连接")
             self.tool_status_label.setText("未连接")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
@@ -738,14 +761,10 @@ class QualityControlWindow(QMainWindow):
 
     def poll_tool_ok_signal(self):
         try:
-            value = self.tool_client.read_register(
-                self.tool_ip_input.text().strip(),
-                self.tool_port_input.value(),
-                self.tool_unit_input.value(),
-                self.tool_register_input.value(),
-            )
+            status = self.read_tool_register(self.tool_status_register_input.value())
+            trigger = self.read_tool_register(self.tool_trigger_register_input.value())
         except OSError as exc:
-            self.tool_status_label.setText(f"连接失败：{exc}")
+            self.tool_status_label.setText(f"螺钉枪通讯异常：{exc}")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
             return
         except ShortToolResponseError:
@@ -756,13 +775,59 @@ class QualityControlWindow(QMainWindow):
             return
 
         ok_value = self.tool_ok_value_input.value()
-        ok_now = value == ok_value
-        status_text = self.tightening_status_text(value)
-        self.tool_status_label.setText(f"状态：{value}-{status_text}，OK={'是' if ok_now else '否'}")
+        ng_value = self.tool_ng_value_input.value()
+        trigger_value = self.tool_trigger_value_input.value()
+        status_text = self.tightening_status_text(status)
+        self.tool_status_label.setText(
+            f"触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
+        )
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
-        if ok_now and not self.last_tool_ok:
+
+        if trigger != trigger_value:
+            return
+
+        if status == ok_value:
+            self.reset_tool_trigger()
             self.handle_screw_ok()
-        self.last_tool_ok = ok_now
+            return
+
+        if status == ng_value:
+            self.add_screw_ng_record()
+            self.speak("螺丝NG，请重新打当前这颗")
+            self.show_auto_close_warning("螺丝NG", "螺丝NG，请重新打当前这颗")
+            self.reset_tool_trigger()
+            return
+
+        if status == 4:
+            self.message_label.setText("螺钉枪暂停")
+            return
+
+    def read_tool_register(self, register_address: int) -> int:
+        return self.tool_client.read_register(
+            self.tool_ip_input.text().strip(),
+            self.tool_port_input.value(),
+            self.tool_unit_input.value(),
+            register_address,
+        )
+
+    def write_tool_register(self, register_address: int, value: int):
+        self.tool_client.write_register(
+            self.tool_ip_input.text().strip(),
+            self.tool_port_input.value(),
+            self.tool_unit_input.value(),
+            register_address,
+            value,
+        )
+
+    def reset_tool_trigger(self):
+        self.write_tool_register(self.tool_trigger_register_input.value(), self.tool_trigger_reset_value_input.value())
+
+    def add_screw_ng_record(self):
+        step = self.current_step()
+        if step is None or step.step_type != SCREW:
+            return
+        self.add_history_record(step, "NG", "螺钉枪NG", "螺丝NG，请重新打当前这颗", completed=False)
+        self.message_label.setText("螺丝NG，请重新打当前这颗")
 
     def tightening_status_text(self, value: int) -> str:
         status_map = {
@@ -851,9 +916,30 @@ class QualityControlWindow(QMainWindow):
             return
         self.last_voice_step_key = step_key
         if step.step_type == SCREW:
+            self.enter_tool_screw_step(step)
             self.speak(f"请打螺丝{step.required_count}颗")
         else:
             self.speak("请扫码")
+
+    def enter_tool_screw_step(self, step: ProcessStep):
+        if not self.tool_poll_timer.isActive():
+            return
+        try:
+            self.reset_tool_trigger()
+            self.write_tool_register(self.tool_control_register_input.value(), self.tool_on_value_input.value())
+        except Exception as exc:
+            self.tool_status_label.setText(f"螺钉枪初始化异常：{exc}")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+
+    def close_tool_for_screw_step(self):
+        if not self.tool_poll_timer.isActive():
+            return
+        try:
+            self.write_tool_register(self.tool_control_register_input.value(), self.tool_off_value_input.value())
+            self.reset_tool_trigger()
+        except Exception as exc:
+            self.tool_status_label.setText(f"螺钉枪关闭异常：{exc}")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
 
     def speak(self, text: str):
         if self.say_command:

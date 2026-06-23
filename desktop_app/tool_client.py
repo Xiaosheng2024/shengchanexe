@@ -41,3 +41,32 @@ class ToolModbusClient:
             raise ValueError("不是读寄存器响应")
         return struct.unpack(">H", response[9:11])[0]
 
+    def write_register(self, host: str, port: int, unit_id: int, register_address: int, value: int):
+        if not host:
+            raise ValueError("设备IP为空")
+
+        self.transaction_id = (self.transaction_id + 1) % 65536
+        request = struct.pack(
+            ">HHHBBHH",
+            self.transaction_id,
+            0,
+            6,
+            unit_id,
+            6,
+            register_address,
+            value,
+        )
+        with socket.create_connection((host, port), timeout=0.25) as sock:
+            sock.settimeout(0.25)
+            sock.sendall(request)
+            response = sock.recv(1024)
+
+        if len(response) < 12:
+            raise ShortToolResponseError("数据长度不足")
+        transaction_id, protocol_id, _, response_unit, function_code = struct.unpack(">HHHBB", response[:8])
+        if transaction_id != self.transaction_id or protocol_id != 0 or response_unit != unit_id:
+            raise ValueError("报文头不匹配")
+        if function_code & 0x80:
+            raise ValueError(f"设备返回异常码 {response[8] if len(response) > 8 else ''}")
+        if function_code != 6:
+            raise ValueError("不是写寄存器响应")
