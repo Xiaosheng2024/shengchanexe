@@ -101,7 +101,7 @@ def delete_step(step_id):
         row = conn.execute("SELECT station_id FROM steps WHERE id = ?", (step_id,)).fetchone()
         conn.execute("DELETE FROM steps WHERE id = ?", (step_id,))
         if row:
-            ensure_station_has_main_barcode(conn, row["station_id"])
+            validate_station_main_barcode(conn, row["station_id"])
 
 
 def add_step(payload):
@@ -135,7 +135,7 @@ def add_step(payload):
                 now_text(),
             ),
         )
-        ensure_station_has_main_barcode(conn, station_id)
+        validate_station_main_barcode(conn, station_id)
         return {"id": cursor.lastrowid}
 
 
@@ -173,8 +173,8 @@ def update_step(step_id, payload):
             ),
         )
         if old_row and old_row["station_id"] != station_id:
-            ensure_station_has_main_barcode(conn, old_row["station_id"])
-        ensure_station_has_main_barcode(conn, station_id)
+            validate_station_main_barcode(conn, old_row["station_id"])
+        validate_station_main_barcode(conn, station_id)
     return {"ok": True}
 
 
@@ -232,6 +232,31 @@ def normalize_main_barcode(payload, step_type: str) -> bool:
 
 def clear_station_main_barcode(conn, station_id: int):
     conn.execute("UPDATE steps SET is_main_barcode = 0 WHERE station_id = ?", (station_id,))
+
+
+def validate_station_main_barcode(conn, station_id: int):
+    conn.execute(
+        "UPDATE steps SET is_main_barcode = 0 WHERE station_id = ? AND type != ?",
+        (station_id, "扫码"),
+    )
+    scan_count = conn.execute(
+        "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND type = ?",
+        (station_id, "扫码"),
+    ).fetchone()["total"]
+    if scan_count == 0:
+        return
+    main_count = conn.execute(
+        """
+        SELECT COUNT(*) AS total
+        FROM steps
+        WHERE station_id = ? AND type = ? AND is_main_barcode = 1
+        """,
+        (station_id, "扫码"),
+    ).fetchone()["total"]
+    if main_count == 0:
+        raise ValueError("每个工位必须配置一个主条码扫码工序")
+    if main_count > 1:
+        raise ValueError("每个工位只能配置一个主条码扫码工序")
 
 
 def ensure_station_has_main_barcode(conn, station_id: int):

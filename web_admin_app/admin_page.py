@@ -528,11 +528,15 @@ HTML = r"""<!doctype html>
       const payload = stepPayload();
       if (!payload.name) return showStatus("工序名称不能为空");
       if (!payload.station_id) return showStatus("请先选择工位");
-      await api("/api/steps", {
-        method: "POST",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
+      try {
+        await api("/api/steps", {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+      } catch (err) {
+        return showStatus(err.message);
+      }
       document.getElementById("stepName").value = "";
       showStatus("工序规则已添加");
       expandedStations.add(payload.station_id);
@@ -585,11 +589,15 @@ HTML = r"""<!doctype html>
       if (!id) return showStatus("请先在工序列表点击编辑");
       const payload = stepPayload();
       if (!payload.name) return showStatus("工序名称不能为空");
-      await api(`/api/steps/${id}`, {
-        method: "PUT",
-        headers: {"Content-Type": "application/json"},
-        body: JSON.stringify(payload)
-      });
+      try {
+        await api(`/api/steps/${id}`, {
+          method: "PUT",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify(payload)
+        });
+      } catch (err) {
+        return showStatus(err.message);
+      }
       resetStepForm();
       showStatus("工序规则已修改");
       expandedStations.add(payload.station_id);
@@ -649,7 +657,11 @@ HTML = r"""<!doctype html>
       const step = data.steps.find(item => item.id === id);
       const name = step ? step.name : id;
       if (!confirm(`确定删除工序“${name}”吗？`)) return;
-      await api(`/api/steps/${id}`, {method: "DELETE"});
+      try {
+        await api(`/api/steps/${id}`, {method: "DELETE"});
+      } catch (err) {
+        return showStatus(err.message);
+      }
       showStatus("工序已删除");
       refreshAll();
     }

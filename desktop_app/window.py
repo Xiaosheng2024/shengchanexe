@@ -917,7 +917,7 @@ class QualityControlWindow(QMainWindow):
             return False
         if data.get("completed"):
             return True
-        message = f"条码 {barcode} 未完成 {self.previous_station_name()}，禁止进入 {self.current_station.name}"
+        message = "上一工位未完成，不能进行当前工位"
         self.message_label.setText(message)
         self.show_auto_close_warning("前工位未完成", message)
         return False

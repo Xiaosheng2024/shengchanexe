@@ -71,6 +71,8 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         try:
             self.route_post()
+        except ValueError as exc:
+            json_response(self, {"error": str(exc)}, 400)
         except sqlite3.IntegrityError as exc:
             json_response(self, {"error": f"数据重复或不合法：{exc}"}, 400)
         except Exception as exc:
@@ -79,6 +81,8 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_PUT(self):
         try:
             self.route_put()
+        except ValueError as exc:
+            json_response(self, {"error": str(exc)}, 400)
         except sqlite3.IntegrityError as exc:
             json_response(self, {"error": f"数据重复或不合法：{exc}"}, 400)
         except Exception as exc:
@@ -87,6 +91,8 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_DELETE(self):
         try:
             self.route_delete()
+        except ValueError as exc:
+            json_response(self, {"error": str(exc)}, 400)
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 
