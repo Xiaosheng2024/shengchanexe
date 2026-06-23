@@ -39,6 +39,7 @@ def init_db():
                 barcode_start INTEGER NOT NULL DEFAULT 1,
                 barcode_end INTEGER NOT NULL DEFAULT 7,
                 expected_content TEXT NOT NULL DEFAULT '',
+                is_main_barcode INTEGER NOT NULL DEFAULT 0,
                 created_at TEXT NOT NULL,
                 FOREIGN KEY(station_id) REFERENCES stations(id)
             );
@@ -62,9 +63,17 @@ def init_db():
             );
             """
         )
+        migrate_db(conn)
         row = conn.execute("SELECT COUNT(*) AS total FROM projects").fetchone()
         if row["total"] == 0:
             seed_default_data(conn)
+        ensure_default_main_barcodes(conn)
+
+
+def migrate_db(conn):
+    columns = [row["name"] for row in conn.execute("PRAGMA table_info(steps)").fetchall()]
+    if "is_main_barcode" not in columns:
+        conn.execute("ALTER TABLE steps ADD COLUMN is_main_barcode INTEGER NOT NULL DEFAULT 0")
 
 
 def now_text():
@@ -82,21 +91,37 @@ def seed_default_data(conn):
         )
         station_id = cursor.lastrowid
         default_steps = [
-            (1, "扫码A零件", "扫码", 0, 1, 1, "A"),
-            (2, "扫码B零件条码", "扫码", 0, 1, 1, "B"),
-            (3, "打螺丝10颗", "螺丝", 10, 1, 7, ""),
-            (4, "扫码C零件", "扫码", 0, 1, 1, "C"),
+            (1, "扫码A零件", "扫码", 0, 1, 1, "A", 1),
+            (2, "扫码B零件条码", "扫码", 0, 1, 1, "B", 0),
+            (3, "打螺丝10颗", "螺丝", 10, 1, 7, "", 0),
+            (4, "扫码C零件", "扫码", 0, 1, 1, "C", 0),
         ]
         conn.executemany(
             """
             INSERT INTO steps
-            (station_id, step_order, name, type, required_count, barcode_start, barcode_end, expected_content, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (station_id, step_order, name, type, required_count, barcode_start, barcode_end, expected_content, is_main_barcode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [(station_id, *step, created_at) for step in default_steps],
         )
 
 
+def ensure_default_main_barcodes(conn):
+    station_rows = conn.execute("SELECT id FROM stations").fetchall()
+    for station in station_rows:
+        main_count = conn.execute(
+            "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND is_main_barcode = 1",
+            (station["id"],),
+        ).fetchone()["total"]
+        if main_count:
+            continue
+        first_scan = conn.execute(
+            "SELECT id FROM steps WHERE station_id = ? AND type = ? ORDER BY step_order, id LIMIT 1",
+            (station["id"], "扫码"),
+        ).fetchone()
+        if first_scan:
+            conn.execute("UPDATE steps SET is_main_barcode = 1 WHERE id = ?", (first_scan["id"],))
+
+
 def row_to_dict(row):
     return dict(row) if row else None
-

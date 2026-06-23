@@ -14,6 +14,7 @@ class ProcessStep:
     barcode_start: int = 1
     barcode_end: int = 7
     expected_content: str = ""
+    is_main_barcode: bool = False
     completed_count: int = 0
     done: bool = False
 
@@ -52,4 +53,3 @@ class StationConfig:
 class ProjectConfig:
     name: str
     stations: List[StationConfig] = field(default_factory=list)
-

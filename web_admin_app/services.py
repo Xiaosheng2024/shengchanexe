@@ -98,23 +98,29 @@ def delete_station_with_conn(conn, station_id):
 
 def delete_step(step_id):
     with get_conn() as conn:
+        row = conn.execute("SELECT station_id FROM steps WHERE id = ?", (step_id,)).fetchone()
         conn.execute("DELETE FROM steps WHERE id = ?", (step_id,))
+        if row:
+            ensure_station_has_main_barcode(conn, row["station_id"])
 
 
 def add_step(payload):
     station_id = int(payload.get("station_id", 0))
     name = payload.get("name", "").strip()
     step_type = payload.get("type", "扫码")
+    is_main_barcode = normalize_main_barcode(payload, step_type)
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
     if step_type not in ("扫码", "螺丝"):
         raise ValueError("功能只能是扫码或螺丝")
     with get_conn() as conn:
+        if is_main_barcode:
+            clear_station_main_barcode(conn, station_id)
         cursor = conn.execute(
             """
             INSERT INTO steps
-            (station_id, step_order, name, type, required_count, barcode_start, barcode_end, expected_content, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (station_id, step_order, name, type, required_count, barcode_start, barcode_end, expected_content, is_main_barcode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 station_id,
@@ -125,9 +131,11 @@ def add_step(payload):
                 int(payload.get("barcode_start", 1)),
                 int(payload.get("barcode_end", 7)),
                 payload.get("expected_content", ""),
+                1 if is_main_barcode else 0,
                 now_text(),
             ),
         )
+        ensure_station_has_main_barcode(conn, station_id)
         return {"id": cursor.lastrowid}
 
 
@@ -135,16 +143,20 @@ def update_step(step_id, payload):
     name = payload.get("name", "").strip()
     step_type = payload.get("type", "扫码")
     station_id = int(payload.get("station_id", 0))
+    is_main_barcode = normalize_main_barcode(payload, step_type)
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
     if step_type not in ("扫码", "螺丝"):
         raise ValueError("功能只能是扫码或螺丝")
     with get_conn() as conn:
+        old_row = conn.execute("SELECT station_id FROM steps WHERE id = ?", (step_id,)).fetchone()
+        if is_main_barcode:
+            clear_station_main_barcode(conn, station_id)
         conn.execute(
             """
             UPDATE steps
             SET station_id = ?, step_order = ?, name = ?, type = ?, required_count = ?,
-                barcode_start = ?, barcode_end = ?, expected_content = ?
+                barcode_start = ?, barcode_end = ?, expected_content = ?, is_main_barcode = ?
             WHERE id = ?
             """,
             (
@@ -156,9 +168,13 @@ def update_step(step_id, payload):
                 int(payload.get("barcode_start", 1)),
                 int(payload.get("barcode_end", 7)),
                 payload.get("expected_content", ""),
+                1 if is_main_barcode else 0,
                 step_id,
             ),
         )
+        if old_row and old_row["station_id"] != station_id:
+            ensure_station_has_main_barcode(conn, old_row["station_id"])
+        ensure_station_has_main_barcode(conn, station_id)
     return {"ok": True}
 
 
@@ -200,10 +216,56 @@ def get_station_config(path):
                 "barcode_start": step["barcode_start"],
                 "barcode_end": step["barcode_end"],
                 "expected_content": step["expected_content"],
+                "is_main_barcode": bool(step["is_main_barcode"]),
             }
             for step in steps
         ],
     }
+
+
+def normalize_main_barcode(payload, step_type: str) -> bool:
+    is_main_barcode = bool(payload.get("is_main_barcode", False))
+    if is_main_barcode and step_type != "扫码":
+        raise ValueError("只有扫码工序可以设置为主条码")
+    return is_main_barcode
+
+
+def clear_station_main_barcode(conn, station_id: int):
+    conn.execute("UPDATE steps SET is_main_barcode = 0 WHERE station_id = ?", (station_id,))
+
+
+def ensure_station_has_main_barcode(conn, station_id: int):
+    conn.execute(
+        "UPDATE steps SET is_main_barcode = 0 WHERE station_id = ? AND type != ?",
+        (station_id, "扫码"),
+    )
+    scan_count = conn.execute(
+        "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND type = ?",
+        (station_id, "扫码"),
+    ).fetchone()["total"]
+    if scan_count == 0:
+        return
+    main_count = conn.execute(
+        "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND is_main_barcode = 1",
+        (station_id,),
+    ).fetchone()["total"]
+    if main_count == 1:
+        return
+    if main_count > 1:
+        first_main = conn.execute(
+            "SELECT id FROM steps WHERE station_id = ? AND is_main_barcode = 1 ORDER BY step_order, id LIMIT 1",
+            (station_id,),
+        ).fetchone()
+        conn.execute(
+            "UPDATE steps SET is_main_barcode = CASE WHEN id = ? THEN 1 ELSE 0 END WHERE station_id = ?",
+            (first_main["id"], station_id),
+        )
+        return
+    first_scan = conn.execute(
+        "SELECT id FROM steps WHERE station_id = ? AND type = ? ORDER BY step_order, id LIMIT 1",
+        (station_id, "扫码"),
+    ).fetchone()
+    conn.execute("UPDATE steps SET is_main_barcode = 1 WHERE id = ?", (first_scan["id"],))
 
 
 def find_project_station(conn, project_name, station_name):

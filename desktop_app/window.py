@@ -80,7 +80,7 @@ class QualityControlWindow(QMainWindow):
                     ProductConfig(
                         f"汽车前中控面板X04C 灰色 - 工位{index}",
                         [
-                            ProcessStep("扫码A零件", SCAN, barcode_start=1, barcode_end=1, expected_content="A"),
+                            ProcessStep("扫码A零件", SCAN, barcode_start=1, barcode_end=1, expected_content="A", is_main_barcode=True),
                             ProcessStep("扫码B零件条码", SCAN, barcode_start=1, barcode_end=1, expected_content="B"),
                             ProcessStep("打螺丝10颗", SCREW, required_count=10),
                             ProcessStep("扫码C零件", SCAN, barcode_start=1, barcode_end=1, expected_content="C"),
@@ -402,6 +402,7 @@ class QualityControlWindow(QMainWindow):
         self.current_project = project
         self.current_station = station
         self.current_product = station.product
+        self.ensure_main_barcode(self.current_product, notify=True)
         self.products = [station.product for station in project.stations]
         if hasattr(self, "product_combo"):
             self.product_combo.blockSignals(True)
@@ -447,7 +448,7 @@ class QualityControlWindow(QMainWindow):
                             station_name,
                             ProductConfig(
                                 f"{project_item.get('name', '项目')} - {station_name}",
-                                [ProcessStep("扫码首件条码", SCAN)],
+                                [ProcessStep("扫码首件条码", SCAN, is_main_barcode=True)],
                             ),
                         )
                     )
@@ -478,11 +479,14 @@ class QualityControlWindow(QMainWindow):
                     barcode_start=int(item.get("barcode_start", 1)),
                     barcode_end=int(item.get("barcode_end", 7)),
                     expected_content=item.get("expected_content", ""),
+                    is_main_barcode=bool(item.get("is_main_barcode", False)),
                 )
             )
         if not steps:
             raise ValueError("接口未返回工序 steps")
-        return ProductConfig(data.get("product_name", self.current_product.name), steps)
+        product = ProductConfig(data.get("product_name", self.current_product.name), steps)
+        self.ensure_main_barcode(product, notify=True)
+        return product
 
     def api_url(self, path: str) -> str:
         base = self.api_base_input.text().strip().rstrip("/")
@@ -577,6 +581,7 @@ class QualityControlWindow(QMainWindow):
         if product is None:
             return
         self.current_product = product
+        self.ensure_main_barcode(self.current_product, notify=True)
         self.product_name_input.setText(product.name)
         self.sync_product_selectors(product.name)
         self.reset_current_product(update_table=True)
@@ -685,6 +690,28 @@ class QualityControlWindow(QMainWindow):
             return None
         return self.current_product.steps[self.current_step_index]
 
+    def get_main_barcode_step(self) -> Optional[ProcessStep]:
+        for step in self.current_product.steps:
+            if step.step_type == SCAN and step.is_main_barcode:
+                return step
+        return next((step for step in self.current_product.steps if step.step_type == SCAN), None)
+
+    def ensure_main_barcode(self, product: ProductConfig, notify: bool = False):
+        scan_steps = [step for step in product.steps if step.step_type == SCAN]
+        if not scan_steps:
+            return
+        main_steps = [step for step in scan_steps if step.is_main_barcode]
+        if len(main_steps) == 1:
+            return
+        first_scan = main_steps[0] if main_steps else scan_steps[0]
+        for step in scan_steps:
+            step.is_main_barcode = step is first_scan
+        if notify and not main_steps:
+            message = "当前工位未配置主条码，已临时使用第一道扫码工序作为主条码"
+            self.message_label.setText(message)
+            if hasattr(self, "warning_dialogs"):
+                self.show_auto_close_warning("主条码临时配置", message)
+
     def handle_scan(self):
         step = self.current_step()
         if step is None:
@@ -715,7 +742,9 @@ class QualityControlWindow(QMainWindow):
             self.show_auto_close_warning("扫码错误", message)
             return
 
-        if not self.current_barcode:
+        main_barcode_step = self.get_main_barcode_step()
+        is_main_barcode_step = step is main_barcode_step
+        if is_main_barcode_step:
             if self.should_check_previous_station() and not self.verify_previous_station_complete(barcode):
                 return
             self.current_barcode = barcode
@@ -844,8 +873,11 @@ class QualityControlWindow(QMainWindow):
     def advance_step(self, prompt_delay_ms: int = 0):
         self.current_step_index += 1
         if self.current_step_index >= len(self.current_product.steps):
+            if not self.report_station_complete():
+                self.current_step_index = max(len(self.current_product.steps) - 1, 0)
+                self.refresh_work_area()
+                return
             self.finished_part_count += 1
-            self.report_station_complete()
             self.message_label.setText("所有工序完成，系统已重新开始等待第1工序条码进入")
             self.current_product.reset()
             self.current_step_index = 0
@@ -894,8 +926,13 @@ class QualityControlWindow(QMainWindow):
         return self.online_mode and not self.degraded_mode_checkbox.isChecked()
 
     def report_station_complete(self):
-        if not self.online_mode or not self.current_barcode:
-            return
+        if not self.online_mode:
+            return True
+        if not self.current_barcode:
+            message = "缺少主条码，无法完成工位流转"
+            self.message_label.setText(message)
+            self.show_auto_close_warning("主条码缺失", message)
+            return False
         payload = {
             "project": self.current_project.name,
             "station": self.current_station.name,
@@ -906,6 +943,7 @@ class QualityControlWindow(QMainWindow):
             self.api_post("/api/station-completions", payload)
         except Exception as exc:
             self.message_label.setText(f"工位完成上报失败：{exc}")
+        return True
 
     def prompt_current_step_start(self):
         step = self.current_step()
@@ -1083,7 +1121,7 @@ class QualityControlWindow(QMainWindow):
         while new_name in existing_names:
             new_name = f"{base_name}{sequence}"
             sequence += 1
-        product = ProductConfig(new_name, [ProcessStep("扫码首件条码", SCAN)])
+        product = ProductConfig(new_name, [ProcessStep("扫码首件条码", SCAN, is_main_barcode=True)])
         self.products.append(product)
         self.product_combo.addItem(product.name)
         self.refresh_product_list()
@@ -1145,6 +1183,7 @@ class QualityControlWindow(QMainWindow):
                     barcode_start=barcode_start,
                     barcode_end=barcode_end,
                     expected_content=expected_content,
+                    is_main_barcode=step_type == SCAN and not any(item.step_type == SCAN for item in steps),
                 )
             )
 

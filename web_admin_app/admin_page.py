@@ -32,6 +32,8 @@ HTML = r"""<!doctype html>
     .panel h2 { margin: 0 0 14px; font-size: 20px; }
     label { font-weight: 700; }
     input, select { height: 38px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 15px; min-width: 160px; }
+    input[type="checkbox"] { width: 18px; height: 18px; min-width: 18px; padding: 0; }
+    .checkbox-label { display: inline-flex; align-items: center; gap: 8px; height: 38px; }
     button.primary { height: 38px; padding: 0 18px; border: 0; border-radius: 6px; background: #2563eb; color: white; font-size: 15px; font-weight: 700; cursor: pointer; }
     button.secondary { height: 38px; padding: 0 18px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; font-size: 15px; cursor: pointer; }
     button.danger { height: 38px; padding: 0 18px; border: 0; border-radius: 6px; background: #dc2626; color: white; font-size: 15px; cursor: pointer; }
@@ -130,6 +132,7 @@ HTML = r"""<!doctype html>
             <input id="barcodeEnd" type="number" min="1" value="7">
             <label>检测内容</label>
             <input id="expectedContent" placeholder="为空表示不校验">
+            <label class="checkbox-label"><input id="isMainBarcode" type="checkbox"> 是否主条码</label>
           </div>
           <div class="toolbar" id="screwFields" style="display:none">
             <label>螺丝数量</label>
@@ -144,7 +147,7 @@ HTML = r"""<!doctype html>
           <h2>当前工位工序 <span class="hint" id="selectedStationText"></span></h2>
           <button class="secondary" onclick="loadSteps()">刷新工序</button>
           <table>
-            <thead><tr><th>顺序</th><th>工序名称</th><th>功能</th><th>螺丝数量</th><th>截取位</th><th>检测内容</th><th>操作</th></tr></thead>
+            <thead><tr><th>顺序</th><th>工序名称</th><th>功能</th><th>螺丝数量</th><th>截取位</th><th>检测内容</th><th>主条码</th><th>操作</th></tr></thead>
             <tbody id="stepRows"></tbody>
           </table>
         </div>
@@ -516,6 +519,9 @@ HTML = r"""<!doctype html>
       const isScrew = document.getElementById("stepType").value === "螺丝";
       document.getElementById("barcodeFields").style.display = isScrew ? "none" : "flex";
       document.getElementById("screwFields").style.display = isScrew ? "flex" : "none";
+      const mainBarcode = document.getElementById("isMainBarcode");
+      mainBarcode.disabled = isScrew;
+      if (isScrew) mainBarcode.checked = false;
     }
 
     async function addStep() {
@@ -543,7 +549,8 @@ HTML = r"""<!doctype html>
         required_count: type === "螺丝" ? Number(document.getElementById("requiredCount").value || 0) : 0,
         barcode_start: Number(document.getElementById("barcodeStart").value || 1),
         barcode_end: Number(document.getElementById("barcodeEnd").value || 7),
-        expected_content: document.getElementById("expectedContent").value.trim()
+        expected_content: document.getElementById("expectedContent").value.trim(),
+        is_main_barcode: type === "扫码" && document.getElementById("isMainBarcode").checked
       };
     }
 
@@ -556,11 +563,12 @@ HTML = r"""<!doctype html>
       document.getElementById("barcodeStart").value = step.barcode_start || 1;
       document.getElementById("barcodeEnd").value = step.barcode_end || 7;
       document.getElementById("expectedContent").value = step.expected_content || "";
+      document.getElementById("isMainBarcode").checked = !!step.is_main_barcode;
       toggleStepFields();
     }
 
     function resetStepForm() {
-      fillStepForm({type: "扫码", step_order: 1, required_count: 10, barcode_start: 1, barcode_end: 7});
+      fillStepForm({type: "扫码", step_order: 1, required_count: 10, barcode_start: 1, barcode_end: 7, is_main_barcode: false});
     }
 
     async function editStep(id) {
@@ -591,13 +599,13 @@ HTML = r"""<!doctype html>
     async function loadSteps() {
       const stationId = Number(document.getElementById("stepStation").value);
       if (!stationId) {
-        document.getElementById("stepRows").innerHTML = `<tr><td colspan="7">请选择工位</td></tr>`;
+        document.getElementById("stepRows").innerHTML = `<tr><td colspan="8">请选择工位</td></tr>`;
         return;
       }
       const data = await api(`/api/stations/${stationId}/steps`);
       document.getElementById("stepRows").innerHTML = data.steps.map(step =>
-        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${step.type}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${htmlEscape(step.expected_content || "")}</td><td><button class="secondary" onclick="editStep(${step.id})">编辑</button> <button class="danger" onclick="deleteStep(${step.id})">删除</button></td></tr>`
-      ).join("") || `<tr><td colspan="7">暂无工序</td></tr>`;
+        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${step.type}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${htmlEscape(step.expected_content || "")}</td><td>${step.is_main_barcode ? "是" : "否"}</td><td><button class="secondary" onclick="editStep(${step.id})">编辑</button> <button class="danger" onclick="deleteStep(${step.id})">删除</button></td></tr>`
+      ).join("") || `<tr><td colspan="8">暂无工序</td></tr>`;
     }
 
     async function loadRecords() {
