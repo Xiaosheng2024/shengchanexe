@@ -26,16 +26,28 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           python -m pip install -r requirements.txt pyinstaller
+          python -m pip install -r s7_plc_test_tool/requirements.txt
 
-      - name: Build exe
+      - name: Build quality control exe
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name QualityControlSystem main.py
 
-      - name: Upload exe artifact
+      - name: Build S7 PLC test tool exe
+        working-directory: s7_plc_test_tool
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name S7_PLC_Test_Tool main.py
+
+      - name: Upload quality control artifact
         uses: actions/upload-artifact@v4
         with:
           name: QualityControlSystem-windows
           path: dist/QualityControlSystem.exe
+
+      - name: Upload S7 PLC test tool artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: S7_PLC_Test_Tool-windows
+          path: s7_plc_test_tool/dist/S7_PLC_Test_Tool.exe
 
       - name: Publish latest Windows exe
         uses: softprops/action-gh-release@v2
@@ -43,4 +55,6 @@ jobs:
         with:
           tag_name: windows-latest
           name: Windows Latest
-          files: dist/QualityControlSystem.exe
+          files: |
+            dist/QualityControlSystem.exe
+            s7_plc_test_tool/dist/S7_PLC_Test_Tool.exe
