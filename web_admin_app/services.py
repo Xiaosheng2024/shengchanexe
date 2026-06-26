@@ -3,6 +3,16 @@ from urllib.parse import unquote
 from web_admin_app.database import get_conn, now_text, row_to_dict
 
 
+MAX_PAGE_SIZE = 500
+DEFAULT_PAGE_SIZE = 100
+
+
+def pagination(query):
+    page = max(int(query.get("page", ["1"])[0] or 1), 1)
+    page_size = min(max(int(query.get("page_size", [str(DEFAULT_PAGE_SIZE)])[0] or DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE)
+    return page, page_size, (page - 1) * page_size
+
+
 def list_projects():
     projects = []
     with get_conn() as conn:
@@ -81,6 +91,9 @@ def delete_project(project_id):
             delete_station_with_conn(conn, station_id)
         conn.execute("DELETE FROM scan_records WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM station_completions WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM screw_action_records WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM step_work_records WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM station_work_records WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 
@@ -93,6 +106,9 @@ def delete_station_with_conn(conn, station_id):
     conn.execute("DELETE FROM steps WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM scan_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM station_completions WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM screw_action_records WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM step_work_records WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM station_work_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM stations WHERE id = ?", (station_id,))
 
 
@@ -334,14 +350,25 @@ def add_station_completion(payload):
         ids = find_project_station(conn, project, station)
         if not ids:
             raise ValueError("项目或工位不存在")
-        conn.execute(
-            """
-            INSERT OR REPLACE INTO station_completions
-            (project_id, station_id, barcode, completed_at)
-            VALUES (?, ?, ?, ?)
-            """,
-            (ids["project_id"], ids["station_id"], barcode, completed_at),
-        )
+        if conn.db_type == "postgresql":
+            conn.execute(
+                """
+                INSERT INTO station_completions
+                (project_id, station_id, barcode, completed_at)
+                VALUES (?, ?, ?, ?)
+                ON CONFLICT (project_id, station_id, barcode) DO NOTHING
+                """,
+                (ids["project_id"], ids["station_id"], barcode, completed_at),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT OR REPLACE INTO station_completions
+                (project_id, station_id, barcode, completed_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (ids["project_id"], ids["station_id"], barcode, completed_at),
+            )
         conn.execute(
             """
             INSERT INTO scan_records
@@ -426,13 +453,15 @@ def list_scan_records(query):
     if end:
         sql += " AND scan_records.created_at <= ?"
         params.append(end)
-    sql += " ORDER BY scan_records.created_at DESC LIMIT 500"
+    page, page_size, offset = pagination(query)
+    sql += " ORDER BY scan_records.created_at DESC LIMIT ? OFFSET ?"
+    params.extend([page_size, offset])
     with get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return [
+    records = [
         {
             "id": row["id"],
-            "created_at": row["created_at"],
+            "created_at": row_to_dict(row)["created_at"],
             "project": row["project"] or "",
             "station": row["station"] or "",
             "barcode": row["barcode"],
@@ -442,3 +471,229 @@ def list_scan_records(query):
         }
         for row in rows
     ]
+    return records
+
+
+def list_production_records(query):
+    return list_trace_table(
+        query,
+        "station_work_records",
+        [
+            "id",
+            "project_id",
+            "station_id",
+            "main_barcode",
+            "product_name",
+            "station_name",
+            "start_time",
+            "end_time",
+            "work_duration_seconds",
+            "total_steps",
+            "completed_steps",
+            "screw_required_count",
+            "screw_ok_count",
+            "screw_ng_count",
+            "result",
+            "operator",
+            "note",
+            "created_at",
+            "updated_at",
+        ],
+    )
+
+
+def add_production_record(payload):
+    with get_conn() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO station_work_records
+            (project_id, station_id, main_barcode, product_name, station_name, start_time, end_time,
+             work_duration_seconds, total_steps, completed_steps, screw_required_count, screw_ok_count,
+             screw_ng_count, result, operator, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(payload.get("project_id", 0)),
+                int(payload.get("station_id", 0)),
+                payload.get("main_barcode", ""),
+                payload.get("product_name", ""),
+                payload.get("station_name", ""),
+                payload.get("start_time") or now_text(),
+                payload.get("end_time"),
+                int(payload.get("work_duration_seconds", 0)),
+                int(payload.get("total_steps", 0)),
+                int(payload.get("completed_steps", 0)),
+                int(payload.get("screw_required_count", 0)),
+                int(payload.get("screw_ok_count", 0)),
+                int(payload.get("screw_ng_count", 0)),
+                payload.get("result", "进行中"),
+                payload.get("operator", ""),
+                payload.get("note", ""),
+            ),
+        )
+    return {"id": cursor.lastrowid}
+
+
+def list_step_records(query):
+    return list_trace_table(
+        query,
+        "step_work_records",
+        [
+            "id",
+            "station_work_id",
+            "project_id",
+            "station_id",
+            "main_barcode",
+            "step_name",
+            "step_type",
+            "step_order",
+            "start_time",
+            "end_time",
+            "duration_seconds",
+            "barcode",
+            "scan_result",
+            "screw_required_count",
+            "screw_ok_count",
+            "screw_ng_count",
+            "result",
+            "note",
+            "created_at",
+        ],
+    )
+
+
+def add_step_record(payload):
+    with get_conn() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO step_work_records
+            (station_work_id, project_id, station_id, main_barcode, step_name, step_type, step_order,
+             start_time, end_time, duration_seconds, barcode, scan_result, screw_required_count,
+             screw_ok_count, screw_ng_count, result, note)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("station_work_id"),
+                int(payload.get("project_id", 0)),
+                int(payload.get("station_id", 0)),
+                payload.get("main_barcode", ""),
+                payload.get("step_name", ""),
+                payload.get("step_type", ""),
+                int(payload.get("step_order", 0)),
+                payload.get("start_time") or now_text(),
+                payload.get("end_time"),
+                int(payload.get("duration_seconds", 0)),
+                payload.get("barcode", ""),
+                payload.get("scan_result", ""),
+                int(payload.get("screw_required_count", 0)),
+                int(payload.get("screw_ok_count", 0)),
+                int(payload.get("screw_ng_count", 0)),
+                payload.get("result", "进行中"),
+                payload.get("note", ""),
+            ),
+        )
+    return {"id": cursor.lastrowid}
+
+
+def list_screw_records(query):
+    return list_trace_table(
+        query,
+        "screw_action_records",
+        [
+            "id",
+            "station_work_id",
+            "step_work_id",
+            "project_id",
+            "station_id",
+            "main_barcode",
+            "step_name",
+            "screw_index",
+            "required_count",
+            "status_value",
+            "trigger_value",
+            "direction_value",
+            "result",
+            "is_counted",
+            "ng_reason",
+            "created_at",
+        ],
+    )
+
+
+def add_screw_record(payload):
+    with get_conn() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO screw_action_records
+            (station_work_id, step_work_id, project_id, station_id, main_barcode, step_name, screw_index,
+             required_count, status_value, trigger_value, direction_value, result, is_counted, ng_reason)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("station_work_id"),
+                payload.get("step_work_id"),
+                int(payload.get("project_id", 0)),
+                int(payload.get("station_id", 0)),
+                payload.get("main_barcode", ""),
+                payload.get("step_name", ""),
+                payload.get("screw_index"),
+                payload.get("required_count"),
+                payload.get("status_value"),
+                payload.get("trigger_value"),
+                payload.get("direction_value"),
+                payload.get("result", ""),
+                bool(payload.get("is_counted", False)),
+                payload.get("ng_reason", ""),
+            ),
+        )
+    return {"id": cursor.lastrowid}
+
+
+def list_trace_table(query, table_name, columns):
+    page, page_size, offset = pagination(query)
+    filters = []
+    params = []
+    main_barcode = query.get("main_barcode", query.get("barcode", [""]))[0]
+    project_id = query.get("project_id", [""])[0]
+    station_id = query.get("station_id", [""])[0]
+    result = query.get("result", [""])[0]
+    start_time = query.get("start_time", query.get("start", [""]))[0]
+    end_time = query.get("end_time", query.get("end", [""]))[0]
+    if main_barcode:
+        filters.append("main_barcode = ?")
+        params.append(main_barcode)
+    if project_id:
+        filters.append("project_id = ?")
+        params.append(project_id)
+    if station_id:
+        filters.append("station_id = ?")
+        params.append(station_id)
+    if result:
+        filters.append("result = ?")
+        params.append(result)
+    if start_time:
+        filters.append("created_at >= ?")
+        params.append(start_time)
+    if end_time:
+        filters.append("created_at <= ?")
+        params.append(end_time)
+    where = " WHERE " + " AND ".join(filters) if filters else ""
+    sql = f"SELECT {', '.join(columns)} FROM {table_name}{where} ORDER BY created_at DESC LIMIT ? OFFSET ?"
+    params.extend([page_size, offset])
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return {"page": page, "page_size": page_size, "records": [row_to_dict(row) for row in rows]}
+
+
+def get_trace(query):
+    barcode = query.get("barcode", query.get("main_barcode", [""]))[0]
+    if not barcode:
+        raise ValueError("条码不能为空")
+    trace_query = dict(query)
+    trace_query["main_barcode"] = [barcode]
+    return {
+        "barcode": barcode,
+        "production_records": list_production_records(trace_query)["records"],
+        "step_records": list_step_records(trace_query)["records"],
+        "screw_records": list_screw_records(trace_query)["records"],
+    }

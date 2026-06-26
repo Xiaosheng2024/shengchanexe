@@ -64,7 +64,29 @@ http://127.0.0.1:8000
 - 螺丝数量 / 条码扫描规则维护
 - 扫描记录查询：支持条码、开始时间、结束时间筛选，并支持记录修改、删除
 
-数据库使用 SQLite，文件为 `quality_control.db`，首次启动会自动创建并生成默认项目和 9 个工位。
+服务端生产默认使用 PostgreSQL。Windows MES 客户端仍然只通过 HTTP 访问 `http://服务器IP:8000`，不直接连接 PostgreSQL；所有数据库操作都由 `web_admin.py` 服务端完成。
+
+`config.ini` 数据库配置示例：
+
+```ini
+[DATABASE]
+type = postgresql
+host = 127.0.0.1
+port = 5432
+database = mes_db
+user = mes_user
+password = mes_password
+```
+
+本地调试仍兼容 SQLite：
+
+```ini
+[DATABASE]
+type = sqlite
+path = quality_control.db
+```
+
+首次启动会自动创建项目、工位、工序、扫码记录、工位完成记录和生产追溯表。
 
 桌面端在线模式的接口地址默认可填：
 
@@ -102,6 +124,62 @@ deploy\start_all.bat
 
 ```text
 deploy\README_OFFLINE.md
+```
+
+## Rocky Linux 9 PostgreSQL 部署
+
+Rocky Linux 9 服务端部署 PostgreSQL 16：
+
+```bash
+sudo bash deploy/rocky9/02_install_mes_server.sh
+```
+
+脚本会安装 PostgreSQL 16、创建 `mes_db` 和 `mes_user`、写入 `/opt/mes/config.ini`，并只开放 `8000/tcp` 和 `22/tcp`。默认不开放 `5432/tcp`；MES 服务和 PostgreSQL 在同一台服务器时，PostgreSQL 只需要监听本机 `127.0.0.1`。
+
+备份：
+
+```bash
+deploy/rocky9/db_tools/pg_backup.sh
+```
+
+恢复：
+
+```bash
+deploy/rocky9/db_tools/pg_restore.sh /opt/mes/backup/mes_db_YYYYMMDD_HHMMSS.dump
+```
+
+## SQLite 迁移到 PostgreSQL
+
+旧 SQLite 文件 `quality_control.db` 可迁移到 PostgreSQL：
+
+```bash
+python3 tools/migrate_sqlite_to_postgres.py --sqlite quality_control.db
+```
+
+如果目标 PostgreSQL 已有数据，脚本会拒绝迁移。确认继续时使用：
+
+```bash
+python3 tools/migrate_sqlite_to_postgres.py --sqlite quality_control.db --force
+```
+
+迁移表：`projects`、`stations`、`steps`、`scan_records`、`station_completions`。
+
+## Mac 远程管理 PostgreSQL
+
+推荐使用 SSH 隧道，不直接暴露服务器 `5432`：
+
+```bash
+ssh -L 5433:127.0.0.1:5432 admin@服务器IP
+```
+
+Mac 上数据库工具连接：
+
+```text
+Host: 127.0.0.1
+Port: 5433
+Database: mes_db
+User: mes_user
+Password: mes_password
 ```
 
 ## Windows 打包
@@ -167,6 +245,7 @@ dist\QualityControlSystem.exe
 
 ## 版本说明
 
+- `v0.5.0`：MES 服务端数据库支持 PostgreSQL，增加 SQLite 到 PostgreSQL 迁移方案、分页追溯接口和 Rocky Linux PostgreSQL 部署/备份脚本。
 - `v0.2.0`：增加地址54方向判断、NG锁枪、管理员密码解锁、线程安全写寄存器。
 
 ## 在线模式接口约定
@@ -232,3 +311,14 @@ Content-Type: application/json
   "completed_at": "2026-06-12T10:30:00"
 }
 ```
+
+分页追溯接口：
+
+```http
+GET /api/production-records?main_barcode=xxx&page=1&page_size=100
+GET /api/step-records?main_barcode=xxx&page=1&page_size=100
+GET /api/screw-records?main_barcode=xxx&page=1&page_size=100
+GET /api/trace?barcode=xxx
+```
+
+支持 `main_barcode`、`project_id`、`station_id`、`start_time`、`end_time`、`result`、`page`、`page_size`。默认 `page_size=100`，最大 `500`，禁止无条件查询大表。

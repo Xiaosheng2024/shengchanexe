@@ -42,7 +42,7 @@ from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, SCAN, SCREW
 
 
-APP_VERSION = "v0.2.0"
+APP_VERSION = "v0.5.0"
 
 
 class QualityControlWindow(QMainWindow):

@@ -8,14 +8,20 @@ from web_admin_app import database, services
 
 class MainBarcodeFlowTest(unittest.TestCase):
     def setUp(self):
+        self.old_db_path = database.DB_PATH
+        self.old_config_path = database.CONFIG_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
         database.DB_PATH = Path(self.temp_dir.name) / "quality_control.db"
+        database.CONFIG_PATH = Path(self.temp_dir.name) / "config.ini"
+        database.CONFIG_PATH.write_text(f"[DATABASE]\ntype = sqlite\npath = {database.DB_PATH}\n", encoding="utf-8")
         database.init_db()
         self.project = services.list_projects_full()[0]
         self.station1 = self.project["stations"][0]
         self.station2 = self.project["stations"][1]
 
     def tearDown(self):
+        database.DB_PATH = self.old_db_path
+        database.CONFIG_PATH = self.old_config_path
         self.temp_dir.cleanup()
 
     def main_steps(self, station_id):
@@ -91,6 +97,63 @@ class MainBarcodeFlowTest(unittest.TestCase):
                 }
             )["completed"]
         )
+
+    def test_traceability_records_are_saved_and_paginated_by_barcode(self):
+        barcode = "TRACE-001"
+        production = services.add_production_record(
+            {
+                "project_id": self.project["id"],
+                "station_id": self.station1["id"],
+                "main_barcode": barcode,
+                "product_name": "测试产品",
+                "station_name": self.station1["name"],
+                "start_time": "2026-06-26T10:00:00",
+                "end_time": "2026-06-26T10:01:00",
+                "work_duration_seconds": 60,
+                "total_steps": 2,
+                "completed_steps": 2,
+                "result": "OK",
+            }
+        )
+        step = services.add_step_record(
+            {
+                "station_work_id": production["id"],
+                "project_id": self.project["id"],
+                "station_id": self.station1["id"],
+                "main_barcode": barcode,
+                "step_name": "打螺丝",
+                "step_type": "螺丝",
+                "step_order": 1,
+                "start_time": "2026-06-26T10:00:20",
+                "result": "OK",
+            }
+        )
+        services.add_screw_record(
+            {
+                "station_work_id": production["id"],
+                "step_work_id": step["id"],
+                "project_id": self.project["id"],
+                "station_id": self.station1["id"],
+                "main_barcode": barcode,
+                "step_name": "打螺丝",
+                "screw_index": 1,
+                "required_count": 1,
+                "status_value": 2,
+                "trigger_value": 1,
+                "direction_value": 0,
+                "result": "OK",
+                "is_counted": True,
+            }
+        )
+
+        production_records = services.list_production_records({"main_barcode": [barcode], "page_size": ["1"]})
+        trace = services.get_trace({"barcode": [barcode]})
+
+        self.assertEqual(production_records["page_size"], 1)
+        self.assertEqual(len(production_records["records"]), 1)
+        self.assertEqual(trace["production_records"][0]["main_barcode"], barcode)
+        self.assertEqual(trace["step_records"][0]["step_name"], "打螺丝")
+        self.assertEqual(trace["screw_records"][0]["result"], "OK")
         self.assertFalse(
             services.check_station_completion(
                 {
@@ -105,7 +168,11 @@ class MainBarcodeFlowTest(unittest.TestCase):
 class OldDatabaseMigrationTest(unittest.TestCase):
     def test_old_steps_table_gets_main_barcode_column_and_default_main(self):
         with tempfile.TemporaryDirectory() as temp_dir:
+            old_db_path = database.DB_PATH
+            old_config_path = database.CONFIG_PATH
             database.DB_PATH = Path(temp_dir) / "old.db"
+            database.CONFIG_PATH = Path(temp_dir) / "config.ini"
+            database.CONFIG_PATH.write_text(f"[DATABASE]\ntype = sqlite\npath = {database.DB_PATH}\n", encoding="utf-8")
             with sqlite3.connect(database.DB_PATH) as conn:
                 conn.executescript(
                     """
@@ -149,6 +216,8 @@ class OldDatabaseMigrationTest(unittest.TestCase):
                     "SELECT COUNT(*) AS total FROM steps WHERE station_id = 1 AND is_main_barcode = 1"
                 ).fetchone()["total"]
                 self.assertEqual(main_count, 1)
+            database.DB_PATH = old_db_path
+            database.CONFIG_PATH = old_config_path
 
 
 if __name__ == "__main__":

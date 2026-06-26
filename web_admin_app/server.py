@@ -1,16 +1,18 @@
 import json
-import sqlite3
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
 from web_admin_app.admin_page import HTML
-from web_admin_app.database import DB_PATH, init_db
+from web_admin_app.database import get_database_type, init_db, load_database_config
 from web_admin_app.services import (
     add_project,
+    add_production_record,
     add_scan_record,
+    add_screw_record,
     add_station,
     add_station_completion,
+    add_step_record,
     add_step,
     check_station_completion,
     delete_project,
@@ -20,8 +22,12 @@ from web_admin_app.services import (
     get_station_config,
     list_projects,
     list_projects_full,
+    list_production_records,
     list_scan_records,
+    list_screw_records,
     list_steps,
+    list_step_records,
+    get_trace,
     update_project,
     update_scan_record,
     update_station,
@@ -73,8 +79,6 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.route_post()
         except ValueError as exc:
             json_response(self, {"error": str(exc)}, 400)
-        except sqlite3.IntegrityError as exc:
-            json_response(self, {"error": f"数据重复或不合法：{exc}"}, 400)
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 
@@ -83,8 +87,6 @@ class AdminHandler(BaseHTTPRequestHandler):
             self.route_put()
         except ValueError as exc:
             json_response(self, {"error": str(exc)}, 400)
-        except sqlite3.IntegrityError as exc:
-            json_response(self, {"error": f"数据重复或不合法：{exc}"}, 400)
         except Exception as exc:
             json_response(self, {"error": str(exc)}, 500)
 
@@ -115,6 +117,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, check_station_completion(query))
         elif path == "/api/scan-records":
             json_response(self, {"records": list_scan_records(query)})
+        elif path == "/api/production-records":
+            json_response(self, list_production_records(query))
+        elif path == "/api/step-records":
+            json_response(self, list_step_records(query))
+        elif path == "/api/screw-records":
+            json_response(self, list_screw_records(query))
+        elif path == "/api/trace":
+            json_response(self, get_trace(query))
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -131,6 +141,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, add_station_completion(payload))
         elif path == "/api/scan-records":
             json_response(self, add_scan_record(payload))
+        elif path == "/api/production-records":
+            json_response(self, add_production_record(payload))
+        elif path == "/api/step-records":
+            json_response(self, add_step_record(payload))
+        elif path == "/api/screw-records":
+            json_response(self, add_screw_record(payload))
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -176,7 +192,11 @@ def run(host="0.0.0.0", port=8000):
     init_db()
     server = ThreadingHTTPServer((host, port), AdminHandler)
     print(f"管理后台已启动：http://127.0.0.1:{port}")
-    print(f"数据库文件：{DB_PATH}")
+    db_config = load_database_config()
+    if get_database_type() == "sqlite":
+        print(f"数据库：SQLite {db_config['path']}")
+    else:
+        print(f"数据库：PostgreSQL {db_config['host']}:{db_config['port']}/{db_config['database']}")
     server.serve_forever()
 
 
