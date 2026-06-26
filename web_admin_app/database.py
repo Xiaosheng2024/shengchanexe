@@ -19,6 +19,9 @@ PLC_STEP_COLUMNS = {
     "plc_ip": "TEXT NOT NULL DEFAULT '10.162.86.65'",
     "plc_rack": "INTEGER NOT NULL DEFAULT 0",
     "plc_slot": "INTEGER NOT NULL DEFAULT 1",
+    "plc_barcode_db": "INTEGER NOT NULL DEFAULT 201",
+    "plc_barcode_offset": "INTEGER NOT NULL DEFAULT 800",
+    "plc_barcode_length": "INTEGER NOT NULL DEFAULT 40",
     "plc_barcode1_db": "INTEGER NOT NULL DEFAULT 201",
     "plc_barcode1_offset": "INTEGER NOT NULL DEFAULT 800",
     "plc_barcode1_length": "INTEGER NOT NULL DEFAULT 40",
@@ -238,6 +241,7 @@ def init_db():
     with get_conn() as conn:
         if conn.db_type == "postgresql":
             create_postgresql_schema(conn)
+            migrate_postgresql_db(conn)
         else:
             create_sqlite_schema(conn)
             migrate_sqlite_db(conn)
@@ -277,6 +281,9 @@ def create_sqlite_schema(conn):
             plc_ip TEXT NOT NULL DEFAULT '10.162.86.65',
             plc_rack INTEGER NOT NULL DEFAULT 0,
             plc_slot INTEGER NOT NULL DEFAULT 1,
+            plc_barcode_db INTEGER NOT NULL DEFAULT 201,
+            plc_barcode_offset INTEGER NOT NULL DEFAULT 800,
+            plc_barcode_length INTEGER NOT NULL DEFAULT 40,
             plc_barcode1_db INTEGER NOT NULL DEFAULT 201,
             plc_barcode1_offset INTEGER NOT NULL DEFAULT 800,
             plc_barcode1_length INTEGER NOT NULL DEFAULT 40,
@@ -349,6 +356,9 @@ def create_postgresql_schema(conn):
             plc_ip TEXT NOT NULL DEFAULT '10.162.86.65',
             plc_rack INTEGER NOT NULL DEFAULT 0,
             plc_slot INTEGER NOT NULL DEFAULT 1,
+            plc_barcode_db INTEGER NOT NULL DEFAULT 201,
+            plc_barcode_offset INTEGER NOT NULL DEFAULT 800,
+            plc_barcode_length INTEGER NOT NULL DEFAULT 40,
             plc_barcode1_db INTEGER NOT NULL DEFAULT 201,
             plc_barcode1_offset INTEGER NOT NULL DEFAULT 800,
             plc_barcode1_length INTEGER NOT NULL DEFAULT 40,
@@ -524,6 +534,48 @@ def migrate_sqlite_db(conn):
     for column, definition in PLC_STEP_COLUMNS.items():
         if column not in columns:
             conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
+            columns.append(column)
+    if "plc_barcode_db" in columns and "plc_barcode1_db" in columns:
+        conn.execute(
+            """
+            UPDATE steps
+            SET plc_barcode_db = plc_barcode1_db,
+                plc_barcode_offset = plc_barcode1_offset,
+                plc_barcode_length = plc_barcode1_length
+            WHERE plc_barcode_db IS NULL
+               OR plc_barcode_offset IS NULL
+               OR plc_barcode_length IS NULL
+            """
+        )
+
+
+def migrate_postgresql_db(conn):
+    rows = conn.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = 'steps'
+        """
+    ).fetchall()
+    columns = {row["column_name"] for row in rows}
+    for column, definition in PLC_STEP_COLUMNS.items():
+        if column in columns:
+            continue
+        pg_definition = definition.replace("INTEGER", "INTEGER").replace("TEXT", "TEXT")
+        conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {pg_definition}")
+        columns.add(column)
+    if {"plc_barcode_db", "plc_barcode1_db", "plc_barcode_offset", "plc_barcode1_offset", "plc_barcode_length", "plc_barcode1_length"}.issubset(columns):
+        conn.execute(
+            """
+            UPDATE steps
+            SET plc_barcode_db = plc_barcode1_db,
+                plc_barcode_offset = plc_barcode1_offset,
+                plc_barcode_length = plc_barcode1_length
+            WHERE plc_barcode_db IS NULL
+               OR plc_barcode_offset IS NULL
+               OR plc_barcode_length IS NULL
+            """
+        )
 
 
 def seed_default_data(conn):

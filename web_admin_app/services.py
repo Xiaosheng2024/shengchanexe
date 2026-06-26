@@ -3,7 +3,7 @@ import json
 import shutil
 import socket
 import subprocess
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
 
@@ -32,6 +32,9 @@ PLC_DEFAULTS = {
     "plc_ip": "10.162.86.65",
     "plc_rack": 0,
     "plc_slot": 1,
+    "plc_barcode_db": 201,
+    "plc_barcode_offset": 800,
+    "plc_barcode_length": 40,
     "plc_barcode1_db": 201,
     "plc_barcode1_offset": 800,
     "plc_barcode1_length": 40,
@@ -50,6 +53,7 @@ PLC_DEFAULTS = {
     "plc_poll_interval_ms": 500,
     "plc_barcode_wait_ok_timeout_seconds": 30,
 }
+STATION_SESSION_TIMEOUT_SECONDS = 120
 
 
 def pagination(query):
@@ -59,7 +63,17 @@ def pagination(query):
 
 
 def client_label(payload):
-    return payload.get("client_id") or f"{payload.get('computer_name', socket.gethostname())}-{payload.get('ip_address', '')}"
+    return payload.get("client_id") or payload.get("device_id") or f"{payload.get('computer_name') or payload.get('device_name') or socket.gethostname()}-{payload.get('ip_address', '')}"
+
+
+def normalize_session_payload(payload):
+    payload = dict(payload)
+    if not payload.get("client_id") and payload.get("device_id"):
+        payload["client_id"] = payload.get("device_id")
+    if not payload.get("computer_name") and payload.get("device_name"):
+        payload["computer_name"] = payload.get("device_name")
+    payload["client_id"] = client_label(payload)
+    return payload
 
 
 def resolve_project_station_ids(conn, payload):
@@ -104,11 +118,32 @@ def log_station_session(conn, project_id, station_id, payload, action, message):
     )
 
 
+def parse_time(value):
+    if isinstance(value, datetime):
+        return value
+    if not value:
+        return None
+    try:
+        return datetime.fromisoformat(str(value))
+    except ValueError:
+        return None
+
+
+def release_stale_station_sessions(conn):
+    threshold = datetime.now() - timedelta(seconds=STATION_SESSION_TIMEOUT_SECONDS)
+    rows = conn.execute("SELECT * FROM station_sessions WHERE status = 'online'").fetchall()
+    for row in rows:
+        last_heartbeat = parse_time(row["last_heartbeat_at"])
+        if last_heartbeat and last_heartbeat < threshold:
+            conn.execute("UPDATE station_sessions SET status = 'offline', note = ? WHERE id = ?", ("心跳超时自动释放", row["id"]))
+            log_station_session(conn, row["project_id"], row["station_id"], row_to_dict(row), "timeout-release", "心跳超过120秒，自动释放工位")
+
+
 def acquire_station_session(payload, force=False):
-    payload = dict(payload)
-    payload["client_id"] = client_label(payload)
+    payload = normalize_session_payload(payload)
     with get_conn() as conn:
         project_id, station_id = resolve_project_station_ids(conn, payload)
+        release_stale_station_sessions(conn)
         existing = conn.execute(
             """
             SELECT * FROM station_sessions
@@ -163,9 +198,11 @@ def acquire_station_session(payload, force=False):
 
 
 def heartbeat_station_session(payload):
-    client_id = client_label(payload)
+    payload = normalize_session_payload(payload)
+    client_id = payload["client_id"]
     with get_conn() as conn:
         project_id, station_id = resolve_project_station_ids(conn, payload)
+        release_stale_station_sessions(conn)
         row = conn.execute(
             "SELECT * FROM station_sessions WHERE project_id = ? AND station_id = ? AND status = 'online'",
             (project_id, station_id),
@@ -177,7 +214,8 @@ def heartbeat_station_session(payload):
 
 
 def release_station_session(payload):
-    client_id = client_label(payload)
+    payload = normalize_session_payload(payload)
+    client_id = payload["client_id"]
     with get_conn() as conn:
         project_id, station_id = resolve_project_station_ids(conn, payload)
         conn.execute(
@@ -186,6 +224,33 @@ def release_station_session(payload):
         )
         log_station_session(conn, project_id, station_id, dict(payload, client_id=client_id), "release", "客户端释放工位")
     return {"ok": True}
+
+
+def list_station_sessions(query=None):
+    query = query or {}
+    status = query.get("status", ["online"])[0] if hasattr(query, "get") else "online"
+    with get_conn() as conn:
+        release_stale_station_sessions(conn)
+        where = ""
+        params = []
+        if status:
+            where = "WHERE station_sessions.status = ?"
+            params.append(status)
+        rows = conn.execute(
+            f"""
+            SELECT station_sessions.id, projects.name AS project_name, stations.name AS station_name,
+                   station_sessions.client_id, station_sessions.computer_name, station_sessions.ip_address,
+                   station_sessions.status, station_sessions.acquired_at, station_sessions.last_heartbeat_at,
+                   station_sessions.note
+            FROM station_sessions
+            JOIN projects ON projects.id = station_sessions.project_id
+            JOIN stations ON stations.id = station_sessions.station_id
+            {where}
+            ORDER BY station_sessions.last_heartbeat_at DESC
+            """,
+            params,
+        ).fetchall()
+    return {"sessions": [row_to_dict(row) for row in rows]}
 
 
 def list_projects():
@@ -316,12 +381,13 @@ def add_step(payload):
             """
             INSERT INTO steps
             (station_id, step_order, name, type, required_count, barcode_start, barcode_end, expected_content, is_main_barcode,
-             plc_ip, plc_rack, plc_slot, plc_barcode1_db, plc_barcode1_offset, plc_barcode1_length,
+             plc_ip, plc_rack, plc_slot, plc_barcode_db, plc_barcode_offset, plc_barcode_length,
+             plc_barcode1_db, plc_barcode1_offset, plc_barcode1_length,
              plc_barcode2_db, plc_barcode2_offset, plc_barcode2_length, plc_parts_ok_db, plc_parts_ok_offset,
              plc_parts_ok_type, plc_trigger_mode, plc_use_barcode_index, plc_barcode_encoding,
              plc_barcode_strip_null, plc_barcode_strip_space, plc_timeout_seconds, plc_poll_interval_ms,
              plc_barcode_wait_ok_timeout_seconds, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 station_id,
@@ -360,7 +426,8 @@ def update_step(step_id, payload):
             UPDATE steps
             SET station_id = ?, step_order = ?, name = ?, type = ?, required_count = ?,
                 barcode_start = ?, barcode_end = ?, expected_content = ?, is_main_barcode = ?,
-                plc_ip = ?, plc_rack = ?, plc_slot = ?, plc_barcode1_db = ?, plc_barcode1_offset = ?,
+                plc_ip = ?, plc_rack = ?, plc_slot = ?, plc_barcode_db = ?, plc_barcode_offset = ?,
+                plc_barcode_length = ?, plc_barcode1_db = ?, plc_barcode1_offset = ?,
                 plc_barcode1_length = ?, plc_barcode2_db = ?, plc_barcode2_offset = ?, plc_barcode2_length = ?,
                 plc_parts_ok_db = ?, plc_parts_ok_offset = ?, plc_parts_ok_type = ?, plc_trigger_mode = ?,
                 plc_use_barcode_index = ?, plc_barcode_encoding = ?, plc_barcode_strip_null = ?,
@@ -441,14 +508,30 @@ def normalize_main_barcode(payload, step_type: str) -> bool:
     return is_main_barcode
 
 
+def station_number_from_name(name: str) -> int:
+    digits = "".join(ch for ch in str(name or "") if ch.isdigit())
+    return int(digits) if digits else 1
+
+
 def plc_payload_values(payload):
     values = dict(PLC_DEFAULTS)
+    if payload.get("plc_barcode_db") in ("", None) and payload.get("plc_barcode1_db") not in ("", None):
+        payload = dict(payload)
+        payload["plc_barcode_db"] = payload.get("plc_barcode1_db")
+        payload["plc_barcode_offset"] = payload.get("plc_barcode1_offset")
+        payload["plc_barcode_length"] = payload.get("plc_barcode1_length")
     for key in PLC_DEFAULTS:
         if key in payload and payload.get(key) not in ("", None):
             values[key] = payload.get(key)
+    values["plc_barcode1_db"] = values["plc_barcode_db"]
+    values["plc_barcode1_offset"] = values["plc_barcode_offset"]
+    values["plc_barcode1_length"] = values["plc_barcode_length"]
     int_keys = [
         "plc_rack",
         "plc_slot",
+        "plc_barcode_db",
+        "plc_barcode_offset",
+        "plc_barcode_length",
         "plc_barcode1_db",
         "plc_barcode1_offset",
         "plc_barcode1_length",
@@ -471,7 +554,15 @@ def plc_payload_values(payload):
 
 def plc_step_config(step):
     keys = step.keys() if hasattr(step, "keys") else []
-    return {key: step[key] for key in PLC_DEFAULTS if key in keys}
+    config = {key: step[key] for key in PLC_DEFAULTS if key in keys}
+    if "plc_barcode_db" not in config and "plc_barcode1_db" in config:
+        config["plc_barcode_db"] = config["plc_barcode1_db"]
+        config["plc_barcode_offset"] = config.get("plc_barcode1_offset", 800)
+        config["plc_barcode_length"] = config.get("plc_barcode1_length", 40)
+    config["plc_barcode1_db"] = config.get("plc_barcode_db", config.get("plc_barcode1_db", 201))
+    config["plc_barcode1_offset"] = config.get("plc_barcode_offset", config.get("plc_barcode1_offset", 800))
+    config["plc_barcode1_length"] = config.get("plc_barcode_length", config.get("plc_barcode1_length", 40))
+    return config
 
 
 def clear_station_main_barcode(conn, station_id: int):
@@ -501,6 +592,18 @@ def validate_station_main_barcode(conn, station_id: int):
         raise ValueError("每个工位必须配置一个主条码扫码工序")
     if main_count > 1:
         raise ValueError("每个工位只能配置一个主条码扫码工序")
+    main_row = conn.execute(
+        """
+        SELECT steps.step_order, stations.name AS station_name
+        FROM steps
+        JOIN stations ON stations.id = steps.station_id
+        WHERE station_id = ? AND type IN (?, ?) AND is_main_barcode = 1
+        ORDER BY steps.step_order, steps.id LIMIT 1
+        """,
+        (station_id, SCAN_TYPE, PLC_TYPE),
+    ).fetchone()
+    if main_row and station_number_from_name(main_row["station_name"]) > 1 and int(main_row["step_order"]) != 1:
+        raise ValueError("非第一工位的主条码工序必须是当前工位第1道工序")
 
 
 def ensure_station_has_main_barcode(conn, station_id: int):

@@ -10,12 +10,9 @@ class PlcPollConfig:
     ip: str
     rack: int
     slot: int
-    barcode1_db: int
-    barcode1_offset: int
-    barcode1_length: int
-    barcode2_db: int
-    barcode2_offset: int
-    barcode2_length: int
+    barcode_db: int
+    barcode_offset: int
+    barcode_length: int
     parts_ok_db: int
     parts_ok_offset: int
     parts_ok_type: str
@@ -27,7 +24,7 @@ class PlcPollConfig:
 
 
 class PlcPollWorker(QObject):
-    snapshot = pyqtSignal(int, str, str, str, str)
+    snapshot = pyqtSignal(int, str, str)
     error = pyqtSignal(str)
     stopped = pyqtSignal()
 
@@ -74,24 +71,16 @@ class PlcPollWorker(QObject):
             return
         self.reading = True
         try:
-            barcode1 = S7BarcodeAddress(
-                self.config.barcode1_db,
-                self.config.barcode1_offset,
-                self.config.barcode1_length,
+            barcode = S7BarcodeAddress(
+                self.config.barcode_db,
+                self.config.barcode_offset,
+                self.config.barcode_length,
                 self.config.barcode_encoding,
                 self.config.strip_null,
                 self.config.strip_space,
             )
-            barcode2 = S7BarcodeAddress(
-                self.config.barcode2_db,
-                self.config.barcode2_offset,
-                self.config.barcode2_length,
-                self.config.barcode_encoding,
-                self.config.strip_null,
-                self.config.strip_space,
-            )
-            snapshot = self.client.read_snapshot(barcode1, barcode2, self.config.parts_ok_db, self.config.parts_ok_offset, self.config.parts_ok_type)
-            self.snapshot.emit(snapshot.parts_ok, snapshot.barcode1, snapshot.barcode2, snapshot.barcode1_hex, snapshot.barcode2_hex)
+            snapshot = self.client.read_snapshot(barcode, self.config.parts_ok_db, self.config.parts_ok_offset, self.config.parts_ok_type)
+            self.snapshot.emit(snapshot.parts_ok, snapshot.main_barcode, snapshot.main_barcode_hex)
         except Exception as exc:
             self.error.emit(str(exc))
         finally:

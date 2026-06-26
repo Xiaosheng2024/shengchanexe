@@ -148,12 +148,12 @@ HTML = r"""<!doctype html>
               <label class="checkbox-label"><input id="plcIsMainBarcode" type="checkbox" checked> 是否主条码</label>
             </div>
             <div class="toolbar">
-              <label>条码1 DB</label><input id="plcBarcode1Db" type="number" value="201">
+              <label>主条码 DB</label><input id="plcBarcode1Db" type="number" value="201">
               <label>Offset</label><input id="plcBarcode1Offset" type="number" value="800">
               <label>Length</label><input id="plcBarcode1Length" type="number" value="40">
-              <label>条码2 DB</label><input id="plcBarcode2Db" type="number" value="201">
-              <label>Offset</label><input id="plcBarcode2Offset" type="number" value="840">
-              <label>Length</label><input id="plcBarcode2Length" type="number" value="40">
+              <input id="plcBarcode2Db" type="hidden" value="201">
+              <input id="plcBarcode2Offset" type="hidden" value="840">
+              <input id="plcBarcode2Length" type="hidden" value="40">
             </div>
             <div class="toolbar">
               <label>PARTS_OK DB</label><input id="plcPartsOkDb" type="number" value="221">
@@ -162,7 +162,7 @@ HTML = r"""<!doctype html>
               <label>触发模式</label><input id="plcTriggerMode" value="barcode_changed_then_parts_ok_increment">
             </div>
             <div class="toolbar">
-              <label>使用条码</label><input id="plcUseBarcodeIndex" type="number" min="1" max="2" value="1">
+              <input id="plcUseBarcodeIndex" type="hidden" min="1" max="2" value="1">
               <label>编码</label><input id="plcBarcodeEncoding" value="ascii">
               <label>轮询ms</label><input id="plcPollIntervalMs" type="number" value="500">
               <label>超时秒</label><input id="plcTimeoutSeconds" type="number" value="3">
@@ -229,6 +229,14 @@ HTML = r"""<!doctype html>
           </div>
           <p class="hint">默认不删除 station_completions；它用于前后工位校验。删除前系统会先自动备份。</p>
           <pre id="dbStatusText" style="white-space:pre-wrap;background:#f9fafb;border:1px solid #e5e7eb;padding:12px;border-radius:6px;"></pre>
+        </div>
+        <div class="panel">
+          <h2>在线工位占用</h2>
+          <button class="secondary" onclick="loadStationSessions()">刷新在线工位</button>
+          <table>
+            <thead><tr><th>项目</th><th>工位</th><th>client_id</th><th>computer_name</th><th>ip_address</th><th>last_heartbeat_at</th><th>状态</th><th>备注</th></tr></thead>
+            <tbody id="stationSessionRows"></tbody>
+          </table>
         </div>
         <div class="panel">
           <h2>维护日志</h2>
@@ -618,6 +626,9 @@ HTML = r"""<!doctype html>
         plc_ip: document.getElementById("plcIp").value.trim(),
         plc_rack: Number(document.getElementById("plcRack").value || 0),
         plc_slot: Number(document.getElementById("plcSlot").value || 1),
+        plc_barcode_db: Number(document.getElementById("plcBarcode1Db").value || 201),
+        plc_barcode_offset: Number(document.getElementById("plcBarcode1Offset").value || 800),
+        plc_barcode_length: Number(document.getElementById("plcBarcode1Length").value || 40),
         plc_barcode1_db: Number(document.getElementById("plcBarcode1Db").value || 201),
         plc_barcode1_offset: Number(document.getElementById("plcBarcode1Offset").value || 800),
         plc_barcode1_length: Number(document.getElementById("plcBarcode1Length").value || 40),
@@ -652,9 +663,9 @@ HTML = r"""<!doctype html>
       document.getElementById("plcIp").value = step.plc_ip || "10.162.86.65";
       document.getElementById("plcRack").value = step.plc_rack ?? 0;
       document.getElementById("plcSlot").value = step.plc_slot ?? 1;
-      document.getElementById("plcBarcode1Db").value = step.plc_barcode1_db ?? 201;
-      document.getElementById("plcBarcode1Offset").value = step.plc_barcode1_offset ?? 800;
-      document.getElementById("plcBarcode1Length").value = step.plc_barcode1_length ?? 40;
+      document.getElementById("plcBarcode1Db").value = step.plc_barcode_db ?? step.plc_barcode1_db ?? 201;
+      document.getElementById("plcBarcode1Offset").value = step.plc_barcode_offset ?? step.plc_barcode1_offset ?? 800;
+      document.getElementById("plcBarcode1Length").value = step.plc_barcode_length ?? step.plc_barcode1_length ?? 40;
       document.getElementById("plcBarcode2Db").value = step.plc_barcode2_db ?? 201;
       document.getElementById("plcBarcode2Offset").value = step.plc_barcode2_offset ?? 840;
       document.getElementById("plcBarcode2Length").value = step.plc_barcode2_length ?? 40;
@@ -812,6 +823,7 @@ HTML = r"""<!doctype html>
     async function loadDbStatus() {
       const data = await api("/api/admin/db/status");
       document.getElementById("dbStatusText").textContent = JSON.stringify(data, null, 2);
+      await loadStationSessions();
       await loadMaintenanceLogs();
     }
 
@@ -858,6 +870,13 @@ HTML = r"""<!doctype html>
       document.getElementById("maintenanceLogRows").innerHTML = data.records.map(row =>
         `<tr><td>${row.created_at}</td><td>${htmlEscape(row.action)}</td><td>${htmlEscape(row.message || "")}</td><td>${htmlEscape(row.detail || "")}</td></tr>`
       ).join("") || `<tr><td colspan="4">暂无日志</td></tr>`;
+    }
+
+    async function loadStationSessions() {
+      const data = await api("/api/station-sessions?status=online");
+      document.getElementById("stationSessionRows").innerHTML = data.sessions.map(row =>
+        `<tr><td>${htmlEscape(row.project_name || "")}</td><td>${htmlEscape(row.station_name || "")}</td><td>${htmlEscape(row.client_id || "")}</td><td>${htmlEscape(row.computer_name || "")}</td><td>${htmlEscape(row.ip_address || "")}</td><td>${htmlEscape(row.last_heartbeat_at || "")}</td><td>${htmlEscape(row.status || "")}</td><td>${htmlEscape(row.note || "")}</td></tr>`
+      ).join("") || `<tr><td colspan="8">暂无在线工位</td></tr>`;
     }
 
     refreshAll().catch(err => showStatus(err.message));

@@ -44,7 +44,7 @@ from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
 
 
-APP_VERSION = "v0.8.0"
+APP_VERSION = "v0.8.1"
 
 
 def as_bool(value, default=False):
@@ -82,6 +82,7 @@ class QualityControlWindow(QMainWindow):
         self.settings_dialog: Optional[QDialog] = None
         self.history_dialog: Optional[QDialog] = None
         self.tool_settings_dialog: Optional[QDialog] = None
+        self.local_device_dialog: Optional[QDialog] = None
         self.app_config_path = Path(__file__).resolve().parent.parent / "config.ini"
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
@@ -89,11 +90,9 @@ class QualityControlWindow(QMainWindow):
         self.tool_worker: Optional[ToolPollWorker] = None
         self.plc_thread: Optional[QThread] = None
         self.plc_worker: Optional[PlcPollWorker] = None
-        self.plc_last_barcode1 = ""
-        self.plc_last_barcode2 = ""
+        self.plc_last_main_barcode = ""
         self.plc_last_parts_ok: Optional[int] = None
-        self.plc_pending_barcode1 = ""
-        self.plc_pending_barcode2 = ""
+        self.plc_pending_main_barcode = ""
         self.plc_pending_barcode_time: Optional[datetime] = None
         self.plc_waiting_parts_ok = False
         self.station_session_acquired = False
@@ -109,6 +108,7 @@ class QualityControlWindow(QMainWindow):
 
         self.build_ui()
         self.load_tool_settings()
+        self.load_local_device_settings()
         self.refresh_project_station_selectors()
         self.load_station(self.current_project.name, self.current_station.name)
 
@@ -162,6 +162,8 @@ class QualityControlWindow(QMainWindow):
         sync_projects_btn.clicked.connect(self.sync_online_projects)
         download_btn = QPushButton("下载配置")
         download_btn.clicked.connect(self.download_online_config)
+        local_device_btn = QPushButton("本机设置")
+        local_device_btn.clicked.connect(self.open_local_device_dialog)
         self.degraded_mode_checkbox = QCheckBox("降级模式（跳过上道工位校验）")
         self.degraded_mode_checkbox.setToolTip("勾选后不检查上道工位是否完成，只检测当前工位自己的工序")
         self.degraded_mode_checkbox.stateChanged.connect(self.change_degraded_mode)
@@ -175,6 +177,7 @@ class QualityControlWindow(QMainWindow):
             mode_layout.addWidget(widget)
         mode_layout.addWidget(sync_projects_btn)
         mode_layout.addWidget(download_btn)
+        mode_layout.addWidget(local_device_btn)
         mode_layout.addStretch(1)
         mode_layout.addWidget(self.degraded_mode_checkbox)
         root_layout.addWidget(mode_box)
@@ -389,6 +392,7 @@ class QualityControlWindow(QMainWindow):
         root_layout.addLayout(window_row)
 
         self.build_settings_dialog()
+        self.build_local_device_dialog()
 
         self.setStyleSheet(
             "QGroupBox { font-size: 16px; font-weight: 600; border: 1px solid #d1d5db;"
@@ -604,12 +608,9 @@ class QualityControlWindow(QMainWindow):
                     plc_ip=item.get("plc_ip", "10.162.86.65"),
                     plc_rack=int(item.get("plc_rack", 0)),
                     plc_slot=int(item.get("plc_slot", 1)),
-                    plc_barcode1_db=int(item.get("plc_barcode1_db", 201)),
-                    plc_barcode1_offset=int(item.get("plc_barcode1_offset", 800)),
-                    plc_barcode1_length=int(item.get("plc_barcode1_length", 40)),
-                    plc_barcode2_db=int(item.get("plc_barcode2_db", 201)),
-                    plc_barcode2_offset=int(item.get("plc_barcode2_offset", 840)),
-                    plc_barcode2_length=int(item.get("plc_barcode2_length", 40)),
+                    plc_barcode_db=int(item.get("plc_barcode_db", item.get("plc_barcode1_db", 201))),
+                    plc_barcode_offset=int(item.get("plc_barcode_offset", item.get("plc_barcode1_offset", 800))),
+                    plc_barcode_length=int(item.get("plc_barcode_length", item.get("plc_barcode1_length", 40))),
                     plc_parts_ok_db=int(item.get("plc_parts_ok_db", 221)),
                     plc_parts_ok_offset=int(item.get("plc_parts_ok_offset", 358)),
                     plc_parts_ok_type=item.get("plc_parts_ok_type", "int"),
@@ -682,7 +683,7 @@ class QualityControlWindow(QMainWindow):
             conflict = data.get("conflict") or {}
             message = (
                 f"工位已被占用：项目 {self.current_project.name}，工位 {self.current_station.name}，"
-                f"电脑 {conflict.get('computer_name', '')}，IP {conflict.get('ip_address', '')}，"
+                f"client_id {conflict.get('client_id', '')}，电脑 {conflict.get('computer_name', '')}，IP {conflict.get('ip_address', '')}，"
                 f"最后心跳 {conflict.get('last_heartbeat_at', '')}"
             )
             self.message_label.setText(message)
@@ -937,6 +938,97 @@ class QualityControlWindow(QMainWindow):
         self.message_label.setText(message)
         QMessageBox.information(self, "提示", message)
         self.tool_settings_dialog.accept()
+
+    def build_local_device_dialog(self):
+        self.local_device_dialog = QDialog(self)
+        self.local_device_dialog.setWindowTitle("本机设备设置")
+        self.local_device_dialog.resize(520, 360)
+        layout = QVBoxLayout(self.local_device_dialog)
+        note = QLabel("正式生产优先使用网页端工序配置；本机PLC覆盖只用于现场临时调试或网络变更应急。")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        self.local_mes_server_label = QLabel(self.api_base_input.text())
+        self.local_project_station_label = QLabel(f"{self.current_project.name} / {self.current_station.name}")
+        self.local_auto_sync_checkbox = QCheckBox("启动后允许手动同步网页端配置")
+        self.local_auto_sync_checkbox.setChecked(True)
+        self.local_plc_override_checkbox = QCheckBox("启用PLC本地覆盖")
+        self.local_plc_ip_input = QLineEdit("10.162.86.65")
+        self.local_plc_ip_input.setFixedWidth(160)
+        self.local_plc_timeout_input = QSpinBox()
+        self.local_plc_timeout_input.setRange(1, 30)
+        self.local_plc_timeout_input.setValue(3)
+        self.local_plc_poll_interval_input = QSpinBox()
+        self.local_plc_poll_interval_input.setRange(200, 10000)
+        self.local_plc_poll_interval_input.setSingleStep(100)
+        self.local_plc_poll_interval_input.setValue(500)
+        form.addRow("MES接口地址", self.local_mes_server_label)
+        form.addRow("当前项目/工位", self.local_project_station_label)
+        form.addRow("自动同步", self.local_auto_sync_checkbox)
+        form.addRow("PLC本地覆盖", self.local_plc_override_checkbox)
+        form.addRow("PLC覆盖IP", self.local_plc_ip_input)
+        form.addRow("PLC超时秒", self.local_plc_timeout_input)
+        form.addRow("PLC轮询ms", self.local_plc_poll_interval_input)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        save_btn = QPushButton("保存")
+        cancel_btn = QPushButton("取消")
+        save_btn.clicked.connect(self.save_local_device_settings_from_dialog)
+        cancel_btn.clicked.connect(self.local_device_dialog.reject)
+        button_row.addStretch(1)
+        button_row.addWidget(save_btn)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def open_local_device_dialog(self):
+        self.local_mes_server_label.setText(self.api_base_input.text())
+        self.local_project_station_label.setText(f"{self.current_project.name} / {self.current_station.name}")
+        self.local_device_dialog.show()
+        self.local_device_dialog.raise_()
+        self.local_device_dialog.activateWindow()
+
+    def load_local_device_settings(self):
+        if not self.app_config_path.exists():
+            return
+        config = configparser.ConfigParser()
+        config.read(self.app_config_path, encoding="utf-8")
+        if "LOCAL_DEVICE" not in config:
+            return
+        local = config["LOCAL_DEVICE"]
+        self.local_auto_sync_checkbox.setChecked(local.getboolean("auto_sync_config", fallback=True))
+        self.local_plc_override_checkbox.setChecked(local.getboolean("plc_override_enabled", fallback=False))
+        self.local_plc_ip_input.setText(local.get("plc_ip", self.local_plc_ip_input.text()))
+        self.local_plc_timeout_input.setValue(local.getint("plc_timeout_seconds", fallback=self.local_plc_timeout_input.value()))
+        self.local_plc_poll_interval_input.setValue(local.getint("plc_poll_interval_ms", fallback=self.local_plc_poll_interval_input.value()))
+
+    def save_local_device_settings(self):
+        config = configparser.ConfigParser()
+        if self.app_config_path.exists():
+            config.read(self.app_config_path, encoding="utf-8")
+        if "LOCAL_DEVICE" not in config:
+            config["LOCAL_DEVICE"] = {}
+        config["LOCAL_DEVICE"].update(
+            {
+                "mes_server": self.api_base_input.text().strip(),
+                "project": self.current_project.name,
+                "station": self.current_station.name,
+                "auto_sync_config": str(self.local_auto_sync_checkbox.isChecked()).lower(),
+                "plc_override_enabled": str(self.local_plc_override_checkbox.isChecked()).lower(),
+                "plc_ip": self.local_plc_ip_input.text().strip(),
+                "plc_timeout_seconds": str(self.local_plc_timeout_input.value()),
+                "plc_poll_interval_ms": str(self.local_plc_poll_interval_input.value()),
+            }
+        )
+        with self.app_config_path.open("w", encoding="utf-8") as file:
+            config.write(file)
+
+    def save_local_device_settings_from_dialog(self):
+        self.save_local_device_settings()
+        self.message_label.setText("本机设备设置已保存")
+        QMessageBox.information(self, "提示", "本机设备设置已保存；PLC覆盖参数将在下次进入PLC工序时生效")
+        self.local_device_dialog.accept()
 
     def load_product(self, product_name: str):
         if not product_name:
@@ -1236,24 +1328,28 @@ class QualityControlWindow(QMainWindow):
         if self.plc_thread is not None and self.plc_thread.isRunning():
             return
         self.reset_plc_state()
+        plc_ip = step.plc_ip
+        timeout_seconds = step.plc_timeout_seconds
+        poll_interval_ms = step.plc_poll_interval_ms
+        if self.local_plc_override_checkbox.isChecked():
+            plc_ip = self.local_plc_ip_input.text().strip() or plc_ip
+            timeout_seconds = self.local_plc_timeout_input.value()
+            poll_interval_ms = self.local_plc_poll_interval_input.value()
         config = PlcPollConfig(
-            ip=step.plc_ip,
+            ip=plc_ip,
             rack=step.plc_rack,
             slot=step.plc_slot,
-            barcode1_db=step.plc_barcode1_db,
-            barcode1_offset=step.plc_barcode1_offset,
-            barcode1_length=step.plc_barcode1_length,
-            barcode2_db=step.plc_barcode2_db,
-            barcode2_offset=step.plc_barcode2_offset,
-            barcode2_length=step.plc_barcode2_length,
+            barcode_db=step.plc_barcode_db,
+            barcode_offset=step.plc_barcode_offset,
+            barcode_length=step.plc_barcode_length,
             parts_ok_db=step.plc_parts_ok_db,
             parts_ok_offset=step.plc_parts_ok_offset,
             parts_ok_type=step.plc_parts_ok_type,
             barcode_encoding=step.plc_barcode_encoding,
             strip_null=step.plc_barcode_strip_null,
             strip_space=step.plc_barcode_strip_space,
-            timeout_seconds=step.plc_timeout_seconds,
-            poll_interval_ms=step.plc_poll_interval_ms,
+            timeout_seconds=timeout_seconds,
+            poll_interval_ms=poll_interval_ms,
         )
         self.plc_thread = QThread(self)
         self.plc_worker = PlcPollWorker(config)
@@ -1265,7 +1361,10 @@ class QualityControlWindow(QMainWindow):
         self.plc_thread.finished.connect(self.plc_worker.deleteLater)
         self.plc_thread.finished.connect(self.cleanup_plc_worker)
         self.plc_thread.start()
-        self.message_label.setText(f"PLC接收工序已启动，连接 {step.plc_ip}")
+        if self.local_plc_override_checkbox.isChecked():
+            self.message_label.setText(f"当前启用了 PLC 本地覆盖，实际使用 IP：{plc_ip}；长期修改必须走 Web 后台")
+        else:
+            self.message_label.setText(f"PLC接收工序已启动，连接 {plc_ip}")
 
     def stop_plc_worker(self):
         if self.plc_thread is not None:
@@ -1280,18 +1379,16 @@ class QualityControlWindow(QMainWindow):
         self.plc_thread = None
 
     def reset_plc_state(self):
-        self.plc_last_barcode1 = ""
-        self.plc_last_barcode2 = ""
+        self.plc_last_main_barcode = ""
         self.plc_last_parts_ok = None
-        self.plc_pending_barcode1 = ""
-        self.plc_pending_barcode2 = ""
+        self.plc_pending_main_barcode = ""
         self.plc_pending_barcode_time = None
         self.plc_waiting_parts_ok = False
 
     def on_plc_error(self, message: str):
         self.message_label.setText(f"PLC通讯异常：{message}")
 
-    def on_plc_snapshot(self, parts_ok: int, barcode1: str, barcode2: str, barcode1_hex: str, barcode2_hex: str):
+    def on_plc_snapshot(self, parts_ok: int, main_barcode: str, main_barcode_hex: str = ""):
         step = self.current_step()
         if step is None or step.step_type != PLC:
             return
@@ -1299,17 +1396,14 @@ class QualityControlWindow(QMainWindow):
             return
         if self.plc_last_parts_ok is None:
             self.plc_last_parts_ok = parts_ok
-            self.plc_last_barcode1 = barcode1
-            self.plc_last_barcode2 = barcode2
+            self.plc_last_main_barcode = main_barcode
             self.message_label.setText("PLC首次读取，仅建立条码和PARTS_OK基准")
             return
-        if barcode1 and barcode1 != self.plc_last_barcode1:
-            self.plc_pending_barcode1 = barcode1
-            self.plc_pending_barcode2 = barcode2
+        if main_barcode and main_barcode != self.plc_last_main_barcode:
+            self.plc_pending_main_barcode = main_barcode
             self.plc_pending_barcode_time = datetime.now()
             self.plc_waiting_parts_ok = True
-            self.plc_last_barcode1 = barcode1
-            self.plc_last_barcode2 = barcode2
+            self.plc_last_main_barcode = main_barcode
             self.message_label.setText("已检测到新条码，等待PLC完成OK")
         if parts_ok == self.plc_last_parts_ok:
             if self.plc_waiting_parts_ok and self.plc_pending_barcode_time:
@@ -1321,8 +1415,7 @@ class QualityControlWindow(QMainWindow):
             return
         if parts_ok < self.plc_last_parts_ok:
             self.plc_last_parts_ok = parts_ok
-            self.plc_pending_barcode1 = ""
-            self.plc_pending_barcode2 = ""
+            self.plc_pending_main_barcode = ""
             self.plc_waiting_parts_ok = False
             self.message_label.setText("PLC完成计数变小，已重新建立基准")
             return
@@ -1330,41 +1423,74 @@ class QualityControlWindow(QMainWindow):
         self.plc_last_parts_ok = parts_ok
         if parts_ok - old_parts_ok > 1:
             self.message_label.setText("PARTS_OK跳变超过1，可能漏采")
-        if not self.plc_waiting_parts_ok or not self.plc_pending_barcode1:
-            self.add_history_record(step, "异常", barcode1, "PARTS_OK递增，但未检测到新条码，无法确认OK对应哪个条码", completed=False)
+            self.add_history_record(
+                step,
+                "警告",
+                main_barcode,
+                f"PARTS_OK从{old_parts_ok}跳到{parts_ok}，可能漏采",
+                completed=False,
+            )
+        if not self.plc_waiting_parts_ok or not self.plc_pending_main_barcode:
+            self.add_history_record(step, "异常", main_barcode, "PARTS_OK递增，但未检测到新条码，无法确认OK对应哪个条码", completed=False)
             return
-        self.complete_plc_step(step, self.plc_pending_barcode1, self.plc_pending_barcode2, old_parts_ok, parts_ok)
+        self.complete_plc_step(step, self.plc_pending_main_barcode, main_barcode_hex, old_parts_ok, parts_ok)
 
-    def complete_plc_step(self, step: ProcessStep, barcode1: str, barcode2: str, parts_ok_before: int, parts_ok_after: int):
+    def complete_plc_step(self, step: ProcessStep, main_barcode: str, main_barcode_hex: str, parts_ok_before: int, parts_ok_after: int):
         if step.is_main_barcode:
-            self.current_barcode = barcode1
+            if self.should_check_previous_station() and not self.verify_previous_station_complete(main_barcode):
+                self.add_history_record(step, "异常", main_barcode, "上一工位未完成，PLC主条码不能进入当前工位", completed=False)
+                self.plc_pending_main_barcode = ""
+                self.plc_waiting_parts_ok = False
+                self.plc_last_main_barcode = ""
+                return
+            self.current_barcode = main_barcode
+        elif not self.current_barcode:
+            message = "缺少主条码，PLC普通工序不能完成"
+            self.message_label.setText(message)
+            self.show_auto_close_warning("主条码缺失", message)
+            self.add_history_record(step, "异常", main_barcode, message, completed=False)
+            self.plc_pending_main_barcode = ""
+            self.plc_waiting_parts_ok = False
+            self.plc_last_main_barcode = ""
+            return
+        elif main_barcode and main_barcode != self.current_barcode:
+            message = "PLC主条码与当前产品主条码不一致"
+            self.message_label.setText(message)
+            self.show_auto_close_warning("PLC条码不一致", message)
+            self.add_history_record(step, "异常", main_barcode, message, completed=False)
+            self.plc_pending_main_barcode = ""
+            self.plc_waiting_parts_ok = False
+            self.plc_last_main_barcode = ""
+            return
         step.done = True
-        self.add_history_record(step, "OK", barcode1, "PARTS_OK递增完成，barcode1作为主条码", completed=True)
-        self.post_plc_step_record(step, barcode1, barcode2, parts_ok_before, parts_ok_after)
-        self.plc_pending_barcode1 = ""
-        self.plc_pending_barcode2 = ""
+        self.refresh_work_area()
+        note = "PARTS_OK递增完成，PLC主条码作为流转主条码" if step.is_main_barcode else "PARTS_OK递增完成，PLC条码与当前主条码一致"
+        self.add_history_record(step, "OK", main_barcode, note, completed=True)
+        self.post_plc_step_record(step, main_barcode, main_barcode_hex, parts_ok_before, parts_ok_after)
+        self.plc_pending_main_barcode = ""
         self.plc_waiting_parts_ok = False
         self.stop_plc_worker()
-        self.message_label.setText(f"PLC接收完成：{barcode1}")
+        self.message_label.setText(f"PLC接收完成：{main_barcode}")
         self.advance_step()
 
-    def post_plc_step_record(self, step: ProcessStep, barcode1: str, barcode2: str, parts_ok_before: int, parts_ok_after: int):
+    def post_plc_step_record(self, step: ProcessStep, main_barcode: str, main_barcode_hex: str, parts_ok_before: int, parts_ok_after: int):
         if not self.online_mode:
             return
+        flow_barcode = self.current_barcode or main_barcode
         payload = {
             "project": self.current_project.name,
             "station": self.current_station.name,
-            "main_barcode": barcode1,
+            "main_barcode": flow_barcode,
             "step_name": step.name,
             "step_type": PLC,
             "step_order": self.current_step_index + 1,
             "start_time": self.step_started_at.isoformat(timespec="seconds"),
             "end_time": datetime.now().isoformat(timespec="seconds"),
             "duration_seconds": int((datetime.now() - self.step_started_at).total_seconds()),
-            "barcode": barcode1,
+            "barcode": main_barcode,
             "scan_result": "OK",
             "result": "OK",
-            "note": f"plc_barcode2={barcode2}; parts_ok_before={parts_ok_before}; parts_ok_after={parts_ok_after}",
+            "note": f"plc_main_barcode_hex={main_barcode_hex}; parts_ok_before={parts_ok_before}; parts_ok_after={parts_ok_after}",
         }
         try:
             self.api_post("/api/step-records", payload)

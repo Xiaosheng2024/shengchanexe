@@ -15,10 +15,16 @@ class S7BarcodeAddress:
 @dataclass
 class S7Snapshot:
     parts_ok: int
-    barcode1: str
-    barcode2: str
-    barcode1_hex: str
-    barcode2_hex: str
+    main_barcode: str
+    main_barcode_hex: str
+
+    @property
+    def barcode1(self) -> str:
+        return self.main_barcode
+
+    @property
+    def barcode1_hex(self) -> str:
+        return self.main_barcode_hex
 
 
 def parse_barcode(raw_bytes: bytes, encoding: str = "ascii", strip_null: bool = True, strip_space: bool = True) -> Tuple[str, str]:
@@ -98,8 +104,7 @@ class S7PlcClient:
 
     def read_snapshot(
         self,
-        barcode1: S7BarcodeAddress,
-        barcode2: S7BarcodeAddress,
+        barcode: S7BarcodeAddress,
         parts_ok_db: int,
         parts_ok_offset: int,
         parts_ok_type: str = "int",
@@ -107,11 +112,9 @@ class S7PlcClient:
         if parts_ok_type.lower() != "int":
             raise ValueError("当前仅支持 PARTS_OK 类型 int")
         parts_ok = self.read_int(parts_ok_db, parts_ok_offset)
-        raw1 = self.read_bytes(barcode1.db_number, barcode1.offset, barcode1.length)
-        raw2 = self.read_bytes(barcode2.db_number, barcode2.offset, barcode2.length)
-        barcode1_text, barcode1_hex = parse_barcode(raw1, barcode1.encoding, barcode1.strip_null, barcode1.strip_space)
-        barcode2_text, barcode2_hex = parse_barcode(raw2, barcode2.encoding, barcode2.strip_null, barcode2.strip_space)
-        return S7Snapshot(parts_ok, barcode1_text, barcode2_text, barcode1_hex, barcode2_hex)
+        raw = self.read_bytes(barcode.db_number, barcode.offset, barcode.length)
+        barcode_text, barcode_hex = parse_barcode(raw, barcode.encoding, barcode.strip_null, barcode.strip_space)
+        return S7Snapshot(parts_ok, barcode_text, barcode_hex)
 
 
 # Backward-friendly alias for the standalone test tool.

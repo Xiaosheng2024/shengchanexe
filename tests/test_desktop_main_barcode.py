@@ -124,17 +124,123 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.add_history_record = lambda *args, **kwargs: records.append((args, kwargs))
         window.post_plc_step_record = lambda *args, **kwargs: None
 
-        window.on_plc_snapshot(10, "OLD", "", "", "")
+        window.on_plc_snapshot(10, "OLD", "")
         self.assertFalse(step.done)
-        window.on_plc_snapshot(10, "MAIN-PLC-001", "TRACE-2", "", "")
+        window.on_plc_snapshot(10, "MAIN-PLC-001", "")
         self.assertFalse(step.done)
         self.assertEqual(window.current_barcode, "")
-        window.on_plc_snapshot(11, "MAIN-PLC-001", "TRACE-2", "", "")
+        window.on_plc_snapshot(11, "MAIN-PLC-001", "")
 
         self.assertTrue(step.done)
         self.assertEqual(window.current_barcode, "MAIN-PLC-001")
         self.assertEqual(advances["count"], 1)
         self.assertEqual(len(records), 1)
+
+    def test_plc_parts_ok_increment_without_barcode_change_is_abnormal(self):
+        window = self.make_window()
+        step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)
+        window.current_product = ProductConfig("PLC测试", [step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.advance_step = lambda *args, **kwargs: self.fail("不应该进入下一工序")
+        records = []
+        window.add_history_record = lambda *args, **kwargs: records.append((args, kwargs))
+
+        window.on_plc_snapshot(10, "MAIN-PLC-001", "")
+        window.on_plc_snapshot(11, "MAIN-PLC-001", "")
+
+        self.assertFalse(step.done)
+        self.assertEqual(window.current_barcode, "")
+        self.assertIn("未检测到新条码", records[0][0][3])
+
+    def test_plc_barcode_change_without_parts_ok_waits(self):
+        window = self.make_window()
+        step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)
+        window.current_product = ProductConfig("PLC测试", [step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+
+        window.on_plc_snapshot(10, "OLD", "")
+        window.on_plc_snapshot(10, "MAIN-PLC-001", "")
+
+        self.assertFalse(step.done)
+        self.assertEqual(window.current_barcode, "")
+        self.assertEqual(window.message_label.text(), "已检测到条码，等待PARTS_OK递增")
+
+    def test_plc_parts_ok_decrease_resets_baseline(self):
+        window = self.make_window()
+        step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)
+        window.current_product = ProductConfig("PLC测试", [step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+
+        window.on_plc_snapshot(10, "OLD", "")
+        window.on_plc_snapshot(8, "OLD", "")
+
+        self.assertFalse(step.done)
+        self.assertEqual(window.plc_last_parts_ok, 8)
+        self.assertEqual(window.message_label.text(), "PLC完成计数变小，已重新建立基准")
+
+    def test_plc_parts_ok_jump_records_warning_but_completes_pending_barcode(self):
+        window = self.make_window()
+        step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)
+        window.current_product = ProductConfig("PLC测试", [step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.stop_plc_worker = lambda: None
+        window.advance_step = lambda *args, **kwargs: None
+        window.post_plc_step_record = lambda *args, **kwargs: None
+        records = []
+        window.add_history_record = lambda *args, **kwargs: records.append((args, kwargs))
+
+        window.on_plc_snapshot(10, "OLD", "")
+        window.on_plc_snapshot(10, "MAIN-PLC-001", "")
+        window.on_plc_snapshot(13, "MAIN-PLC-001", "")
+
+        self.assertTrue(step.done)
+        self.assertTrue(any(item[0][1] == "警告" for item in records))
+        self.assertEqual(window.current_barcode, "MAIN-PLC-001")
+
+    def test_plc_ok_does_not_report_station_complete_until_all_steps_done(self):
+        window = self.make_window()
+        plc_step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)
+        scan_step = ProcessStep("扫码普通零件", SCAN, barcode_start=1, barcode_end=4, expected_content="PART")
+        window.current_product = ProductConfig("PLC测试", [plc_step, scan_step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.stop_plc_worker = lambda: None
+        window.post_plc_step_record = lambda *args, **kwargs: None
+        reports = {"count": 0}
+        window.report_station_complete = lambda: reports.__setitem__("count", reports["count"] + 1) or True
+
+        window.on_plc_snapshot(10, "OLD", "")
+        window.on_plc_snapshot(10, "MAIN-PLC-001", "")
+        window.on_plc_snapshot(11, "MAIN-PLC-001", "")
+
+        self.assertTrue(plc_step.done)
+        self.assertFalse(scan_step.done)
+        self.assertEqual(window.current_step_index, 1)
+        self.assertEqual(reports["count"], 0)
+
+    def test_plc_normal_step_cannot_overwrite_current_barcode(self):
+        window = self.make_window()
+        step = ProcessStep("PLC接收普通确认", PLC, is_main_barcode=False)
+        window.current_product = ProductConfig("PLC测试", [step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.current_barcode = "MAIN-PLC-001"
+        window.stop_plc_worker = lambda: None
+        window.advance_step = lambda *args, **kwargs: None
+        records = []
+        window.add_history_record = lambda *args, **kwargs: records.append((args, kwargs))
+
+        window.on_plc_snapshot(10, "OLD", "")
+        window.on_plc_snapshot(10, "OTHER-PLC-001", "")
+        window.on_plc_snapshot(11, "OTHER-PLC-001", "")
+
+        self.assertFalse(step.done)
+        self.assertEqual(window.current_barcode, "MAIN-PLC-001")
+        self.assertEqual(window.message_label.text(), "PLC主条码与当前产品主条码不一致")
 
     def test_tool_main_panel_hides_advanced_settings(self):
         window = self.make_window()

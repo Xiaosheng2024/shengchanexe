@@ -1,5 +1,5 @@
 from dataclasses import dataclass, field
-from typing import List
+from typing import List, Optional
 
 
 SCAN = "扫码"
@@ -19,9 +19,12 @@ class ProcessStep:
     plc_ip: str = "10.162.86.65"
     plc_rack: int = 0
     plc_slot: int = 1
-    plc_barcode1_db: int = 201
-    plc_barcode1_offset: int = 800
-    plc_barcode1_length: int = 40
+    plc_barcode_db: int = 201
+    plc_barcode_offset: int = 800
+    plc_barcode_length: int = 40
+    plc_barcode1_db: Optional[int] = None
+    plc_barcode1_offset: Optional[int] = None
+    plc_barcode1_length: Optional[int] = None
     plc_barcode2_db: int = 201
     plc_barcode2_offset: int = 840
     plc_barcode2_length: int = 40
@@ -38,6 +41,17 @@ class ProcessStep:
     plc_barcode_wait_ok_timeout_seconds: int = 30
     completed_count: int = 0
     done: bool = False
+
+    def __post_init__(self):
+        if self.plc_barcode1_db is not None:
+            self.plc_barcode_db = self.plc_barcode1_db
+        if self.plc_barcode1_offset is not None:
+            self.plc_barcode_offset = self.plc_barcode1_offset
+        if self.plc_barcode1_length is not None:
+            self.plc_barcode_length = self.plc_barcode1_length
+        self.plc_barcode1_db = self.plc_barcode_db
+        self.plc_barcode1_offset = self.plc_barcode_offset
+        self.plc_barcode1_length = self.plc_barcode_length
 
     def reset(self):
         self.completed_count = 0

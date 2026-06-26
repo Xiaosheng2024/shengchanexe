@@ -1,6 +1,7 @@
 import sqlite3
 import tempfile
 import unittest
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from web_admin_app import database, services
@@ -38,7 +39,7 @@ class MainBarcodeFlowTest(unittest.TestCase):
                 "station_id": self.station1["id"],
                 "name": "扫码新主条码",
                 "type": "扫码",
-                "step_order": 9,
+                "step_order": 1,
                 "barcode_start": 1,
                 "barcode_end": 7,
                 "is_main_barcode": True,
@@ -47,6 +48,43 @@ class MainBarcodeFlowTest(unittest.TestCase):
         main_steps = self.main_steps(self.station1["id"])
         self.assertEqual(len(main_steps), 1)
         self.assertEqual(main_steps[0]["name"], "扫码新主条码")
+
+    def test_main_barcode_must_be_first_step(self):
+        with self.assertRaisesRegex(ValueError, "非第一工位的主条码工序必须是当前工位第1道工序"):
+            services.add_step(
+                {
+                    "station_id": self.station2["id"],
+                    "name": "扫码后置主条码",
+                    "type": "扫码",
+                    "step_order": 9,
+                    "barcode_start": 1,
+                    "barcode_end": 7,
+                    "is_main_barcode": True,
+                }
+            )
+
+    def test_first_station_plc_main_barcode_can_be_moved(self):
+        main_step = self.main_steps(self.station1["id"])[0]
+        services.update_step(
+            main_step["id"],
+            {
+                "station_id": self.station1["id"],
+                "name": main_step["name"],
+                "type": "PLC接收",
+                "step_order": 3,
+                "is_main_barcode": True,
+            },
+        )
+        self.assertEqual(self.main_steps(self.station1["id"])[0]["step_order"], 3)
+
+    def test_plc_main_barcode_config_uses_new_field_names(self):
+        steps = services.list_steps(self.station1["id"])
+        plc_step = steps[0]
+        self.assertIn("plc_barcode_db", plc_step)
+        self.assertEqual(plc_step["plc_barcode_db"], 201)
+        config = services.get_station_config(f"/api/projects/{self.project['name']}/stations/{self.station1['name']}/config")
+        self.assertIn("plc_barcode_db", config["steps"][0])
+        self.assertEqual(config["steps"][0]["plc_barcode_db"], 201)
 
     def test_zero_main_barcode_is_rejected_on_save(self):
         main_step = self.main_steps(self.station1["id"])[0]
@@ -178,6 +216,42 @@ class MainBarcodeFlowTest(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "管理员密码错误"):
             services.acquire_station_session(dict(payload2, admin_password="1111"), force=True)
         self.assertTrue(services.acquire_station_session(dict(payload2, admin_password="0000"), force=True)["ok"])
+
+    def test_station_session_same_client_refreshes_and_stale_session_releases(self):
+        payload = {
+            "project_id": self.project["id"],
+            "station_id": self.station1["id"],
+            "client_id": "client-a",
+            "computer_name": "PC-A",
+            "ip_address": "10.0.0.1",
+        }
+        self.assertTrue(services.acquire_station_session(payload)["ok"])
+        self.assertTrue(services.acquire_station_session(payload)["ok"])
+        sessions = services.list_station_sessions()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["client_id"], "client-a")
+
+        stale_time = (datetime.now() - timedelta(seconds=180)).isoformat(timespec="seconds")
+        with database.get_conn() as conn:
+            conn.execute("UPDATE station_sessions SET last_heartbeat_at = ? WHERE client_id = ?", (stale_time, "client-a"))
+        payload2 = dict(payload, client_id="client-b", computer_name="PC-B", ip_address="10.0.0.2")
+        self.assertTrue(services.acquire_station_session(payload2)["ok"])
+        sessions = services.list_station_sessions()["sessions"]
+        self.assertEqual(len(sessions), 1)
+        self.assertEqual(sessions[0]["client_id"], "client-b")
+
+    def test_station_session_accepts_legacy_device_payload_names(self):
+        payload = {
+            "project_id": self.project["id"],
+            "station_id": self.station1["id"],
+            "device_id": "legacy-client",
+            "device_name": "Legacy-PC",
+            "ip_address": "10.0.0.9",
+        }
+        self.assertTrue(services.acquire_station_session(payload)["ok"])
+        sessions = services.list_station_sessions()["sessions"]
+        self.assertEqual(sessions[0]["client_id"], "legacy-client")
+        self.assertEqual(sessions[0]["computer_name"], "Legacy-PC")
         self.assertFalse(
             services.check_station_completion(
                 {
@@ -236,6 +310,9 @@ class OldDatabaseMigrationTest(unittest.TestCase):
             with database.get_conn() as conn:
                 columns = [row["name"] for row in conn.execute("PRAGMA table_info(steps)").fetchall()]
                 self.assertIn("is_main_barcode", columns)
+                self.assertIn("plc_barcode_db", columns)
+                self.assertIn("plc_barcode_offset", columns)
+                self.assertIn("plc_barcode_length", columns)
                 main_count = conn.execute(
                     "SELECT COUNT(*) AS total FROM steps WHERE station_id = 1 AND is_main_barcode = 1"
                 ).fetchone()["total"]

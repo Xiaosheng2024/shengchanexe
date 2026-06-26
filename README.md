@@ -256,18 +256,21 @@ dist\QualityControlSystem.exe
 类型：PLC接收
 是否主条码：是
 PLC IP：10.162.86.65
-条码1：DB201.DBB800 长度40，用作主条码
-条码2：DB201.DBB840 长度40，仅用于追溯
+主条码：DB201.DBB800 长度40
 PARTS_OK：DB221.DBW358，递增表示完成OK
 ```
 
 PLC 工序判断规则：
 
-1. 第一次读取只建立 `barcode1 / barcode2 / PARTS_OK` 基准，不完成工序。
-2. 先检测到 `barcode1` 变化，缓存为待确认主条码。
+1. 第一次读取只建立 `主条码 / PARTS_OK` 基准，不完成工序。
+2. 先检测到 PLC 主条码变化，缓存为待确认主条码。
 3. 再检测到 `PARTS_OK` 递增，才确认该条码 OK。
 4. 如果 `PARTS_OK` 递增但之前没有条码变化，不完成工序并记录异常。
 5. 如果 `PARTS_OK` 变小，认为 PLC 重启、清零或换班，只重新建立基准。
+6. PLC 主条码工序完成后才设置桌面端 `current_barcode`，并用于后续工位流转校验。
+7. 非主条码 PLC 工序必须与当前主条码一致，不允许覆盖当前主条码。
+
+PLC 接收只负责主条码和 `PARTS_OK` 判断，不负责螺丝数量、工位完成时间统计或直接写入 `station_completions`；工位完成仍由 MES 当前工位所有工序完成后统一上报。
 
 修改 PLC IP 的推荐方式：
 
@@ -277,11 +280,22 @@ PLC 工序判断规则：
 4. 修改：`PLC IP`
 5. 保存后，第一工位客户端点击“同步配置”或重启客户端
 
+如果现场临时更换 PLC IP，桌面端可打开“本机设置”启用 `PLC本地覆盖`，但正式生产建议仍回到网页端配置，避免多台客户端配置不一致。
+
 `s7_plc_test_tool` 仍保留为现场测试工具，用于验证 PLC 地址、编码和通讯是否正常；正式生产由 MES 主程序内置 PLC worker 读取。
 
 ## 工位占用
 
 在线模式下，同一项目和工位同一时间只允许一台设备生产。客户端选择项目/工位后会申请占用，并通过心跳维持占用；未成功占用时禁止扫码、PLC接收、螺钉枪计数和工位完成上报。管理员密码 `0000` 可强制接管。
+
+工位占用字段统一使用：
+
+- `client_id`：当前设备唯一ID
+- `computer_name`：当前电脑名称
+- `ip_address`：当前电脑IP
+- `last_heartbeat_at`：最后心跳时间
+
+如果同一 `project_id + station_id` 已有在线占用，但 `last_heartbeat_at` 超过 120 秒，服务端会自动将旧记录标记为离线并允许当前客户端占用。同一个 `client_id` 重新进入同一工位时只刷新心跳，不报冲突。
 
 接口：
 
@@ -290,6 +304,7 @@ POST /api/station-session/acquire
 POST /api/station-session/heartbeat
 POST /api/station-session/release
 POST /api/station-session/force-acquire
+GET  /api/station-sessions?status=online
 ```
 
 ## 数据库维护接口
@@ -307,6 +322,7 @@ POST /api/admin/db/vacuum-or-analyze
 
 ## 版本说明
 
+- `v0.8.1`：补全 PLC 接收工序正式流转，统一主条码字段，增加 PLC 主条码前后工位校验、本机 PLC 覆盖配置和工位占用超时释放。
 - `v0.8.0`：正式生产版集成 S7 PLC 接收工序、第一工位默认 PLC 主条码、工位占用检查、数据库维护归档/删除接口。
 - `v0.5.0`：MES 服务端数据库支持 PostgreSQL，增加 SQLite 到 PostgreSQL 迁移方案、分页追溯接口和 Rocky Linux PostgreSQL 部署/备份脚本。
 - `v0.2.0`：增加地址54方向判断、NG锁枪、管理员密码解锁、线程安全写寄存器。

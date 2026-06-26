@@ -34,6 +34,7 @@ from web_admin_app.services import (
     list_production_records,
     list_scan_records,
     list_screw_records,
+    list_station_sessions,
     list_steps,
     list_step_records,
     update_project,
@@ -124,6 +125,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, {"steps": list_steps(station_id)})
         elif path == "/api/station-completions/check":
             json_response(self, check_station_completion(query))
+        elif path == "/api/station-sessions":
+            json_response(self, list_station_sessions(query))
         elif path == "/api/scan-records":
             json_response(self, {"records": list_scan_records(query)})
         elif path == "/api/production-records":
