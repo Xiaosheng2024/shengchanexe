@@ -99,6 +99,10 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.current_step_index, 0)
         self.assertEqual(window.product_label.text(), target_station.product.name)
 
+    def test_default_tool_ip_is_localhost(self):
+        window = self.make_window()
+        self.assertEqual(window.tool_ip_input.text(), "127.0.0.1")
+
     def test_tool_trigger_one_is_counted_once_until_reset_seen(self):
         window = self.make_window()
         count = {"ok": 0, "writes": []}

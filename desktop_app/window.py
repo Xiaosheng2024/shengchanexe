@@ -214,7 +214,7 @@ class QualityControlWindow(QMainWindow):
 
         tool_box = QGroupBox("螺钉枪TCP OK信号")
         tool_layout = QHBoxLayout(tool_box)
-        self.tool_ip_input = QLineEdit("192.168.1.100")
+        self.tool_ip_input = QLineEdit("127.0.0.1")
         self.tool_ip_input.setPlaceholderText("设备IP")
         self.tool_port_input = QSpinBox()
         self.tool_port_input.setRange(1, 65535)
