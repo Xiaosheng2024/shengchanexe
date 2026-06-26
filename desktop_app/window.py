@@ -898,14 +898,17 @@ class QualityControlWindow(QMainWindow):
         ok_value = self.tool_ok_value_input.value()
         ng_value = self.tool_ng_value_input.value()
         trigger_value = self.tool_trigger_value_input.value()
+        trigger_reset_value = self.tool_trigger_reset_value_input.value()
         status_text = self.tightening_status_text(status)
         self.tool_status_label.setText(
             f"触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
         )
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
 
-        if trigger != trigger_value:
+        if trigger == trigger_reset_value:
             self.waiting_tool_trigger_reset = False
+            return
+        if trigger != trigger_value:
             return
         if self.waiting_tool_trigger_reset:
             return

@@ -114,6 +114,21 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(count["ok"], 2)
         self.assertIn((53, 0), count["writes"])
 
+    def test_tool_trigger_lock_releases_only_after_trigger_reset_zero(self):
+        window = self.make_window()
+        count = {"ok": 0}
+        window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
+        window.write_tool_register = lambda register, value: None
+
+        window.process_tool_poll_result(status=2, trigger=1)
+        window.process_tool_poll_result(status=2, trigger=2)
+        window.process_tool_poll_result(status=2, trigger=1)
+        self.assertEqual(count["ok"], 1)
+
+        window.process_tool_poll_result(status=2, trigger=0)
+        window.process_tool_poll_result(status=2, trigger=1)
+        self.assertEqual(count["ok"], 2)
+
 
 if __name__ == "__main__":
     unittest.main()
