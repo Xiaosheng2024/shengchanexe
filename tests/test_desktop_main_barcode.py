@@ -147,6 +147,89 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(posts, [])
         self.assertEqual(window.message_label.text(), "当前工位未占用成功，禁止生产")
 
+    def test_switch_station_downloads_config_and_acquires_without_reentry(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.station_config_loaded = True
+        window.station_session_acquired = True
+        window.production_enabled = True
+        calls = []
+        window.show_station_conflict_dialog = lambda *args, **kwargs: None
+
+        def fake_get(path):
+            calls.append(("GET", path))
+            return {
+                "product_name": "在线工位2产品",
+                "steps": [
+                    {
+                        "name": "扫码主条码",
+                        "type": SCAN,
+                        "barcode_start": 1,
+                        "barcode_end": 4,
+                        "expected_content": "MAIN",
+                        "is_main_barcode": True,
+                    }
+                ],
+            }
+
+        def fake_post(path, payload):
+            calls.append(("POST", path, payload.get("station")))
+            if path.endswith("/release"):
+                return {"ok": True}
+            if path.endswith("/acquire"):
+                return {"ok": True, "session_id": 66, "client_id": payload["client_id"]}
+            return {"ok": True}
+
+        window.api_get = fake_get
+        window.api_post = fake_post
+        window.switch_station(window.current_project.name, "工位2")
+
+        self.assertFalse(window.is_switching_station)
+        self.assertTrue(window.station_combo.isEnabled())
+        self.assertTrue(window.production_enabled)
+        self.assertTrue(window.station_config_loaded)
+        self.assertTrue(window.station_session_acquired)
+        self.assertEqual(window.station_session_id, 66)
+        self.assertEqual(window.current_station.name, "工位2")
+        self.assertEqual(window.current_product.name, "在线工位2产品")
+        self.assertEqual(calls[0][1], "/api/station-session/release")
+        self.assertTrue(any(item[0] == "GET" and ("%E5%B7%A5%E4%BD%8D2" in item[1] or "工位2" in item[1]) for item in calls))
+        self.assertTrue(any(item[0] == "POST" and item[1] == "/api/station-session/acquire" for item in calls))
+
+    def test_switch_station_conflict_keeps_production_disabled(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.station_config_loaded = True
+        window.station_session_acquired = True
+        window.production_enabled = True
+        window.show_station_conflict_dialog = lambda *args, **kwargs: None
+        window.api_get = lambda path: {
+            "product_name": "在线工位2产品",
+            "steps": [{"name": "扫码主条码", "type": SCAN, "is_main_barcode": True}],
+        }
+        window.api_post = lambda path, payload: {"ok": False, "conflict": {"computer_name": "PC-B"}} if path.endswith("/acquire") else {"ok": True}
+
+        window.switch_station(window.current_project.name, "工位2")
+
+        self.assertFalse(window.production_enabled)
+        self.assertFalse(window.station_session_acquired)
+        self.assertFalse(window.screw_ok_btn.isEnabled())
+        self.assertFalse(window.barcode_input.isEnabled())
+
+    def test_old_worker_generation_signals_are_ignored_after_switch(self):
+        window = self.make_window()
+        window.current_product = ProductConfig("PLC测试", [ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.plc_worker_generation = 2
+        window.tool_worker_generation = 2
+
+        window.on_plc_snapshot_for_generation(1, 10, "OLD", "")
+        window.on_tool_poll_result_for_generation(1, 2, 1, 0)
+
+        self.assertEqual(window.current_barcode, "")
+        self.assertEqual(window.current_product.steps[0].completed_count, 0)
+
     def test_plc_step_waits_for_barcode_change_then_parts_ok_increment(self):
         window = self.make_window()
         step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)

@@ -244,8 +244,11 @@ class MainBarcodeFlowTest(unittest.TestCase):
             "computer_name": "PC-A",
             "ip_address": "10.0.0.1",
         }
-        self.assertTrue(services.acquire_station_session(payload)["ok"])
-        self.assertTrue(services.acquire_station_session(payload)["ok"])
+        first = services.acquire_station_session(payload)
+        second = services.acquire_station_session(payload)
+        self.assertTrue(first["ok"])
+        self.assertTrue(second["ok"])
+        self.assertEqual(first["session_id"], second["session_id"])
         sessions = services.list_station_sessions()["sessions"]
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["client_id"], "client-a")
@@ -258,6 +261,20 @@ class MainBarcodeFlowTest(unittest.TestCase):
         sessions = services.list_station_sessions()["sessions"]
         self.assertEqual(len(sessions), 1)
         self.assertEqual(sessions[0]["client_id"], "client-b")
+
+    def test_release_station_session_is_idempotent(self):
+        payload = {
+            "project_id": self.project["id"],
+            "station_id": self.station1["id"],
+            "client_id": "client-idempotent",
+            "computer_name": "PC-A",
+            "ip_address": "10.0.0.1",
+        }
+        self.assertTrue(services.release_station_session(payload)["ok"])
+        self.assertTrue(services.acquire_station_session(payload)["ok"])
+        self.assertTrue(services.release_station_session(payload)["ok"])
+        self.assertTrue(services.release_station_session(payload)["ok"])
+        self.assertEqual(services.list_station_sessions()["sessions"], [])
 
     def test_station_session_accepts_legacy_device_payload_names(self):
         payload = {

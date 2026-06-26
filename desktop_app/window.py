@@ -8,6 +8,7 @@ import urllib.parse
 import urllib.request
 import uuid
 from datetime import datetime
+from time import monotonic
 from pathlib import Path
 from typing import List, Optional
 
@@ -46,6 +47,13 @@ from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConf
 
 
 APP_VERSION = "v0.8.1"
+LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+LOG_DIR.mkdir(exist_ok=True)
+logging.basicConfig(
+    filename=str(LOG_DIR / "app.log"),
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+)
 
 
 def as_bool(value, default=False):
@@ -73,6 +81,10 @@ class QualityControlWindow(QMainWindow):
         self.current_product: ProductConfig = self.current_station.product
         self.current_step_index = 0
         self.online_mode = False
+        self.is_switching_station = False
+        self.current_project_id = self.current_project.name
+        self.current_station_id = self.current_station.name
+        self.station_session_id = None
         self.station_config_loaded = True
         self.current_barcode = ""
         self.production_enabled = True
@@ -93,6 +105,8 @@ class QualityControlWindow(QMainWindow):
         self.tool_worker: Optional[ToolPollWorker] = None
         self.plc_thread: Optional[QThread] = None
         self.plc_worker: Optional[PlcPollWorker] = None
+        self.plc_worker_generation = 0
+        self.tool_worker_generation = 0
         self.plc_last_main_barcode = ""
         self.plc_last_parts_ok: Optional[int] = None
         self.plc_pending_main_barcode = ""
@@ -507,6 +521,8 @@ class QualityControlWindow(QMainWindow):
     def on_project_selected(self, project_name: str):
         if not project_name:
             return
+        if self.is_switching_station:
+            return
         project = next((item for item in self.projects if item.name == project_name), None)
         if project is None:
             return
@@ -516,25 +532,101 @@ class QualityControlWindow(QMainWindow):
         self.load_station(project.name, self.current_station.name)
 
     def on_station_selected(self, station_name: str):
-        if station_name:
-            self.load_station(self.current_project.name, station_name)
+        if not station_name or self.is_switching_station:
+            return
+        self.switch_station(self.current_project.name, station_name)
+
+    def log_step_duration(self, step_name: str, start_time: float):
+        duration = monotonic() - start_time
+        if duration > 1:
+            logging.warning("%s 耗时 %.2f 秒", step_name, duration)
+        else:
+            logging.info("%s 完成，耗时 %.2f 秒", step_name, duration)
+
+    def switch_station(self, project_name: str, station_name: str, auto_download: bool = True):
+        if self.is_switching_station:
+            return
+        old_project = self.current_project.name if self.current_project else ""
+        old_station = self.current_station.name if self.current_station else ""
+        logging.info("开始切换工位：%s/%s -> %s/%s", old_project, old_station, project_name, station_name)
+        self.is_switching_station = True
+        if hasattr(self, "station_combo"):
+            self.station_combo.setEnabled(False)
+        try:
+            self.production_enabled = False
+            self.station_session_acquired = False
+            self.station_config_loaded = not self.online_mode
+            self.stop_station_heartbeat()
+
+            start = monotonic()
+            self.stop_plc_worker()
+            self.log_step_duration("停止 PLC worker", start)
+
+            start = monotonic()
+            self.try_lock_tool_nonblocking()
+            self.stop_tool_worker()
+            self.log_step_duration("停止螺钉枪 worker", start)
+
+            start = monotonic()
+            self.release_station_session()
+            self.log_step_duration("release 旧工位", start)
+
+            if not self.set_current_station(project_name, station_name):
+                raise ValueError("未找到项目或工位")
+            self.clear_station_runtime_state(update_table=True)
+
+            if self.online_mode and auto_download:
+                start = monotonic()
+                if not self.download_config_for_current_station():
+                    self.log_step_duration("下载新工位配置失败", start)
+                    return
+                self.log_step_duration("下载新工位配置", start)
+
+                start = monotonic()
+                if self.acquire_station_session():
+                    self.log_step_duration("acquire 新工位", start)
+                    self.message_label.setText("在线配置已下载，工位占用成功，可以开始生产。")
+                    self.refresh_work_area()
+                    self.prompt_current_step_start()
+                    logging.info("切换完成：%s/%s", project_name, station_name)
+                else:
+                    self.log_step_duration("acquire 新工位失败", start)
+                    self.disable_production("在线配置已下载，但当前工位被其他设备占用，禁止生产。请释放工位或选择其它工位。")
+                    logging.warning("切换失败：新工位占用失败 %s/%s", project_name, station_name)
+            else:
+                self.recompute_production_enabled()
+                self.refresh_work_area()
+                if self.production_enabled:
+                    self.prompt_current_step_start()
+                logging.info("切换完成：%s/%s", project_name, station_name)
+        except Exception as exc:
+            self.production_enabled = False
+            self.station_session_acquired = False
+            self.recompute_production_enabled()
+            logging.exception("切换失败：%s", exc)
+            self.message_label.setText(f"切换工位失败：{exc}")
+        finally:
+            self.is_switching_station = False
+            if hasattr(self, "station_combo"):
+                self.station_combo.setEnabled(True)
 
     def load_station(self, project_name: str, station_name: str):
-        if self.is_tool_worker_running():
-            self.stop_tool_worker()
-        self.stop_plc_worker()
-        self.release_station_session()
-        self.station_config_loaded = not self.online_mode
-        self.station_session_acquired = not self.online_mode
-        self.recompute_production_enabled()
+        self.set_current_station(project_name, station_name)
+        self.clear_station_runtime_state(update_table=True)
+        if self.online_mode:
+            self.message_label.setText("请下载在线配置并申请工位占用后开始生产")
+
+    def set_current_station(self, project_name: str, station_name: str) -> bool:
         project = next((item for item in self.projects if item.name == project_name), None)
         if project is None:
-            return
+            return False
         station = next((item for item in project.stations if item.name == station_name), None)
         if station is None:
-            return
+            return False
         self.current_project = project
         self.current_station = station
+        self.current_project_id = getattr(project, "id", None) or project.name
+        self.current_station_id = getattr(station, "id", None) or station.name
         self.current_product = station.product
         self.ensure_main_barcode(self.current_product, notify=True)
         self.products = [station.product for station in project.stations]
@@ -546,9 +638,32 @@ class QualityControlWindow(QMainWindow):
             self.product_combo.blockSignals(False)
             self.product_name_input.setText(self.current_product.name)
             self.refresh_product_list()
+        return True
+
+    def clear_station_runtime_state(self, update_table: bool = False):
+        self.station_session_id = None
+        self.station_config_loaded = not self.online_mode
+        self.station_session_acquired = not self.online_mode
+        self.recompute_production_enabled()
+        self.reset_current_product(update_table=update_table)
+
+    def download_config_for_current_station(self) -> bool:
+        project_name = self.current_project.name
+        station_name = self.current_station.name
+        try:
+            data = self.api_get(f"/api/projects/{urllib.parse.quote(project_name)}/stations/{urllib.parse.quote(station_name)}/config")
+            product = self.product_from_api(data)
+        except Exception as exc:
+            QMessageBox.warning(self, "下载配置失败", str(exc))
+            self.station_config_loaded = False
+            self.recompute_production_enabled()
+            return False
+        self.current_station.product = product
+        self.current_product = product
+        self.station_config_loaded = True
         self.reset_current_product(update_table=True)
-        if self.online_mode:
-            self.message_label.setText("请下载在线配置并申请工位占用后开始生产")
+        logging.info("在线配置已下载：%s/%s", project_name, station_name)
+        return True
 
     def download_online_config(self):
         if not self.online_mode:
@@ -559,21 +674,9 @@ class QualityControlWindow(QMainWindow):
         if not project_name or not station_name:
             self.message_label.setText("请先选择项目和工位")
             return
-        try:
-            data = self.api_get(f"/api/projects/{urllib.parse.quote(project_name)}/stations/{urllib.parse.quote(station_name)}/config")
-            product = self.product_from_api(data)
-        except Exception as exc:
-            QMessageBox.warning(self, "下载配置失败", str(exc))
+        if self.is_switching_station:
             return
-        self.current_station.product = product
-        self.station_config_loaded = True
-        self.current_product = product
-        self.reset_current_product(update_table=True)
-        if self.acquire_station_session():
-            self.message_label.setText("在线配置已下载，工位占用成功，可以开始生产。")
-            self.prompt_current_step_start()
-        else:
-            self.disable_production("在线配置已下载，但当前工位被其他设备占用，禁止生产。请释放工位或选择其它工位。")
+        self.switch_station(project_name, station_name, auto_download=True)
 
     def sync_online_projects(self):
         if not self.online_mode:
@@ -752,21 +855,35 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText(message)
             self.show_station_conflict_dialog(conflict, message)
         else:
-            self.station_heartbeat_timer.start()
+            self.station_session_id = data.get("session_id")
+            self.start_station_heartbeat()
         self.recompute_production_enabled()
         return self.station_session_acquired
 
     def release_station_session(self):
         if not self.online_mode:
             self.station_session_acquired = False
+            self.station_session_id = None
             return
         try:
             self.api_post("/api/station-session/release", self.station_session_payload())
-        except Exception:
-            pass
+            logging.info("release 旧工位成功：%s/%s", self.current_project.name, self.current_station.name)
+        except Exception as exc:
+            logging.warning("release 旧工位失败，继续切换：%s", exc)
         self.station_session_acquired = False
+        self.station_session_id = None
         self.recompute_production_enabled()
+        self.stop_station_heartbeat()
+
+    def stop_station_heartbeat(self):
+        if self.station_heartbeat_timer.isActive():
+            logging.info("停止 heartbeat")
         self.station_heartbeat_timer.stop()
+
+    def start_station_heartbeat(self):
+        if self.online_mode and self.station_session_acquired and not self.station_heartbeat_timer.isActive():
+            self.station_heartbeat_timer.start()
+            logging.info("启动 heartbeat")
 
     def send_station_session_heartbeat(self):
         if not self.online_mode or not self.station_session_acquired:
@@ -779,8 +896,9 @@ class QualityControlWindow(QMainWindow):
         if data.get("ok"):
             return
         self.station_session_acquired = False
+        self.station_session_id = None
         self.recompute_production_enabled()
-        self.station_heartbeat_timer.stop()
+        self.stop_station_heartbeat()
         self.stop_plc_worker()
         self.stop_tool_worker()
         self.lock_tool()
@@ -811,9 +929,9 @@ class QualityControlWindow(QMainWindow):
         dialog.exec_()
         clicked = dialog.clickedButton()
         if clicked == refresh_btn:
-            self.download_online_config()
+            QTimer.singleShot(0, self.download_online_config)
         elif clicked == force_btn:
-            self.force_acquire_station_session()
+            QTimer.singleShot(0, self.force_acquire_station_session)
         elif clicked == back_btn:
             self.message_label.setText("请重新选择项目工位")
 
@@ -829,9 +947,10 @@ class QualityControlWindow(QMainWindow):
             QMessageBox.warning(self, "强制接管失败", str(exc))
             return
         self.station_session_acquired = bool(data.get("ok"))
+        self.station_session_id = data.get("session_id")
         self.recompute_production_enabled()
         if self.production_enabled:
-            self.station_heartbeat_timer.start()
+            self.start_station_heartbeat()
             self.message_label.setText("在线配置已下载，工位占用成功，可以开始生产。")
             self.refresh_work_area()
             self.prompt_current_step_start()
@@ -1411,10 +1530,11 @@ class QualityControlWindow(QMainWindow):
         )
         self.tool_thread = QThread(self)
         self.tool_worker = ToolPollWorker(config)
+        generation = self.tool_worker_generation
         self.tool_worker.moveToThread(self.tool_thread)
         self.tool_thread.started.connect(self.tool_worker.start)
         self.tool_worker_write_requested.connect(self.tool_worker.write_register, Qt.QueuedConnection)
-        self.tool_worker.result.connect(self.on_tool_poll_result)
+        self.tool_worker.result.connect(lambda status, trigger, direction, gen=generation: self.on_tool_poll_result_for_generation(gen, status, trigger, direction))
         self.tool_worker.error.connect(self.on_tool_poll_error)
         self.tool_worker.write_error.connect(self.on_tool_write_error)
         self.tool_worker.stopped.connect(self.tool_thread.quit)
@@ -1433,10 +1553,16 @@ class QualityControlWindow(QMainWindow):
     def stop_tool_worker(self):
         if self.tool_thread is not None:
             if self.tool_worker is not None and self.tool_thread.isRunning():
-                QMetaObject.invokeMethod(self.tool_worker, "stop", Qt.BlockingQueuedConnection)
+                try:
+                    self.tool_worker.polling = False
+                    QMetaObject.invokeMethod(self.tool_worker, "stop", Qt.QueuedConnection)
+                except Exception as exc:
+                    logging.warning("停止螺钉枪 worker 通知失败：%s", exc)
             self.tool_thread.quit()
-            self.tool_thread.wait(2500)
+            if not self.tool_thread.wait(1500):
+                logging.warning("停止螺钉枪 worker 超时")
         self.cleanup_tool_worker()
+        self.tool_worker_generation += 1
 
     def cleanup_tool_worker(self):
         self.tool_worker = None
@@ -1486,9 +1612,10 @@ class QualityControlWindow(QMainWindow):
         )
         self.plc_thread = QThread(self)
         self.plc_worker = PlcPollWorker(config)
+        generation = self.plc_worker_generation
         self.plc_worker.moveToThread(self.plc_thread)
         self.plc_thread.started.connect(self.plc_worker.start)
-        self.plc_worker.snapshot.connect(self.on_plc_snapshot)
+        self.plc_worker.snapshot.connect(lambda parts_ok, main_barcode, main_barcode_hex, gen=generation: self.on_plc_snapshot_for_generation(gen, parts_ok, main_barcode, main_barcode_hex))
         self.plc_worker.error.connect(self.on_plc_error)
         self.plc_worker.stopped.connect(self.plc_thread.quit)
         self.plc_thread.finished.connect(self.plc_worker.deleteLater)
@@ -1502,10 +1629,16 @@ class QualityControlWindow(QMainWindow):
     def stop_plc_worker(self):
         if self.plc_thread is not None:
             if self.plc_worker is not None and self.plc_thread.isRunning():
-                QMetaObject.invokeMethod(self.plc_worker, "stop", Qt.BlockingQueuedConnection)
+                try:
+                    self.plc_worker.polling = False
+                    QMetaObject.invokeMethod(self.plc_worker, "stop", Qt.QueuedConnection)
+                except Exception as exc:
+                    logging.warning("停止 PLC worker 通知失败：%s", exc)
             self.plc_thread.quit()
-            self.plc_thread.wait(2500)
+            if not self.plc_thread.wait(1500):
+                logging.warning("停止 PLC worker 超时")
         self.cleanup_plc_worker()
+        self.plc_worker_generation += 1
 
     def cleanup_plc_worker(self):
         self.plc_worker = None
@@ -1520,6 +1653,12 @@ class QualityControlWindow(QMainWindow):
 
     def on_plc_error(self, message: str):
         self.message_label.setText(f"PLC通讯异常：{message}")
+
+    def on_plc_snapshot_for_generation(self, generation: int, parts_ok: int, main_barcode: str, main_barcode_hex: str = ""):
+        if generation != self.plc_worker_generation:
+            logging.info("忽略旧 PLC worker 信号 generation=%s current=%s", generation, self.plc_worker_generation)
+            return
+        self.on_plc_snapshot(parts_ok, main_barcode, main_barcode_hex)
 
     def on_plc_snapshot(self, parts_ok: int, main_barcode: str, main_barcode_hex: str = ""):
         step = self.current_step()
@@ -1642,6 +1781,12 @@ class QualityControlWindow(QMainWindow):
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
         self.message_label.setText(f"螺钉枪写入异常：{message}")
 
+    def on_tool_poll_result_for_generation(self, generation: int, status: int, trigger: int, direction: int):
+        if generation != self.tool_worker_generation:
+            logging.info("忽略旧螺钉枪 worker 信号 generation=%s current=%s", generation, self.tool_worker_generation)
+            return
+        self.on_tool_poll_result(status, trigger, direction)
+
     def on_tool_poll_result(self, status: int, trigger: int, direction: int):
         if self.processing_tool_signal:
             return
@@ -1735,6 +1880,14 @@ class QualityControlWindow(QMainWindow):
             return False
         self.tool_worker_write_requested.emit(register_address, value)
         return True
+
+    def try_lock_tool_nonblocking(self):
+        try:
+            if self.is_tool_worker_running():
+                self.write_tool_register(self.tool_control_register_input.value(), self.tool_lock_value_input.value())
+                logging.info("已发送锁枪指令")
+        except Exception as exc:
+            logging.warning("切换工位时锁枪失败，继续切换：%s", exc)
 
     def reset_tool_trigger(self):
         self.write_tool_register(self.tool_trigger_register_input.value(), self.tool_trigger_reset_value_input.value())

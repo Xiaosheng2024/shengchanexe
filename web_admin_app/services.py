@@ -193,8 +193,16 @@ def acquire_station_session(payload, force=False):
                 station_id,
             ),
         )
+        session = conn.execute(
+            """
+            SELECT id FROM station_sessions
+            WHERE project_id = ? AND station_id = ? AND client_id = ? AND status = 'online'
+            ORDER BY last_heartbeat_at DESC LIMIT 1
+            """,
+            (project_id, station_id, payload["client_id"]),
+        ).fetchone()
         log_station_session(conn, project_id, station_id, payload, "acquire", "工位占用成功")
-    return {"ok": True, "client_id": payload["client_id"]}
+    return {"ok": True, "client_id": payload["client_id"], "session_id": session["id"] if session else None}
 
 
 def heartbeat_station_session(payload):
