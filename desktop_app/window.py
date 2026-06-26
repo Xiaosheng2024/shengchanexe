@@ -70,6 +70,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_worker: Optional[ToolPollWorker] = None
         self.processing_tool_signal = False
         self.waiting_tool_trigger_reset = False
+        self.tool_lock_state = None
 
         self.build_ui()
         self.refresh_project_station_selectors()
@@ -243,12 +244,12 @@ class QualityControlWindow(QMainWindow):
         self.tool_control_register_input = QSpinBox()
         self.tool_control_register_input.setRange(0, 65535)
         self.tool_control_register_input.setValue(4)
-        self.tool_on_value_input = QSpinBox()
-        self.tool_on_value_input.setRange(0, 65535)
-        self.tool_on_value_input.setValue(2)
-        self.tool_off_value_input = QSpinBox()
-        self.tool_off_value_input.setRange(0, 65535)
-        self.tool_off_value_input.setValue(1)
+        self.tool_lock_value_input = QSpinBox()
+        self.tool_lock_value_input.setRange(0, 65535)
+        self.tool_lock_value_input.setValue(2)
+        self.tool_unlock_value_input = QSpinBox()
+        self.tool_unlock_value_input.setRange(0, 65535)
+        self.tool_unlock_value_input.setValue(1)
         self.tool_poll_interval_input = QSpinBox()
         self.tool_poll_interval_input.setRange(200, 5000)
         self.tool_poll_interval_input.setSingleStep(100)
@@ -270,7 +271,9 @@ class QualityControlWindow(QMainWindow):
             ("OK值", self.tool_ok_value_input),
             ("NG值", self.tool_ng_value_input),
             ("触发地址", self.tool_trigger_register_input),
-            ("开关地址", self.tool_control_register_input),
+            ("锁定地址", self.tool_control_register_input),
+            ("锁定值", self.tool_lock_value_input),
+            ("解锁值", self.tool_unlock_value_input),
             ("轮询ms", self.tool_poll_interval_input),
             ("超时秒", self.tool_timeout_input),
         ]:
@@ -851,6 +854,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_connect_btn.setText("断开")
         self.tool_status_label.setText("已启动轮询")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #2563eb;")
+        self.sync_tool_lock_for_current_step()
 
     def is_tool_worker_running(self) -> bool:
         return self.tool_thread is not None and self.tool_thread.isRunning()
@@ -868,6 +872,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_thread = None
         self.processing_tool_signal = False
         self.waiting_tool_trigger_reset = False
+        self.tool_lock_state = None
         if hasattr(self, "tool_connect_btn"):
             self.tool_connect_btn.setText("连接")
         if hasattr(self, "tool_status_label"):
@@ -894,6 +899,14 @@ class QualityControlWindow(QMainWindow):
             self.processing_tool_signal = False
 
     def process_tool_poll_result(self, status: int, trigger: int):
+        step = self.current_step()
+        if step is None or step.step_type != SCREW:
+            self.lock_tool()
+            self.tool_status_label.setText(
+                f"非螺丝工序，螺钉枪锁定；触发：{trigger}，状态：{status}-{self.tightening_status_text(status)}"
+            )
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+            return
 
         ok_value = self.tool_ok_value_input.value()
         ng_value = self.tool_ng_value_input.value()
@@ -933,11 +946,32 @@ class QualityControlWindow(QMainWindow):
 
     def write_tool_register(self, register_address: int, value: int):
         if not self.is_tool_worker_running():
-            return
+            return False
         self.tool_worker_write_requested.emit(register_address, value)
+        return True
 
     def reset_tool_trigger(self):
         self.write_tool_register(self.tool_trigger_register_input.value(), self.tool_trigger_reset_value_input.value())
+
+    def lock_tool(self):
+        if self.tool_lock_state == "locked":
+            return
+        if self.write_tool_register(self.tool_control_register_input.value(), self.tool_lock_value_input.value()):
+            self.tool_lock_state = "locked"
+
+    def unlock_tool(self):
+        if self.tool_lock_state == "unlocked":
+            return
+        if self.write_tool_register(self.tool_control_register_input.value(), self.tool_unlock_value_input.value()):
+            self.tool_lock_state = "unlocked"
+
+    def sync_tool_lock_for_current_step(self):
+        step = self.current_step()
+        if step is not None and step.step_type == SCREW:
+            self.reset_tool_trigger()
+            self.unlock_tool()
+            return
+        self.lock_tool()
 
     def add_screw_ng_record(self):
         step = self.current_step()
@@ -1049,6 +1083,7 @@ class QualityControlWindow(QMainWindow):
             self.enter_tool_screw_step(step)
             self.speak(f"请打螺丝{step.required_count}颗")
         else:
+            self.lock_tool()
             self.speak("请扫码")
 
     def enter_tool_screw_step(self, step: ProcessStep):
@@ -1056,7 +1091,7 @@ class QualityControlWindow(QMainWindow):
             return
         try:
             self.reset_tool_trigger()
-            self.write_tool_register(self.tool_control_register_input.value(), self.tool_on_value_input.value())
+            self.unlock_tool()
         except Exception as exc:
             self.tool_status_label.setText(f"螺钉枪初始化异常：{exc}")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
@@ -1065,7 +1100,7 @@ class QualityControlWindow(QMainWindow):
         if not self.is_tool_worker_running():
             return
         try:
-            self.write_tool_register(self.tool_control_register_input.value(), self.tool_off_value_input.value())
+            self.lock_tool()
             self.reset_tool_trigger()
         except Exception as exc:
             self.tool_status_label.setText(f"螺钉枪关闭异常：{exc}")

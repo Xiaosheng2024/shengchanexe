@@ -23,6 +23,11 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.show_auto_close_warning = lambda title, message: None
         return window
 
+    def set_current_step_to_screw(self, window):
+        window.current_product = ProductConfig("螺丝测试", [ProcessStep("打螺丝1颗", SCREW, required_count=1)])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+
     def test_main_barcode_sets_current_barcode_and_part_barcode_does_not_overwrite(self):
         window = self.make_window()
         window.online_mode = False
@@ -105,6 +110,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
     def test_tool_trigger_one_is_counted_once_until_reset_seen(self):
         window = self.make_window()
+        self.set_current_step_to_screw(window)
         count = {"ok": 0, "writes": []}
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: count["writes"].append((register, value))
@@ -120,6 +126,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
     def test_tool_trigger_lock_releases_only_after_trigger_reset_zero(self):
         window = self.make_window()
+        self.set_current_step_to_screw(window)
         count = {"ok": 0}
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: None
@@ -132,6 +139,44 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.process_tool_poll_result(status=2, trigger=0)
         window.process_tool_poll_result(status=2, trigger=1)
         self.assertEqual(count["ok"], 2)
+
+    def test_non_screw_step_locks_tool_and_never_counts(self):
+        window = self.make_window()
+        count = {"ok": 0, "writes": []}
+        window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
+        window.write_tool_register = lambda register, value: count["writes"].append((register, value)) or True
+
+        window.process_tool_poll_result(status=2, trigger=1)
+
+        self.assertEqual(count["ok"], 0)
+        self.assertIn((4, 2), count["writes"])
+
+    def test_enter_and_leave_screw_step_use_unlock_and_lock_values(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        writes = []
+        window.is_tool_worker_running = lambda: True
+        window.write_tool_register = lambda register, value: writes.append((register, value)) or True
+
+        window.enter_tool_screw_step(window.current_step())
+        self.assertIn((53, 0), writes)
+        self.assertIn((4, 1), writes)
+
+        writes.clear()
+        window.close_tool_for_screw_step()
+        self.assertIn((4, 2), writes)
+        self.assertIn((53, 0), writes)
+
+    def test_start_listener_while_in_screw_step_unlocks_tool(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        writes = []
+        window.write_tool_register = lambda register, value: writes.append((register, value)) or True
+
+        window.sync_tool_lock_for_current_step()
+
+        self.assertIn((53, 0), writes)
+        self.assertIn((4, 1), writes)
 
 
 if __name__ == "__main__":
