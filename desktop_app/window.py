@@ -1,3 +1,4 @@
+import configparser
 import shutil
 import subprocess
 import json
@@ -5,6 +6,7 @@ import logging
 import urllib.parse
 import urllib.request
 from datetime import datetime
+from pathlib import Path
 from typing import List, Optional
 
 from PyQt5.QtCore import QDateTime, QMetaObject, QThread, Qt, QTimer, pyqtSignal
@@ -64,6 +66,8 @@ class QualityControlWindow(QMainWindow):
         self.step_started_at = datetime.now()
         self.settings_dialog: Optional[QDialog] = None
         self.history_dialog: Optional[QDialog] = None
+        self.tool_settings_dialog: Optional[QDialog] = None
+        self.app_config_path = Path(__file__).resolve().parent.parent / "config.ini"
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
         self.tool_thread: Optional[QThread] = None
@@ -73,6 +77,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_lock_state = None
 
         self.build_ui()
+        self.load_tool_settings()
         self.refresh_project_station_selectors()
         self.load_station(self.current_project.name, self.current_station.name)
 
@@ -213,76 +218,104 @@ class QualityControlWindow(QMainWindow):
         action_row.addWidget(reset_btn)
         right_layout.addLayout(action_row)
 
-        tool_box = QGroupBox("螺钉枪TCP OK信号")
-        tool_layout = QHBoxLayout(tool_box)
+        self.tool_box = QGroupBox("螺钉枪TCP OK信号")
+        tool_layout = QHBoxLayout(self.tool_box)
+        tool_layout.setSpacing(8)
         self.tool_ip_input = QLineEdit("127.0.0.1")
         self.tool_ip_input.setPlaceholderText("设备IP")
+        self.tool_ip_input.setFixedWidth(120)
         self.tool_port_input = QSpinBox()
         self.tool_port_input.setRange(1, 65535)
         self.tool_port_input.setValue(502)
+        self.tool_port_input.setFixedWidth(60)
         self.tool_unit_input = QSpinBox()
         self.tool_unit_input.setRange(1, 247)
         self.tool_unit_input.setValue(1)
+        self.tool_unit_input.setFixedWidth(50)
         self.tool_status_register_input = QSpinBox()
         self.tool_status_register_input.setRange(0, 65535)
         self.tool_status_register_input.setValue(100)
+        self.tool_status_register_input.setFixedWidth(60)
         self.tool_ok_value_input = QSpinBox()
         self.tool_ok_value_input.setRange(0, 65535)
         self.tool_ok_value_input.setValue(2)
+        self.tool_ok_value_input.setFixedWidth(60)
         self.tool_ng_value_input = QSpinBox()
         self.tool_ng_value_input.setRange(0, 65535)
         self.tool_ng_value_input.setValue(3)
+        self.tool_ng_value_input.setFixedWidth(60)
         self.tool_trigger_register_input = QSpinBox()
         self.tool_trigger_register_input.setRange(0, 65535)
         self.tool_trigger_register_input.setValue(53)
+        self.tool_trigger_register_input.setFixedWidth(60)
         self.tool_trigger_value_input = QSpinBox()
         self.tool_trigger_value_input.setRange(0, 65535)
         self.tool_trigger_value_input.setValue(1)
+        self.tool_trigger_value_input.setFixedWidth(60)
         self.tool_trigger_reset_value_input = QSpinBox()
         self.tool_trigger_reset_value_input.setRange(0, 65535)
         self.tool_trigger_reset_value_input.setValue(0)
+        self.tool_trigger_reset_value_input.setFixedWidth(60)
         self.tool_control_register_input = QSpinBox()
         self.tool_control_register_input.setRange(0, 65535)
         self.tool_control_register_input.setValue(4)
+        self.tool_control_register_input.setFixedWidth(60)
         self.tool_lock_value_input = QSpinBox()
         self.tool_lock_value_input.setRange(0, 65535)
         self.tool_lock_value_input.setValue(2)
+        self.tool_lock_value_input.setFixedWidth(60)
         self.tool_unlock_value_input = QSpinBox()
         self.tool_unlock_value_input.setRange(0, 65535)
         self.tool_unlock_value_input.setValue(1)
+        self.tool_unlock_value_input.setFixedWidth(60)
         self.tool_poll_interval_input = QSpinBox()
         self.tool_poll_interval_input.setRange(200, 5000)
         self.tool_poll_interval_input.setSingleStep(100)
         self.tool_poll_interval_input.setValue(800)
+        self.tool_poll_interval_input.setFixedWidth(70)
         self.tool_timeout_input = QSpinBox()
         self.tool_timeout_input.setRange(1, 10)
         self.tool_timeout_input.setValue(1)
+        self.tool_timeout_input.setFixedWidth(60)
         self.disable_tool_auto_listen_checkbox = QCheckBox("禁用螺钉枪自动监听")
         self.disable_tool_auto_listen_checkbox.setToolTip("现场临时保护：勾选后不启动螺钉枪后台监听，可用模拟OK按钮测试流程")
         self.tool_connect_btn = QPushButton("连接")
+        self.tool_connect_btn.setFixedWidth(80)
         self.tool_connect_btn.clicked.connect(self.toggle_tool_connection)
+        self.tool_disconnect_btn = QPushButton("断开")
+        self.tool_disconnect_btn.setFixedWidth(80)
+        self.tool_disconnect_btn.setEnabled(False)
+        self.tool_disconnect_btn.clicked.connect(self.stop_tool_worker)
+        self.tool_settings_btn = QPushButton("设置")
+        self.tool_settings_btn.setFixedWidth(80)
+        self.tool_settings_btn.clicked.connect(self.open_tool_settings_dialog)
+        self.tool_enable_dedup_checkbox = QCheckBox("启用防重复触发")
+        self.tool_enable_dedup_checkbox.setChecked(True)
+        self.tool_verbose_log_checkbox = QCheckBox("显示详细通讯日志")
         self.tool_status_label = QLabel("未连接")
+        self.tool_status_label.setFixedWidth(90)
+        self.tool_status_label.setAlignment(Qt.AlignCenter)
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
-        for label_text, widget in [
+        main_tool_fields = [
             ("IP", self.tool_ip_input),
             ("端口", self.tool_port_input),
             ("站号", self.tool_unit_input),
             ("状态地址", self.tool_status_register_input),
             ("OK值", self.tool_ok_value_input),
             ("NG值", self.tool_ng_value_input),
-            ("触发地址", self.tool_trigger_register_input),
-            ("锁定地址", self.tool_control_register_input),
-            ("锁定值", self.tool_lock_value_input),
-            ("解锁值", self.tool_unlock_value_input),
-            ("轮询ms", self.tool_poll_interval_input),
-            ("超时秒", self.tool_timeout_input),
-        ]:
+        ]
+        for label_text, widget in main_tool_fields:
             tool_layout.addWidget(QLabel(label_text))
             tool_layout.addWidget(widget)
-        tool_layout.addWidget(self.disable_tool_auto_listen_checkbox)
         tool_layout.addWidget(self.tool_connect_btn)
-        tool_layout.addWidget(self.tool_status_label, 1)
-        right_layout.addWidget(tool_box)
+        tool_layout.addWidget(self.tool_disconnect_btn)
+        tool_layout.addWidget(self.tool_settings_btn)
+        tool_layout.addWidget(self.disable_tool_auto_listen_checkbox)
+        tool_layout.addWidget(QLabel("状态"))
+        tool_layout.addWidget(self.tool_status_label)
+        tool_layout.addStretch(1)
+        right_layout.addWidget(self.tool_box)
+        self.build_tool_settings_dialog()
 
         self.message_label = QLabel("等待第1工序条码进入")
         self.message_label.setStyleSheet("font-size: 18px; color: #374151;")
@@ -603,6 +636,129 @@ class QualityControlWindow(QMainWindow):
         report_layout.addWidget(self.report_table)
         layout.addWidget(report_box, 1)
 
+    def build_tool_settings_dialog(self):
+        self.tool_settings_dialog = QDialog(self)
+        self.tool_settings_dialog.setWindowTitle("螺钉枪高级设置")
+        self.tool_settings_dialog.resize(560, 460)
+        layout = QVBoxLayout(self.tool_settings_dialog)
+
+        note = QLabel(
+            "地址4控制螺钉枪锁定/解锁：\n"
+            "- 地址4 = 2：锁定螺钉枪，禁止启动\n"
+            "- 地址4 = 0 或 1：解锁螺钉枪，允许启动\n"
+            "默认使用：锁定值 = 2，解锁值 = 1"
+        )
+        note.setWordWrap(True)
+        note.setStyleSheet("font-size: 15px; color: #374151; padding: 8px; background: #f3f4f6; border-radius: 6px;")
+        layout.addWidget(note)
+
+        form = QFormLayout()
+        form.addRow("触发地址", self.tool_trigger_register_input)
+        form.addRow("触发值", self.tool_trigger_value_input)
+        form.addRow("触发复位值", self.tool_trigger_reset_value_input)
+        form.addRow("锁定地址", self.tool_control_register_input)
+        form.addRow("锁定值", self.tool_lock_value_input)
+        form.addRow("解锁值", self.tool_unlock_value_input)
+        form.addRow("轮询间隔ms", self.tool_poll_interval_input)
+        form.addRow("通讯超时秒", self.tool_timeout_input)
+        form.addRow("是否启用防重复触发", self.tool_enable_dedup_checkbox)
+        form.addRow("是否显示详细通讯日志", self.tool_verbose_log_checkbox)
+        layout.addLayout(form)
+
+        button_row = QHBoxLayout()
+        save_btn = QPushButton("保存")
+        cancel_btn = QPushButton("取消")
+        default_btn = QPushButton("恢复默认")
+        save_btn.clicked.connect(self.save_tool_settings_from_dialog)
+        cancel_btn.clicked.connect(self.tool_settings_dialog.reject)
+        default_btn.clicked.connect(self.restore_default_tool_settings)
+        button_row.addStretch(1)
+        button_row.addWidget(save_btn)
+        button_row.addWidget(cancel_btn)
+        button_row.addWidget(default_btn)
+        layout.addLayout(button_row)
+
+    def open_tool_settings_dialog(self):
+        self.tool_settings_dialog.show()
+        self.tool_settings_dialog.raise_()
+        self.tool_settings_dialog.activateWindow()
+
+    def restore_default_tool_settings(self):
+        self.tool_trigger_register_input.setValue(53)
+        self.tool_trigger_value_input.setValue(1)
+        self.tool_trigger_reset_value_input.setValue(0)
+        self.tool_control_register_input.setValue(4)
+        self.tool_lock_value_input.setValue(2)
+        self.tool_unlock_value_input.setValue(1)
+        self.tool_poll_interval_input.setValue(800)
+        self.tool_timeout_input.setValue(1)
+        self.tool_enable_dedup_checkbox.setChecked(True)
+        self.tool_verbose_log_checkbox.setChecked(False)
+
+    def load_tool_settings(self):
+        if not self.app_config_path.exists():
+            return
+        config = configparser.ConfigParser()
+        config.read(self.app_config_path, encoding="utf-8")
+        if "TOOL" not in config:
+            return
+        tool = config["TOOL"]
+        self.tool_ip_input.setText(tool.get("ip", self.tool_ip_input.text()))
+        self.tool_port_input.setValue(tool.getint("port", fallback=self.tool_port_input.value()))
+        self.tool_unit_input.setValue(tool.getint("unit_id", fallback=self.tool_unit_input.value()))
+        self.tool_status_register_input.setValue(tool.getint("status_address", fallback=self.tool_status_register_input.value()))
+        self.tool_ok_value_input.setValue(tool.getint("ok_value", fallback=self.tool_ok_value_input.value()))
+        self.tool_ng_value_input.setValue(tool.getint("ng_value", fallback=self.tool_ng_value_input.value()))
+        self.tool_trigger_register_input.setValue(tool.getint("trigger_address", fallback=self.tool_trigger_register_input.value()))
+        self.tool_trigger_value_input.setValue(tool.getint("trigger_value", fallback=self.tool_trigger_value_input.value()))
+        self.tool_trigger_reset_value_input.setValue(tool.getint("trigger_reset_value", fallback=self.tool_trigger_reset_value_input.value()))
+        self.tool_control_register_input.setValue(tool.getint("lock_address", fallback=self.tool_control_register_input.value()))
+        self.tool_lock_value_input.setValue(tool.getint("lock_value", fallback=self.tool_lock_value_input.value()))
+        self.tool_unlock_value_input.setValue(tool.getint("unlock_value", fallback=self.tool_unlock_value_input.value()))
+        self.tool_poll_interval_input.setValue(tool.getint("poll_interval_ms", fallback=self.tool_poll_interval_input.value()))
+        self.tool_timeout_input.setValue(tool.getint("timeout_seconds", fallback=self.tool_timeout_input.value()))
+        self.tool_enable_dedup_checkbox.setChecked(tool.getboolean("enable_dedup", fallback=True))
+        self.tool_verbose_log_checkbox.setChecked(tool.getboolean("verbose_log", fallback=False))
+
+    def save_tool_settings(self):
+        config = configparser.ConfigParser()
+        if self.app_config_path.exists():
+            config.read(self.app_config_path, encoding="utf-8")
+        if "TOOL" not in config:
+            config["TOOL"] = {}
+        config["TOOL"].update(
+            {
+                "ip": self.tool_ip_input.text().strip(),
+                "port": str(self.tool_port_input.value()),
+                "unit_id": str(self.tool_unit_input.value()),
+                "status_address": str(self.tool_status_register_input.value()),
+                "ok_value": str(self.tool_ok_value_input.value()),
+                "ng_value": str(self.tool_ng_value_input.value()),
+                "trigger_address": str(self.tool_trigger_register_input.value()),
+                "trigger_value": str(self.tool_trigger_value_input.value()),
+                "trigger_reset_value": str(self.tool_trigger_reset_value_input.value()),
+                "lock_address": str(self.tool_control_register_input.value()),
+                "lock_value": str(self.tool_lock_value_input.value()),
+                "unlock_value": str(self.tool_unlock_value_input.value()),
+                "poll_interval_ms": str(self.tool_poll_interval_input.value()),
+                "timeout_seconds": str(self.tool_timeout_input.value()),
+                "enable_dedup": str(self.tool_enable_dedup_checkbox.isChecked()).lower(),
+                "verbose_log": str(self.tool_verbose_log_checkbox.isChecked()).lower(),
+            }
+        )
+        with self.app_config_path.open("w", encoding="utf-8") as file:
+            config.write(file)
+
+    def save_tool_settings_from_dialog(self):
+        self.save_tool_settings()
+        if self.is_tool_worker_running():
+            message = "设置已保存，重新连接后生效"
+        else:
+            message = "螺钉枪高级设置已保存"
+        self.message_label.setText(message)
+        QMessageBox.information(self, "提示", message)
+        self.tool_settings_dialog.accept()
+
     def load_product(self, product_name: str):
         if not product_name:
             return
@@ -826,7 +982,7 @@ class QualityControlWindow(QMainWindow):
 
         if self.disable_tool_auto_listen_checkbox.isChecked():
             self.message_label.setText("已禁用螺钉枪自动监听，可使用模拟OK按钮测试流程")
-            self.tool_status_label.setText("自动监听已禁用")
+            self.tool_status_label.setText("未连接")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
             return
 
@@ -851,8 +1007,9 @@ class QualityControlWindow(QMainWindow):
         self.tool_thread.finished.connect(self.tool_worker.deleteLater)
         self.tool_thread.finished.connect(self.cleanup_tool_worker)
         self.tool_thread.start()
-        self.tool_connect_btn.setText("断开")
-        self.tool_status_label.setText("已启动轮询")
+        self.tool_connect_btn.setEnabled(False)
+        self.tool_disconnect_btn.setEnabled(True)
+        self.tool_status_label.setText("已连接")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #2563eb;")
         self.sync_tool_lock_for_current_step()
 
@@ -875,19 +1032,24 @@ class QualityControlWindow(QMainWindow):
         self.tool_lock_state = None
         if hasattr(self, "tool_connect_btn"):
             self.tool_connect_btn.setText("连接")
+            self.tool_connect_btn.setEnabled(True)
+        if hasattr(self, "tool_disconnect_btn"):
+            self.tool_disconnect_btn.setEnabled(False)
         if hasattr(self, "tool_status_label"):
             self.tool_status_label.setText("未连接")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
 
     def on_tool_poll_error(self, message: str):
         logging.error("螺钉枪通讯异常：%s", message)
-        self.tool_status_label.setText(f"螺钉枪通讯异常：{message}")
+        self.tool_status_label.setText("通讯异常")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+        self.message_label.setText(f"螺钉枪通讯异常：{message}")
 
     def on_tool_write_error(self, message: str):
         logging.error("螺钉枪写入异常：%s", message)
-        self.tool_status_label.setText(f"螺钉枪写入异常：{message}")
+        self.tool_status_label.setText("通讯异常")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+        self.message_label.setText(f"螺钉枪写入异常：{message}")
 
     def on_tool_poll_result(self, status: int, trigger: int):
         if self.processing_tool_signal:
@@ -902,7 +1064,8 @@ class QualityControlWindow(QMainWindow):
         step = self.current_step()
         if step is None or step.step_type != SCREW:
             self.lock_tool()
-            self.tool_status_label.setText(
+            self.tool_status_label.setText("已连接")
+            self.message_label.setText(
                 f"非螺丝工序，螺钉枪锁定；触发：{trigger}，状态：{status}-{self.tightening_status_text(status)}"
             )
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
@@ -912,28 +1075,35 @@ class QualityControlWindow(QMainWindow):
         ng_value = self.tool_ng_value_input.value()
         trigger_value = self.tool_trigger_value_input.value()
         trigger_reset_value = self.tool_trigger_reset_value_input.value()
+        dedup_enabled = self.tool_enable_dedup_checkbox.isChecked()
         status_text = self.tightening_status_text(status)
-        self.tool_status_label.setText(
-            f"触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
+        if self.tool_verbose_log_checkbox.isChecked():
+            logging.info("螺钉枪读取：trigger=%s status=%s-%s", trigger, status, status_text)
+        self.tool_status_label.setText("已连接")
+        self.message_label.setText(
+            f"螺钉枪触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
         )
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
 
         if trigger == trigger_reset_value:
-            self.waiting_tool_trigger_reset = False
+            if dedup_enabled:
+                self.waiting_tool_trigger_reset = False
             return
         if trigger != trigger_value:
             return
-        if self.waiting_tool_trigger_reset:
+        if dedup_enabled and self.waiting_tool_trigger_reset:
             return
 
         if status == ok_value:
-            self.waiting_tool_trigger_reset = True
+            if dedup_enabled:
+                self.waiting_tool_trigger_reset = True
             self.reset_tool_trigger()
             self.handle_screw_ok()
             return
 
         if status == ng_value:
-            self.waiting_tool_trigger_reset = True
+            if dedup_enabled:
+                self.waiting_tool_trigger_reset = True
             self.add_screw_ng_record()
             self.speak("螺丝NG，请重新打当前这颗")
             self.show_auto_close_warning("螺丝NG", "螺丝NG，请重新打当前这颗")
@@ -1093,7 +1263,8 @@ class QualityControlWindow(QMainWindow):
             self.reset_tool_trigger()
             self.unlock_tool()
         except Exception as exc:
-            self.tool_status_label.setText(f"螺钉枪初始化异常：{exc}")
+            self.tool_status_label.setText("通讯异常")
+            self.message_label.setText(f"螺钉枪初始化异常：{exc}")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
 
     def close_tool_for_screw_step(self):
@@ -1103,7 +1274,8 @@ class QualityControlWindow(QMainWindow):
             self.lock_tool()
             self.reset_tool_trigger()
         except Exception as exc:
-            self.tool_status_label.setText(f"螺钉枪关闭异常：{exc}")
+            self.tool_status_label.setText("通讯异常")
+            self.message_label.setText(f"螺钉枪关闭异常：{exc}")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
 
     def speak(self, text: str):
