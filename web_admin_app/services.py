@@ -226,6 +226,21 @@ def release_station_session(payload):
     return {"ok": True}
 
 
+def admin_release_station_session(payload):
+    if payload.get("admin_password") != ADMIN_PASSWORD:
+        raise ValueError("管理员密码错误")
+    session_id = int(payload.get("session_id", 0))
+    if not session_id:
+        raise ValueError("session_id不能为空")
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM station_sessions WHERE id = ?", (session_id,)).fetchone()
+        if not row:
+            raise ValueError("工位占用记录不存在")
+        conn.execute("UPDATE station_sessions SET status = 'offline', note = ? WHERE id = ?", ("管理员后台释放", session_id))
+        log_station_session(conn, row["project_id"], row["station_id"], row_to_dict(row), "admin-release", "管理员后台释放工位")
+    return {"ok": True}
+
+
 def list_station_sessions(query=None):
     query = query or {}
     status = query.get("status", ["online"])[0] if hasattr(query, "get") else "online"

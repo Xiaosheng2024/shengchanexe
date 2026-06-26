@@ -15,6 +15,7 @@ from web_admin_app.services import (
     add_step_record,
     add_step,
     acquire_station_session,
+    admin_release_station_session,
     archive_old_records,
     backup_database,
     check_station_completion,
@@ -171,6 +172,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, heartbeat_station_session(payload))
         elif path == "/api/station-session/release":
             json_response(self, release_station_session(payload))
+        elif path == "/api/station-session/admin-release":
+            json_response(self, admin_release_station_session(payload))
         elif path == "/api/admin/db/backup":
             json_response(self, backup_database())
         elif path == "/api/admin/db/archive":

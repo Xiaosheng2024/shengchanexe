@@ -6,6 +6,7 @@ import json
 import logging
 import urllib.parse
 import urllib.request
+import uuid
 from datetime import datetime
 from pathlib import Path
 from typing import List, Optional
@@ -72,7 +73,9 @@ class QualityControlWindow(QMainWindow):
         self.current_product: ProductConfig = self.current_station.product
         self.current_step_index = 0
         self.online_mode = False
+        self.station_config_loaded = True
         self.current_barcode = ""
+        self.production_enabled = True
         self.screw_blocks: List[QLabel] = []
         self.warning_dialogs: List[QMessageBox] = []
         self.finished_part_count = 0
@@ -96,7 +99,7 @@ class QualityControlWindow(QMainWindow):
         self.plc_pending_barcode_time: Optional[datetime] = None
         self.plc_waiting_parts_ok = False
         self.station_session_acquired = False
-        self.station_session_client_id = f"{socket.gethostname()}-{id(self)}"
+        self.station_session_client_id = self.load_station_session_client_id()
         self.station_heartbeat_timer = QTimer(self)
         self.station_heartbeat_timer.setInterval(10000)
         self.station_heartbeat_timer.timeout.connect(self.send_station_session_heartbeat)
@@ -474,7 +477,11 @@ class QualityControlWindow(QMainWindow):
 
     def change_mode(self, text: str):
         self.online_mode = text == "在线模式"
-        self.message_label.setText("在线模式：请先下载配置" if self.online_mode else "离线模式：使用本地配置")
+        self.station_config_loaded = not self.online_mode
+        self.station_session_acquired = not self.online_mode
+        self.recompute_production_enabled()
+        self.message_label.setText("在线模式：请先下载配置并占用工位" if self.online_mode else "离线模式：使用本地配置")
+        self.refresh_work_area()
 
     def change_degraded_mode(self):
         if self.degraded_mode_checkbox.isChecked():
@@ -517,6 +524,9 @@ class QualityControlWindow(QMainWindow):
             self.stop_tool_worker()
         self.stop_plc_worker()
         self.release_station_session()
+        self.station_config_loaded = not self.online_mode
+        self.station_session_acquired = not self.online_mode
+        self.recompute_production_enabled()
         project = next((item for item in self.projects if item.name == project_name), None)
         if project is None:
             return
@@ -537,7 +547,8 @@ class QualityControlWindow(QMainWindow):
             self.product_name_input.setText(self.current_product.name)
             self.refresh_product_list()
         self.reset_current_product(update_table=True)
-        self.acquire_station_session()
+        if self.online_mode:
+            self.message_label.setText("请下载在线配置并申请工位占用后开始生产")
 
     def download_online_config(self):
         if not self.online_mode:
@@ -555,8 +566,14 @@ class QualityControlWindow(QMainWindow):
             QMessageBox.warning(self, "下载配置失败", str(exc))
             return
         self.current_station.product = product
-        self.load_station(project_name, station_name)
-        self.message_label.setText("在线配置已下载")
+        self.station_config_loaded = True
+        self.current_product = product
+        self.reset_current_product(update_table=True)
+        if self.acquire_station_session():
+            self.message_label.setText("在线配置已下载，工位占用成功，可以开始生产。")
+            self.prompt_current_step_start()
+        else:
+            self.disable_production("在线配置已下载，但当前工位被其他设备占用，禁止生产。请释放工位或选择其它工位。")
 
     def sync_online_projects(self):
         if not self.online_mode:
@@ -651,6 +668,50 @@ class QualityControlWindow(QMainWindow):
         with urllib.request.urlopen(request, timeout=3) as response:
             return json.loads(response.read().decode("utf-8") or "{}")
 
+    def load_station_session_client_id(self) -> str:
+        config = configparser.ConfigParser()
+        if self.app_config_path.exists():
+            config.read(self.app_config_path, encoding="utf-8")
+        if "LOCAL_DEVICE" not in config:
+            config["LOCAL_DEVICE"] = {}
+        client_id = config["LOCAL_DEVICE"].get("client_id", "").strip()
+        if client_id:
+            return client_id
+        client_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
+        config["LOCAL_DEVICE"]["client_id"] = client_id
+        with self.app_config_path.open("w", encoding="utf-8") as file:
+            config.write(file)
+        return client_id
+
+    def recompute_production_enabled(self):
+        self.production_enabled = (not self.online_mode) or (self.station_config_loaded and self.station_session_acquired)
+        return self.production_enabled
+
+    def production_disabled_message(self) -> str:
+        if self.online_mode and not self.station_config_loaded:
+            return "当前工位未下载在线配置，禁止生产"
+        return "当前工位未占用成功，禁止生产"
+
+    def ensure_production_enabled(self) -> bool:
+        self.recompute_production_enabled()
+        if self.production_enabled:
+            return True
+        message = self.production_disabled_message()
+        self.message_label.setText(message)
+        self.show_auto_close_warning("禁止生产", message)
+        return False
+
+    def disable_production(self, message: str):
+        self.station_session_acquired = False
+        self.recompute_production_enabled()
+        self.stop_plc_worker()
+        self.lock_tool()
+        self.stop_tool_worker()
+        self.barcode_input.setEnabled(False)
+        self.screw_ok_btn.setEnabled(False)
+        self.message_label.setText(message)
+        self.show_auto_close_warning("禁止生产", message)
+
     def station_session_payload(self) -> dict:
         project_id = getattr(self.current_project, "id", None) or self.current_project.name
         station_id = getattr(self.current_station, "id", None) or self.current_station.name
@@ -671,11 +732,13 @@ class QualityControlWindow(QMainWindow):
     def acquire_station_session(self):
         if not self.online_mode:
             self.station_session_acquired = True
+            self.recompute_production_enabled()
             return True
         try:
             data = self.api_post("/api/station-session/acquire", self.station_session_payload())
         except Exception as exc:
             self.station_session_acquired = False
+            self.recompute_production_enabled()
             self.message_label.setText(f"工位占用申请失败：{exc}")
             return False
         self.station_session_acquired = bool(data.get("ok"))
@@ -687,9 +750,10 @@ class QualityControlWindow(QMainWindow):
                 f"最后心跳 {conflict.get('last_heartbeat_at', '')}"
             )
             self.message_label.setText(message)
-            self.show_auto_close_warning("工位占用冲突", message)
+            self.show_station_conflict_dialog(conflict, message)
         else:
             self.station_heartbeat_timer.start()
+        self.recompute_production_enabled()
         return self.station_session_acquired
 
     def release_station_session(self):
@@ -701,6 +765,7 @@ class QualityControlWindow(QMainWindow):
         except Exception:
             pass
         self.station_session_acquired = False
+        self.recompute_production_enabled()
         self.station_heartbeat_timer.stop()
 
     def send_station_session_heartbeat(self):
@@ -714,6 +779,7 @@ class QualityControlWindow(QMainWindow):
         if data.get("ok"):
             return
         self.station_session_acquired = False
+        self.recompute_production_enabled()
         self.station_heartbeat_timer.stop()
         self.stop_plc_worker()
         self.stop_tool_worker()
@@ -723,12 +789,75 @@ class QualityControlWindow(QMainWindow):
         self.show_auto_close_warning("工位占用失效", message)
 
     def ensure_station_session_for_production(self) -> bool:
-        if not self.online_mode or self.station_session_acquired:
-            return True
-        message = "当前工位未成功占用，禁止生产"
-        self.message_label.setText(message)
-        self.show_auto_close_warning("禁止生产", message)
-        return False
+        return self.ensure_production_enabled()
+
+    def show_station_conflict_dialog(self, conflict: dict, message: str):
+        dialog = QMessageBox(self)
+        dialog.setWindowTitle("工位占用冲突")
+        detail = (
+            f"{message}\n\n"
+            f"项目：{self.current_project.name}\n"
+            f"工位：{self.current_station.name}\n"
+            f"占用电脑：{conflict.get('computer_name', '')}\n"
+            f"client_id：{conflict.get('client_id', '')}\n"
+            f"ip_address：{conflict.get('ip_address', '')}\n"
+            f"last_heartbeat_at：{conflict.get('last_heartbeat_at', '')}\n"
+            f"状态：{conflict.get('status', '')}"
+        )
+        dialog.setText(detail)
+        back_btn = dialog.addButton("返回重新选择", QMessageBox.RejectRole)
+        refresh_btn = dialog.addButton("刷新", QMessageBox.ActionRole)
+        force_btn = dialog.addButton("管理员强制接管", QMessageBox.DestructiveRole)
+        dialog.exec_()
+        clicked = dialog.clickedButton()
+        if clicked == refresh_btn:
+            self.download_online_config()
+        elif clicked == force_btn:
+            self.force_acquire_station_session()
+        elif clicked == back_btn:
+            self.message_label.setText("请重新选择项目工位")
+
+    def force_acquire_station_session(self):
+        password, ok = self.prompt_admin_password("管理员强制接管工位")
+        if not ok:
+            return
+        payload = self.station_session_payload()
+        payload["admin_password"] = password
+        try:
+            data = self.api_post("/api/station-session/force-acquire", payload)
+        except Exception as exc:
+            QMessageBox.warning(self, "强制接管失败", str(exc))
+            return
+        self.station_session_acquired = bool(data.get("ok"))
+        self.recompute_production_enabled()
+        if self.production_enabled:
+            self.station_heartbeat_timer.start()
+            self.message_label.setText("在线配置已下载，工位占用成功，可以开始生产。")
+            self.refresh_work_area()
+            self.prompt_current_step_start()
+        else:
+            self.disable_production("当前工位未占用成功，禁止生产")
+
+    def prompt_admin_password(self, title: str):
+        dialog = QDialog(self)
+        dialog.setWindowTitle(title)
+        layout = QVBoxLayout(dialog)
+        layout.addWidget(QLabel("请输入管理员密码"))
+        password_input = QLineEdit()
+        password_input.setEchoMode(QLineEdit.Password)
+        layout.addWidget(password_input)
+        row = QHBoxLayout()
+        ok_btn = QPushButton("确认")
+        cancel_btn = QPushButton("取消")
+        row.addStretch(1)
+        row.addWidget(ok_btn)
+        row.addWidget(cancel_btn)
+        layout.addLayout(row)
+        ok_btn.clicked.connect(dialog.accept)
+        cancel_btn.clicked.connect(dialog.reject)
+        password_input.returnPressed.connect(dialog.accept)
+        accepted = dialog.exec_() == QDialog.Accepted
+        return password_input.text(), accepted
 
     def open_settings_dialog(self):
         self.settings_dialog.show()
@@ -1012,6 +1141,7 @@ class QualityControlWindow(QMainWindow):
         config["LOCAL_DEVICE"].update(
             {
                 "mes_server": self.api_base_input.text().strip(),
+                "client_id": self.station_session_client_id,
                 "project": self.current_project.name,
                 "station": self.current_station.name,
                 "auto_sync_config": str(self.local_auto_sync_checkbox.isChecked()).lower(),
@@ -1094,7 +1224,8 @@ class QualityControlWindow(QMainWindow):
         if update_table:
             self.populate_step_table()
         self.refresh_work_area()
-        self.prompt_current_step_start()
+        if self.production_enabled:
+            self.prompt_current_step_start()
 
     def populate_step_table(self):
         self.step_table.setRowCount(0)
@@ -1128,11 +1259,11 @@ class QualityControlWindow(QMainWindow):
         if current_step is None:
             self.current_step_label.setText("全部工序已完成，等待再次第1工序条码进入")
             self.screw_ok_btn.setEnabled(False)
-            self.barcode_input.setEnabled(True)
+            self.barcode_input.setEnabled(self.production_enabled)
         else:
             self.current_step_label.setText(f"当前工序：{current_step.name}")
-            self.screw_ok_btn.setEnabled(current_step.step_type == SCREW)
-            self.barcode_input.setEnabled(current_step.step_type == SCAN)
+            self.screw_ok_btn.setEnabled(self.production_enabled and current_step.step_type == SCREW)
+            self.barcode_input.setEnabled(self.production_enabled and current_step.step_type == SCAN)
         self.render_screw_blocks(current_step)
 
     def render_screw_blocks(self, step: Optional[ProcessStep]):
@@ -1258,6 +1389,8 @@ class QualityControlWindow(QMainWindow):
     def toggle_tool_connection(self):
         if self.is_tool_worker_running():
             self.stop_tool_worker()
+            return
+        if not self.ensure_production_enabled():
             return
 
         if self.disable_tool_auto_listen_checkbox.isChecked():
@@ -1474,7 +1607,7 @@ class QualityControlWindow(QMainWindow):
         self.advance_step()
 
     def post_plc_step_record(self, step: ProcessStep, main_barcode: str, main_barcode_hex: str, parts_ok_before: int, parts_ok_after: int):
-        if not self.online_mode:
+        if not self.online_mode or not self.production_enabled:
             return
         flow_barcode = self.current_barcode or main_barcode
         payload = {
@@ -1738,6 +1871,8 @@ class QualityControlWindow(QMainWindow):
         return status_map.get(value, "未知")
 
     def advance_step(self, prompt_delay_ms: int = 0):
+        if not self.ensure_production_enabled():
+            return
         self.current_step_index += 1
         if self.current_step_index >= len(self.current_product.steps):
             if not self.report_station_complete():
@@ -1826,6 +1961,8 @@ class QualityControlWindow(QMainWindow):
         super().closeEvent(event)
 
     def prompt_current_step_start(self):
+        if not self.ensure_production_enabled():
+            return
         step = self.current_step()
         if step is None:
             return
@@ -1904,11 +2041,15 @@ class QualityControlWindow(QMainWindow):
             }
         )
         if self.online_mode and barcode:
+            if not self.production_enabled:
+                return
             self.post_scan_record_to_server(step, result, barcode, note, now)
         if self.history_dialog is not None and self.history_dialog.isVisible():
             self.refresh_history_tables()
 
     def post_scan_record_to_server(self, step: ProcessStep, result: str, barcode: str, note: str, created_at: datetime):
+        if not self.production_enabled:
+            return
         payload = {
             "project": self.current_project.name,
             "station": self.current_station.name,

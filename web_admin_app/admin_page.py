@@ -234,7 +234,7 @@ HTML = r"""<!doctype html>
           <h2>在线工位占用</h2>
           <button class="secondary" onclick="loadStationSessions()">刷新在线工位</button>
           <table>
-            <thead><tr><th>项目</th><th>工位</th><th>client_id</th><th>computer_name</th><th>ip_address</th><th>last_heartbeat_at</th><th>状态</th><th>备注</th></tr></thead>
+            <thead><tr><th>项目</th><th>工位</th><th>client_id</th><th>computer_name</th><th>ip_address</th><th>last_heartbeat_at</th><th>状态</th><th>备注</th><th>操作</th></tr></thead>
             <tbody id="stationSessionRows"></tbody>
           </table>
         </div>
@@ -875,8 +875,21 @@ HTML = r"""<!doctype html>
     async function loadStationSessions() {
       const data = await api("/api/station-sessions?status=online");
       document.getElementById("stationSessionRows").innerHTML = data.sessions.map(row =>
-        `<tr><td>${htmlEscape(row.project_name || "")}</td><td>${htmlEscape(row.station_name || "")}</td><td>${htmlEscape(row.client_id || "")}</td><td>${htmlEscape(row.computer_name || "")}</td><td>${htmlEscape(row.ip_address || "")}</td><td>${htmlEscape(row.last_heartbeat_at || "")}</td><td>${htmlEscape(row.status || "")}</td><td>${htmlEscape(row.note || "")}</td></tr>`
-      ).join("") || `<tr><td colspan="8">暂无在线工位</td></tr>`;
+        `<tr><td>${htmlEscape(row.project_name || "")}</td><td>${htmlEscape(row.station_name || "")}</td><td>${htmlEscape(row.client_id || "")}</td><td>${htmlEscape(row.computer_name || "")}</td><td>${htmlEscape(row.ip_address || "")}</td><td>${htmlEscape(row.last_heartbeat_at || "")}</td><td>${htmlEscape(row.status || "")}</td><td>${htmlEscape(row.note || "")}</td><td><button class="danger" onclick="adminReleaseStationSession(${row.id})">释放工位</button></td></tr>`
+      ).join("") || `<tr><td colspan="9">暂无在线工位</td></tr>`;
+    }
+
+    async function adminReleaseStationSession(sessionId) {
+      const admin_password = prompt("请输入管理员密码");
+      if (!admin_password) return;
+      if (!confirm("确定释放这个在线工位吗？")) return;
+      await api("/api/station-session/admin-release", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({session_id: sessionId, admin_password})
+      });
+      showStatus("工位已释放");
+      await loadStationSessions();
     }
 
     refreshAll().catch(err => showStatus(err.message));

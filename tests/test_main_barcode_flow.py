@@ -221,6 +221,21 @@ class MainBarcodeFlowTest(unittest.TestCase):
             services.acquire_station_session(dict(payload2, admin_password="1111"), force=True)
         self.assertTrue(services.acquire_station_session(dict(payload2, admin_password="0000"), force=True)["ok"])
 
+    def test_admin_release_station_session_marks_offline(self):
+        payload = {
+            "project_id": self.project["id"],
+            "station_id": self.station1["id"],
+            "client_id": "client-a",
+            "computer_name": "PC-A",
+            "ip_address": "10.0.0.1",
+        }
+        self.assertTrue(services.acquire_station_session(payload)["ok"])
+        session = services.list_station_sessions()["sessions"][0]
+        with self.assertRaisesRegex(ValueError, "管理员密码错误"):
+            services.admin_release_station_session({"session_id": session["id"], "admin_password": "bad"})
+        self.assertTrue(services.admin_release_station_session({"session_id": session["id"], "admin_password": "0000"})["ok"])
+        self.assertEqual(services.list_station_sessions()["sessions"], [])
+
     def test_station_session_same_client_refreshes_and_stale_session_releases(self):
         payload = {
             "project_id": self.project["id"],

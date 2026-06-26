@@ -111,6 +111,42 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_ip_input.text(), "127.0.0.1")
         self.assertIn(APP_VERSION, window.windowTitle())
 
+    def test_station_client_id_is_persisted(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.ini"
+            window = self.make_window()
+            window.app_config_path = config_path
+            first_id = window.load_station_session_client_id()
+            second = self.make_window()
+            second.app_config_path = config_path
+            second_id = second.load_station_session_client_id()
+            self.assertEqual(first_id, second_id)
+
+    def test_online_config_download_without_station_session_disables_production(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.station_config_loaded = True
+        window.station_session_acquired = False
+        window.recompute_production_enabled()
+        window.current_product = ProductConfig(
+            "测试产品",
+            [ProcessStep("扫码主条码", SCAN, barcode_start=1, barcode_end=4, expected_content="MAIN", is_main_barcode=True)],
+        )
+        window.current_station.product = window.current_product
+        posts = []
+        window.api_post = lambda *args, **kwargs: posts.append(args)
+
+        window.barcode_input.setText("MAIN-001")
+        window.handle_scan()
+        window.handle_screw_ok()
+        window.on_plc_snapshot(1, "MAIN-001", "")
+        self.assertFalse(window.report_station_complete())
+
+        self.assertEqual(window.current_barcode, "")
+        self.assertFalse(window.current_product.steps[0].done)
+        self.assertEqual(posts, [])
+        self.assertEqual(window.message_label.text(), "当前工位未占用成功，禁止生产")
+
     def test_plc_step_waits_for_barcode_change_then_parts_ok_increment(self):
         window = self.make_window()
         step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)
