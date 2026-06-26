@@ -1,12 +1,13 @@
 import shutil
 import subprocess
 import json
+import logging
 import urllib.parse
 import urllib.request
 from datetime import datetime
 from typing import List, Optional
 
-from PyQt5.QtCore import QDateTime, Qt, QTimer
+from PyQt5.QtCore import QDateTime, QMetaObject, QThread, Qt, QTimer, pyqtSignal
 from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
@@ -35,11 +36,13 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
-from desktop_app.tool_client import ShortToolResponseError, ToolModbusClient
+from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, SCAN, SCREW
 
 
 class QualityControlWindow(QMainWindow):
+    tool_worker_write_requested = pyqtSignal(int, int)
+
     def __init__(self):
         super().__init__()
         self.setWindowTitle("生产工艺过程质量控制系统")
@@ -63,9 +66,10 @@ class QualityControlWindow(QMainWindow):
         self.history_dialog: Optional[QDialog] = None
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
-        self.tool_poll_timer = QTimer(self)
-        self.tool_poll_timer.timeout.connect(self.poll_tool_ok_signal)
-        self.tool_client = ToolModbusClient()
+        self.tool_thread: Optional[QThread] = None
+        self.tool_worker: Optional[ToolPollWorker] = None
+        self.processing_tool_signal = False
+        self.waiting_tool_trigger_reset = False
 
         self.build_ui()
         self.refresh_project_station_selectors()
@@ -245,6 +249,15 @@ class QualityControlWindow(QMainWindow):
         self.tool_off_value_input = QSpinBox()
         self.tool_off_value_input.setRange(0, 65535)
         self.tool_off_value_input.setValue(1)
+        self.tool_poll_interval_input = QSpinBox()
+        self.tool_poll_interval_input.setRange(200, 5000)
+        self.tool_poll_interval_input.setSingleStep(100)
+        self.tool_poll_interval_input.setValue(800)
+        self.tool_timeout_input = QSpinBox()
+        self.tool_timeout_input.setRange(1, 10)
+        self.tool_timeout_input.setValue(1)
+        self.disable_tool_auto_listen_checkbox = QCheckBox("禁用螺钉枪自动监听")
+        self.disable_tool_auto_listen_checkbox.setToolTip("现场临时保护：勾选后不启动螺钉枪后台监听，可用模拟OK按钮测试流程")
         self.tool_connect_btn = QPushButton("连接")
         self.tool_connect_btn.clicked.connect(self.toggle_tool_connection)
         self.tool_status_label = QLabel("未连接")
@@ -258,9 +271,12 @@ class QualityControlWindow(QMainWindow):
             ("NG值", self.tool_ng_value_input),
             ("触发地址", self.tool_trigger_register_input),
             ("开关地址", self.tool_control_register_input),
+            ("轮询ms", self.tool_poll_interval_input),
+            ("超时秒", self.tool_timeout_input),
         ]:
             tool_layout.addWidget(QLabel(label_text))
             tool_layout.addWidget(widget)
+        tool_layout.addWidget(self.disable_tool_auto_listen_checkbox)
         tool_layout.addWidget(self.tool_connect_btn)
         tool_layout.addWidget(self.tool_status_label, 1)
         right_layout.addWidget(tool_box)
@@ -401,6 +417,8 @@ class QualityControlWindow(QMainWindow):
             self.load_station(self.current_project.name, station_name)
 
     def load_station(self, project_name: str, station_name: str):
+        if self.is_tool_worker_running():
+            self.stop_tool_worker()
         project = next((item for item in self.projects if item.name == project_name), None)
         if project is None:
             return
@@ -799,32 +817,83 @@ class QualityControlWindow(QMainWindow):
             self.refresh_work_area()
 
     def toggle_tool_connection(self):
-        if self.tool_poll_timer.isActive():
-            self.tool_poll_timer.stop()
-            self.tool_connect_btn.setText("连接")
-            self.tool_status_label.setText("未连接")
+        if self.is_tool_worker_running():
+            self.stop_tool_worker()
+            return
+
+        if self.disable_tool_auto_listen_checkbox.isChecked():
+            self.message_label.setText("已禁用螺钉枪自动监听，可使用模拟OK按钮测试流程")
+            self.tool_status_label.setText("自动监听已禁用")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
             return
 
-        self.tool_poll_timer.start(300)
+        config = ToolPollConfig(
+            host=self.tool_ip_input.text().strip(),
+            port=self.tool_port_input.value(),
+            unit_id=self.tool_unit_input.value(),
+            status_register=self.tool_status_register_input.value(),
+            trigger_register=self.tool_trigger_register_input.value(),
+            timeout_seconds=float(self.tool_timeout_input.value()),
+            poll_interval_ms=self.tool_poll_interval_input.value(),
+        )
+        self.tool_thread = QThread(self)
+        self.tool_worker = ToolPollWorker(config)
+        self.tool_worker.moveToThread(self.tool_thread)
+        self.tool_thread.started.connect(self.tool_worker.start)
+        self.tool_worker_write_requested.connect(self.tool_worker.write_register)
+        self.tool_worker.result.connect(self.on_tool_poll_result)
+        self.tool_worker.error.connect(self.on_tool_poll_error)
+        self.tool_worker.write_error.connect(self.on_tool_write_error)
+        self.tool_worker.stopped.connect(self.tool_thread.quit)
+        self.tool_thread.finished.connect(self.tool_worker.deleteLater)
+        self.tool_thread.finished.connect(self.cleanup_tool_worker)
+        self.tool_thread.start()
         self.tool_connect_btn.setText("断开")
         self.tool_status_label.setText("已启动轮询")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #2563eb;")
 
-    def poll_tool_ok_signal(self):
+    def is_tool_worker_running(self) -> bool:
+        return self.tool_thread is not None and self.tool_thread.isRunning()
+
+    def stop_tool_worker(self):
+        if self.tool_thread is not None:
+            if self.tool_worker is not None and self.tool_thread.isRunning():
+                QMetaObject.invokeMethod(self.tool_worker, "stop", Qt.BlockingQueuedConnection)
+            self.tool_thread.quit()
+            self.tool_thread.wait(2500)
+        self.cleanup_tool_worker()
+
+    def cleanup_tool_worker(self):
+        self.tool_worker = None
+        self.tool_thread = None
+        self.processing_tool_signal = False
+        self.waiting_tool_trigger_reset = False
+        if hasattr(self, "tool_connect_btn"):
+            self.tool_connect_btn.setText("连接")
+        if hasattr(self, "tool_status_label"):
+            self.tool_status_label.setText("未连接")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+
+    def on_tool_poll_error(self, message: str):
+        logging.error("螺钉枪通讯异常：%s", message)
+        self.tool_status_label.setText(f"螺钉枪通讯异常：{message}")
+        self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+
+    def on_tool_write_error(self, message: str):
+        logging.error("螺钉枪写入异常：%s", message)
+        self.tool_status_label.setText(f"螺钉枪写入异常：{message}")
+        self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+
+    def on_tool_poll_result(self, status: int, trigger: int):
+        if self.processing_tool_signal:
+            return
+        self.processing_tool_signal = True
         try:
-            status = self.read_tool_register(self.tool_status_register_input.value())
-            trigger = self.read_tool_register(self.tool_trigger_register_input.value())
-        except OSError as exc:
-            self.tool_status_label.setText(f"螺钉枪通讯异常：{exc}")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
-            return
-        except ShortToolResponseError:
-            return
-        except ValueError as exc:
-            self.tool_status_label.setText(f"响应错误：{exc}")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
-            return
+            self.process_tool_poll_result(status, trigger)
+        finally:
+            self.processing_tool_signal = False
+
+    def process_tool_poll_result(self, status: int, trigger: int):
 
         ok_value = self.tool_ok_value_input.value()
         ng_value = self.tool_ng_value_input.value()
@@ -836,14 +905,19 @@ class QualityControlWindow(QMainWindow):
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
 
         if trigger != trigger_value:
+            self.waiting_tool_trigger_reset = False
+            return
+        if self.waiting_tool_trigger_reset:
             return
 
         if status == ok_value:
+            self.waiting_tool_trigger_reset = True
             self.reset_tool_trigger()
             self.handle_screw_ok()
             return
 
         if status == ng_value:
+            self.waiting_tool_trigger_reset = True
             self.add_screw_ng_record()
             self.speak("螺丝NG，请重新打当前这颗")
             self.show_auto_close_warning("螺丝NG", "螺丝NG，请重新打当前这颗")
@@ -854,22 +928,10 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText("螺钉枪暂停")
             return
 
-    def read_tool_register(self, register_address: int) -> int:
-        return self.tool_client.read_register(
-            self.tool_ip_input.text().strip(),
-            self.tool_port_input.value(),
-            self.tool_unit_input.value(),
-            register_address,
-        )
-
     def write_tool_register(self, register_address: int, value: int):
-        self.tool_client.write_register(
-            self.tool_ip_input.text().strip(),
-            self.tool_port_input.value(),
-            self.tool_unit_input.value(),
-            register_address,
-            value,
-        )
+        if not self.is_tool_worker_running():
+            return
+        self.tool_worker_write_requested.emit(register_address, value)
 
     def reset_tool_trigger(self):
         self.write_tool_register(self.tool_trigger_register_input.value(), self.tool_trigger_reset_value_input.value())
@@ -968,6 +1030,10 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText(f"工位完成上报失败：{exc}")
         return True
 
+    def closeEvent(self, event):
+        self.stop_tool_worker()
+        super().closeEvent(event)
+
     def prompt_current_step_start(self):
         step = self.current_step()
         if step is None:
@@ -983,7 +1049,7 @@ class QualityControlWindow(QMainWindow):
             self.speak("请扫码")
 
     def enter_tool_screw_step(self, step: ProcessStep):
-        if not self.tool_poll_timer.isActive():
+        if not self.is_tool_worker_running():
             return
         try:
             self.reset_tool_trigger()
@@ -993,7 +1059,7 @@ class QualityControlWindow(QMainWindow):
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
 
     def close_tool_for_screw_step(self):
-        if not self.tool_poll_timer.isActive():
+        if not self.is_tool_worker_running():
             return
         try:
             self.write_tool_register(self.tool_control_register_input.value(), self.tool_off_value_input.value())

@@ -32,6 +32,10 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name QualityControlSystem main.py
 
+      - name: Build quality control debug exe
+        run: |
+          pyinstaller --noconfirm --clean --onefile --console --name QualityControlSystem_Debug main.py
+
       - name: Build S7 PLC test tool exe
         working-directory: s7_plc_test_tool
         run: |
@@ -42,6 +46,12 @@ jobs:
         with:
           name: QualityControlSystem-windows
           path: dist/QualityControlSystem.exe
+
+      - name: Upload quality control debug artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: QualityControlSystem-debug-windows
+          path: dist/QualityControlSystem_Debug.exe
 
       - name: Upload S7 PLC test tool artifact
         uses: actions/upload-artifact@v4
@@ -57,4 +67,5 @@ jobs:
           name: Windows Latest
           files: |
             dist/QualityControlSystem.exe
+            dist/QualityControlSystem_Debug.exe
             s7_plc_test_tool/dist/S7_PLC_Test_Tool.exe

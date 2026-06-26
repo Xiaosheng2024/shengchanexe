@@ -7,8 +7,31 @@ class ShortToolResponseError(ValueError):
 
 
 class ToolModbusClient:
-    def __init__(self):
+    def __init__(self, timeout: float = 1.0):
         self.transaction_id = 0
+        self.timeout = timeout
+
+    def set_timeout(self, timeout: float):
+        self.timeout = max(float(timeout), 0.1)
+
+    def receive_exact(self, sock: socket.socket, size: int) -> bytes:
+        chunks = []
+        remaining = size
+        while remaining > 0:
+            chunk = sock.recv(remaining)
+            if not chunk:
+                raise ShortToolResponseError("设备响应中断")
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        return b"".join(chunks)
+
+    def receive_modbus_response(self, sock: socket.socket) -> bytes:
+        header = self.receive_exact(sock, 7)
+        _, _, length = struct.unpack(">HHH", header[:6])
+        if length <= 0:
+            raise ShortToolResponseError("响应长度异常")
+        body = self.receive_exact(sock, length - 1)
+        return header + body
 
     def read_register(self, host: str, port: int, unit_id: int, register_address: int) -> int:
         if not host:
@@ -25,10 +48,10 @@ class ToolModbusClient:
             register_address,
             1,
         )
-        with socket.create_connection((host, port), timeout=0.25) as sock:
-            sock.settimeout(0.25)
+        with socket.create_connection((host, port), timeout=self.timeout) as sock:
+            sock.settimeout(self.timeout)
             sock.sendall(request)
-            response = sock.recv(1024)
+            response = self.receive_modbus_response(sock)
 
         if len(response) < 11:
             raise ShortToolResponseError("数据长度不足")
@@ -56,10 +79,10 @@ class ToolModbusClient:
             register_address,
             value,
         )
-        with socket.create_connection((host, port), timeout=0.25) as sock:
-            sock.settimeout(0.25)
+        with socket.create_connection((host, port), timeout=self.timeout) as sock:
+            sock.settimeout(self.timeout)
             sock.sendall(request)
-            response = sock.recv(1024)
+            response = self.receive_modbus_response(sock)
 
         if len(response) < 12:
             raise ShortToolResponseError("数据长度不足")
