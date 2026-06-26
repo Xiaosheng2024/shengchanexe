@@ -7,6 +7,11 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
+BASE_DIR = Path(__file__).resolve().parent
+ROOT_DIR = BASE_DIR.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import (
     QApplication,
@@ -28,7 +33,6 @@ from PyQt5.QtWidgets import (
 from shared.s7_plc_client import S7PlcClient, parse_barcode
 
 
-BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.ini"
 
 
