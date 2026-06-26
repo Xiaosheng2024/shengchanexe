@@ -230,7 +230,6 @@ def list_station_sessions(query=None):
     query = query or {}
     status = query.get("status", ["online"])[0] if hasattr(query, "get") else "online"
     with get_conn() as conn:
-        release_stale_station_sessions(conn)
         where = ""
         params = []
         if status:
@@ -250,7 +249,15 @@ def list_station_sessions(query=None):
             """,
             params,
         ).fetchall()
-    return {"sessions": [row_to_dict(row) for row in rows]}
+    sessions = []
+    threshold = datetime.now() - timedelta(seconds=STATION_SESSION_TIMEOUT_SECONDS)
+    for row in rows:
+        if status == "online":
+            last_heartbeat = parse_time(row["last_heartbeat_at"])
+            if last_heartbeat and last_heartbeat < threshold:
+                continue
+        sessions.append(row_to_dict(row))
+    return {"sessions": sessions}
 
 
 def list_projects():

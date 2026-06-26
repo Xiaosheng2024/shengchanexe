@@ -1,10 +1,14 @@
 import sqlite3
 import tempfile
+import threading
 import unittest
 from datetime import datetime, timedelta
+from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.request import urlopen
 
 from web_admin_app import database, services
+from web_admin_app.server import AdminHandler
 
 
 class MainBarcodeFlowTest(unittest.TestCase):
@@ -261,6 +265,41 @@ class MainBarcodeFlowTest(unittest.TestCase):
                 }
             )["completed"]
         )
+
+    def test_station_session_query_does_not_create_or_update_sessions(self):
+        with database.get_conn() as conn:
+            conn.execute("DELETE FROM station_sessions WHERE station_id = ?", (self.station1["id"],))
+            before_sessions = conn.execute("SELECT COUNT(*) AS total FROM station_sessions").fetchone()["total"]
+            before_logs = conn.execute("SELECT COUNT(*) AS total FROM station_session_logs").fetchone()["total"]
+
+        self.assertEqual(services.list_station_sessions({"status": ["online"]})["sessions"], [])
+
+        with database.get_conn() as conn:
+            after_sessions = conn.execute("SELECT COUNT(*) AS total FROM station_sessions").fetchone()["total"]
+            after_logs = conn.execute("SELECT COUNT(*) AS total FROM station_session_logs").fetchone()["total"]
+        self.assertEqual(after_sessions, before_sessions)
+        self.assertEqual(after_logs, before_logs)
+
+    def test_web_admin_online_session_api_does_not_create_sessions(self):
+        with database.get_conn() as conn:
+            conn.execute("DELETE FROM station_sessions")
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), AdminHandler)
+        thread = threading.Thread(target=server.serve_forever, daemon=True)
+        thread.start()
+        try:
+            port = server.server_address[1]
+            with urlopen(f"http://127.0.0.1:{port}/api/station-sessions?status=online", timeout=3) as response:
+                body = response.read().decode("utf-8")
+            self.assertIn('"sessions": []', body)
+        finally:
+            server.shutdown()
+            server.server_close()
+            thread.join(timeout=3)
+
+        with database.get_conn() as conn:
+            total = conn.execute("SELECT COUNT(*) AS total FROM station_sessions").fetchone()["total"]
+        self.assertEqual(total, 0)
 
 
 class OldDatabaseMigrationTest(unittest.TestCase):
