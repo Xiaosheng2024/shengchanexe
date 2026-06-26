@@ -75,8 +75,10 @@ host = 127.0.0.1
 port = 5432
 database = mes_db
 user = mes_user
-password = mes_password
+password = change_me_random_password
 ```
+
+Git 中只提交 `config.example.ini`。生产真实配置建议放在 `/opt/mes/config.ini`，权限设置为 `600`，不要把真实数据库密码提交到 Git。
 
 本地调试仍兼容 SQLite：
 
@@ -179,7 +181,7 @@ Host: 127.0.0.1
 Port: 5433
 Database: mes_db
 User: mes_user
-Password: mes_password
+Password: /opt/mes/config.ini 中的随机密码
 ```
 
 ## Windows 打包
@@ -243,8 +245,69 @@ dist\QualityControlSystem.exe
 
 高级参数保存在 `config.ini` 的 `[TOOL]` 段中，常用字段保留在主界面，触发、锁定、方向、轮询、超时和管理员密码在“螺钉枪高级设置”弹窗中维护。
 
+## 第一工位 S7 PLC 接收主条码
+
+正式生产版支持工序类型：`PLC接收`。
+
+默认第一工位工序：
+
+```text
+工位1 → PLC接收主条码
+类型：PLC接收
+是否主条码：是
+PLC IP：10.162.86.65
+条码1：DB201.DBB800 长度40，用作主条码
+条码2：DB201.DBB840 长度40，仅用于追溯
+PARTS_OK：DB221.DBW358，递增表示完成OK
+```
+
+PLC 工序判断规则：
+
+1. 第一次读取只建立 `barcode1 / barcode2 / PARTS_OK` 基准，不完成工序。
+2. 先检测到 `barcode1` 变化，缓存为待确认主条码。
+3. 再检测到 `PARTS_OK` 递增，才确认该条码 OK。
+4. 如果 `PARTS_OK` 递增但之前没有条码变化，不完成工序并记录异常。
+5. 如果 `PARTS_OK` 变小，认为 PLC 重启、清零或换班，只重新建立基准。
+
+修改 PLC IP 的推荐方式：
+
+1. 打开 MES Web 管理后台：`http://服务器IP:8000`
+2. 进入：项目 / 工位 / 工序配置
+3. 找到：`工位1 → PLC接收主条码`
+4. 修改：`PLC IP`
+5. 保存后，第一工位客户端点击“同步配置”或重启客户端
+
+`s7_plc_test_tool` 仍保留为现场测试工具，用于验证 PLC 地址、编码和通讯是否正常；正式生产由 MES 主程序内置 PLC worker 读取。
+
+## 工位占用
+
+在线模式下，同一项目和工位同一时间只允许一台设备生产。客户端选择项目/工位后会申请占用，并通过心跳维持占用；未成功占用时禁止扫码、PLC接收、螺钉枪计数和工位完成上报。管理员密码 `0000` 可强制接管。
+
+接口：
+
+```http
+POST /api/station-session/acquire
+POST /api/station-session/heartbeat
+POST /api/station-session/release
+POST /api/station-session/force-acquire
+```
+
+## 数据库维护接口
+
+```http
+GET  /api/admin/db/status
+POST /api/admin/db/backup
+POST /api/admin/db/archive
+POST /api/admin/db/delete-old-records
+GET  /api/admin/db/maintenance-logs
+POST /api/admin/db/vacuum-or-analyze
+```
+
+默认维护表包括：`scan_records`、`station_work_records`、`step_work_records`、`screw_action_records`、`station_session_logs`。`station_completions` 是前后工位校验关键表，默认不删除，必须单独选择。
+
 ## 版本说明
 
+- `v0.8.0`：正式生产版集成 S7 PLC 接收工序、第一工位默认 PLC 主条码、工位占用检查、数据库维护归档/删除接口。
 - `v0.5.0`：MES 服务端数据库支持 PostgreSQL，增加 SQLite 到 PostgreSQL 迁移方案、分页追溯接口和 Rocky Linux PostgreSQL 部署/备份脚本。
 - `v0.2.0`：增加地址54方向判断、NG锁枪、管理员密码解锁、线程安全写寄存器。
 

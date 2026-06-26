@@ -4,6 +4,7 @@ from typing import List
 
 SCAN = "扫码"
 SCREW = "螺丝"
+PLC = "PLC接收"
 
 
 @dataclass
@@ -15,6 +16,26 @@ class ProcessStep:
     barcode_end: int = 7
     expected_content: str = ""
     is_main_barcode: bool = False
+    plc_ip: str = "10.162.86.65"
+    plc_rack: int = 0
+    plc_slot: int = 1
+    plc_barcode1_db: int = 201
+    plc_barcode1_offset: int = 800
+    plc_barcode1_length: int = 40
+    plc_barcode2_db: int = 201
+    plc_barcode2_offset: int = 840
+    plc_barcode2_length: int = 40
+    plc_parts_ok_db: int = 221
+    plc_parts_ok_offset: int = 358
+    plc_parts_ok_type: str = "int"
+    plc_trigger_mode: str = "barcode_changed_then_parts_ok_increment"
+    plc_use_barcode_index: int = 1
+    plc_barcode_encoding: str = "ascii"
+    plc_barcode_strip_null: bool = True
+    plc_barcode_strip_space: bool = True
+    plc_timeout_seconds: int = 3
+    plc_poll_interval_ms: int = 500
+    plc_barcode_wait_ok_timeout_seconds: int = 30
     completed_count: int = 0
     done: bool = False
 

@@ -25,6 +25,8 @@ from PyQt5.QtWidgets import (
     QWidget,
 )
 
+from shared.s7_plc_client import S7PlcClient, parse_barcode
+
 
 BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config.ini"
@@ -80,67 +82,9 @@ class QTextEditLogHandler(logging.Handler):
         self.text_edit.moveCursor(self.text_edit.textCursor().End)
 
 
-class S7ClientWrapper:
+class S7ClientWrapper(S7PlcClient):
     def __init__(self, ip: str, rack: int, slot: int, timeout_ms: int):
-        self.ip = ip
-        self.rack = rack
-        self.slot = slot
-        self.timeout_ms = timeout_ms
-        self.client = None
-        self.snap7 = None
-        self.snap7_util = None
-
-    def connect(self):
-        try:
-            import snap7
-            from snap7 import util as snap7_util
-        except Exception as exc:
-            raise RuntimeError("未安装 python-snap7，请先执行 pip install -r requirements.txt") from exc
-
-        self.snap7 = snap7
-        self.snap7_util = snap7_util
-        self.client = snap7.client.Client()
-        self._try_set_timeout()
-        self.client.connect(self.ip, self.rack, self.slot)
-        if not self.is_connected():
-            raise RuntimeError("PLC连接失败：检查 IP、网线、PLC是否允许外部访问、Rack/Slot。")
-
-    def _try_set_timeout(self):
-        if not self.client or not self.snap7:
-            return
-        try:
-            parameter = getattr(getattr(self.snap7, "types", object), "Parameter", None)
-            if parameter and hasattr(parameter, "RecvTimeout"):
-                self.client.set_param(parameter.RecvTimeout, self.timeout_ms)
-            if parameter and hasattr(parameter, "SendTimeout"):
-                self.client.set_param(parameter.SendTimeout, self.timeout_ms)
-        except Exception:
-            pass
-
-    def disconnect(self):
-        if not self.client:
-            return
-        try:
-            self.client.disconnect()
-        finally:
-            self.client = None
-
-    def is_connected(self):
-        if not self.client:
-            return False
-        try:
-            return bool(self.client.get_connected())
-        except Exception:
-            return False
-
-    def read_int(self, db_number: int, offset: int) -> int:
-        data = self.read_bytes(db_number, offset, 2)
-        return int(self.snap7_util.get_int(data, 0))
-
-    def read_bytes(self, db_number: int, offset: int, length: int) -> bytes:
-        if not self.client or not self.is_connected():
-            raise RuntimeError("PLC未连接")
-        return bytes(self.client.db_read(db_number, offset, length))
+        super().__init__(ip, rack, slot, timeout_ms / 1000)
 
 
 def parse_bool(config: configparser.ConfigParser, section: str, key: str, fallback: bool) -> bool:
@@ -192,17 +136,6 @@ def load_config() -> ToolConfig:
         csv_file=csv_file,
         log_file=log_file,
     )
-
-
-def parse_barcode(raw_bytes: bytes, encoding: str, remove_null: bool, strip_space: bool) -> Tuple[str, str]:
-    hex_text = raw_bytes.hex(" ").upper()
-    text = raw_bytes.decode(encoding, errors="ignore")
-    if remove_null:
-        text = text.replace("\x00", "")
-    text = text.replace("\r", "").replace("\n", "").replace("\t", "")
-    if strip_space:
-        text = text.strip()
-    return text, hex_text
 
 
 class S7PlcTestWindow(QMainWindow):

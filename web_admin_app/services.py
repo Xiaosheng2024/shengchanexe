@@ -1,16 +1,191 @@
+import csv
+import json
+import shutil
+import socket
+import subprocess
+from datetime import datetime
+from pathlib import Path
 from urllib.parse import unquote
 
+from web_admin_app import database
 from web_admin_app.database import get_conn, now_text, row_to_dict
 
 
 MAX_PAGE_SIZE = 500
 DEFAULT_PAGE_SIZE = 100
+ROOT_DIR = Path(__file__).resolve().parent.parent
+BACKUP_DIR = Path("/opt/mes/backup") if Path("/opt/mes").exists() else ROOT_DIR / "backup"
+ARCHIVE_DIR = Path("/opt/mes/archive") if Path("/opt/mes").exists() else ROOT_DIR / "archive"
+MAINTENANCE_TABLES = ["scan_records", "station_work_records", "step_work_records", "screw_action_records", "station_session_logs"]
+
+
+def table_time_column(table):
+    return "completed_at" if table == "station_completions" else "created_at"
+SCAN_TYPE = "扫码"
+SCREW_TYPE = "螺丝"
+PLC_TYPE = "PLC接收"
+STEP_TYPES = (SCAN_TYPE, SCREW_TYPE, PLC_TYPE)
+ADMIN_PASSWORD = "0000"
+
+
+PLC_DEFAULTS = {
+    "plc_ip": "10.162.86.65",
+    "plc_rack": 0,
+    "plc_slot": 1,
+    "plc_barcode1_db": 201,
+    "plc_barcode1_offset": 800,
+    "plc_barcode1_length": 40,
+    "plc_barcode2_db": 201,
+    "plc_barcode2_offset": 840,
+    "plc_barcode2_length": 40,
+    "plc_parts_ok_db": 221,
+    "plc_parts_ok_offset": 358,
+    "plc_parts_ok_type": "int",
+    "plc_trigger_mode": "barcode_changed_then_parts_ok_increment",
+    "plc_use_barcode_index": 1,
+    "plc_barcode_encoding": "ascii",
+    "plc_barcode_strip_null": 1,
+    "plc_barcode_strip_space": 1,
+    "plc_timeout_seconds": 3,
+    "plc_poll_interval_ms": 500,
+    "plc_barcode_wait_ok_timeout_seconds": 30,
+}
 
 
 def pagination(query):
     page = max(int(query.get("page", ["1"])[0] or 1), 1)
     page_size = min(max(int(query.get("page_size", [str(DEFAULT_PAGE_SIZE)])[0] or DEFAULT_PAGE_SIZE), 1), MAX_PAGE_SIZE)
     return page, page_size, (page - 1) * page_size
+
+
+def client_label(payload):
+    return payload.get("client_id") or f"{payload.get('computer_name', socket.gethostname())}-{payload.get('ip_address', '')}"
+
+
+def resolve_project_station_ids(conn, payload):
+    try:
+        project_id = int(payload.get("project_id", 0))
+        station_id = int(payload.get("station_id", 0))
+        if project_id and station_id:
+            return project_id, station_id
+    except (TypeError, ValueError):
+        pass
+    project_name = payload.get("project", "") or payload.get("project_id", "")
+    station_name = payload.get("station", "") or payload.get("station_id", "")
+    row = find_project_station(conn, project_name, station_name)
+    if not row:
+        raise ValueError("项目或工位不存在")
+    return row["project_id"], row["station_id"]
+
+
+def record_project_station_ids(conn, payload):
+    if payload.get("project") or payload.get("station"):
+        return resolve_project_station_ids(conn, payload)
+    return int(payload.get("project_id", 0)), int(payload.get("station_id", 0))
+
+
+def log_station_session(conn, project_id, station_id, payload, action, message):
+    conn.execute(
+        """
+        INSERT INTO station_session_logs
+        (project_id, station_id, client_id, computer_name, ip_address, action, message, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            project_id,
+            station_id,
+            payload.get("client_id", ""),
+            payload.get("computer_name", ""),
+            payload.get("ip_address", ""),
+            action,
+            message,
+            now_text(),
+        ),
+    )
+
+
+def acquire_station_session(payload, force=False):
+    payload = dict(payload)
+    payload["client_id"] = client_label(payload)
+    with get_conn() as conn:
+        project_id, station_id = resolve_project_station_ids(conn, payload)
+        existing = conn.execute(
+            """
+            SELECT * FROM station_sessions
+            WHERE project_id = ? AND station_id = ? AND status = 'online'
+            ORDER BY last_heartbeat_at DESC LIMIT 1
+            """,
+            (project_id, station_id),
+        ).fetchone()
+        if existing and existing["client_id"] != payload["client_id"] and not force:
+            return {"ok": False, "conflict": row_to_dict(existing), "message": "该工位已被其他电脑占用"}
+        if force and payload.get("admin_password") != ADMIN_PASSWORD:
+            raise ValueError("管理员密码错误")
+        if existing and existing["client_id"] != payload["client_id"]:
+            conn.execute("UPDATE station_sessions SET status = 'offline', note = ? WHERE id = ?", ("管理员强制接管", existing["id"]))
+            log_station_session(conn, project_id, station_id, payload, "force-acquire", "管理员强制接管工位")
+        conn.execute(
+            """
+            INSERT INTO station_sessions
+            (project_id, station_id, client_id, computer_name, ip_address, status, acquired_at, last_heartbeat_at, note)
+            VALUES (?, ?, ?, ?, ?, 'online', ?, ?, ?)
+            ON CONFLICT DO NOTHING
+            """,
+            (
+                project_id,
+                station_id,
+                payload["client_id"],
+                payload.get("computer_name", ""),
+                payload.get("ip_address", ""),
+                now_text(),
+                now_text(),
+                "占用成功",
+            ),
+        )
+        conn.execute(
+            """
+            UPDATE station_sessions
+            SET client_id = ?, computer_name = ?, ip_address = ?, status = 'online', last_heartbeat_at = ?, note = ?
+            WHERE project_id = ? AND station_id = ? AND status = 'online'
+            """,
+            (
+                payload["client_id"],
+                payload.get("computer_name", ""),
+                payload.get("ip_address", ""),
+                now_text(),
+                "心跳更新",
+                project_id,
+                station_id,
+            ),
+        )
+        log_station_session(conn, project_id, station_id, payload, "acquire", "工位占用成功")
+    return {"ok": True, "client_id": payload["client_id"]}
+
+
+def heartbeat_station_session(payload):
+    client_id = client_label(payload)
+    with get_conn() as conn:
+        project_id, station_id = resolve_project_station_ids(conn, payload)
+        row = conn.execute(
+            "SELECT * FROM station_sessions WHERE project_id = ? AND station_id = ? AND status = 'online'",
+            (project_id, station_id),
+        ).fetchone()
+        if not row or row["client_id"] != client_id:
+            return {"ok": False, "message": "工位占用已失效或被接管", "session": row_to_dict(row)}
+        conn.execute("UPDATE station_sessions SET last_heartbeat_at = ? WHERE id = ?", (now_text(), row["id"]))
+    return {"ok": True}
+
+
+def release_station_session(payload):
+    client_id = client_label(payload)
+    with get_conn() as conn:
+        project_id, station_id = resolve_project_station_ids(conn, payload)
+        conn.execute(
+            "UPDATE station_sessions SET status = 'offline', note = ? WHERE project_id = ? AND station_id = ? AND client_id = ? AND status = 'online'",
+            ("客户端释放", project_id, station_id, client_id),
+        )
+        log_station_session(conn, project_id, station_id, dict(payload, client_id=client_id), "release", "客户端释放工位")
+    return {"ok": True}
 
 
 def list_projects():
@@ -94,6 +269,8 @@ def delete_project(project_id):
         conn.execute("DELETE FROM screw_action_records WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM step_work_records WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM station_work_records WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM station_session_logs WHERE project_id = ?", (project_id,))
+        conn.execute("DELETE FROM station_sessions WHERE project_id = ?", (project_id,))
         conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
 
 
@@ -109,6 +286,8 @@ def delete_station_with_conn(conn, station_id):
     conn.execute("DELETE FROM screw_action_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM step_work_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM station_work_records WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM station_session_logs WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM station_sessions WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM stations WHERE id = ?", (station_id,))
 
 
@@ -127,16 +306,22 @@ def add_step(payload):
     is_main_barcode = normalize_main_barcode(payload, step_type)
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
-    if step_type not in ("扫码", "螺丝"):
-        raise ValueError("功能只能是扫码或螺丝")
+    if step_type not in STEP_TYPES:
+        raise ValueError("功能只能是扫码、螺丝或PLC接收")
     with get_conn() as conn:
         if is_main_barcode:
             clear_station_main_barcode(conn, station_id)
+        plc_values = plc_payload_values(payload)
         cursor = conn.execute(
             """
             INSERT INTO steps
-            (station_id, step_order, name, type, required_count, barcode_start, barcode_end, expected_content, is_main_barcode, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            (station_id, step_order, name, type, required_count, barcode_start, barcode_end, expected_content, is_main_barcode,
+             plc_ip, plc_rack, plc_slot, plc_barcode1_db, plc_barcode1_offset, plc_barcode1_length,
+             plc_barcode2_db, plc_barcode2_offset, plc_barcode2_length, plc_parts_ok_db, plc_parts_ok_offset,
+             plc_parts_ok_type, plc_trigger_mode, plc_use_barcode_index, plc_barcode_encoding,
+             plc_barcode_strip_null, plc_barcode_strip_space, plc_timeout_seconds, plc_poll_interval_ms,
+             plc_barcode_wait_ok_timeout_seconds, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 station_id,
@@ -148,6 +333,7 @@ def add_step(payload):
                 int(payload.get("barcode_end", 7)),
                 payload.get("expected_content", ""),
                 1 if is_main_barcode else 0,
+                *plc_values,
                 now_text(),
             ),
         )
@@ -162,17 +348,24 @@ def update_step(step_id, payload):
     is_main_barcode = normalize_main_barcode(payload, step_type)
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
-    if step_type not in ("扫码", "螺丝"):
-        raise ValueError("功能只能是扫码或螺丝")
+    if step_type not in STEP_TYPES:
+        raise ValueError("功能只能是扫码、螺丝或PLC接收")
     with get_conn() as conn:
         old_row = conn.execute("SELECT station_id FROM steps WHERE id = ?", (step_id,)).fetchone()
         if is_main_barcode:
             clear_station_main_barcode(conn, station_id)
+        plc_values = plc_payload_values(payload)
         conn.execute(
             """
             UPDATE steps
             SET station_id = ?, step_order = ?, name = ?, type = ?, required_count = ?,
-                barcode_start = ?, barcode_end = ?, expected_content = ?, is_main_barcode = ?
+                barcode_start = ?, barcode_end = ?, expected_content = ?, is_main_barcode = ?,
+                plc_ip = ?, plc_rack = ?, plc_slot = ?, plc_barcode1_db = ?, plc_barcode1_offset = ?,
+                plc_barcode1_length = ?, plc_barcode2_db = ?, plc_barcode2_offset = ?, plc_barcode2_length = ?,
+                plc_parts_ok_db = ?, plc_parts_ok_offset = ?, plc_parts_ok_type = ?, plc_trigger_mode = ?,
+                plc_use_barcode_index = ?, plc_barcode_encoding = ?, plc_barcode_strip_null = ?,
+                plc_barcode_strip_space = ?, plc_timeout_seconds = ?, plc_poll_interval_ms = ?,
+                plc_barcode_wait_ok_timeout_seconds = ?
             WHERE id = ?
             """,
             (
@@ -185,6 +378,7 @@ def update_step(step_id, payload):
                 int(payload.get("barcode_end", 7)),
                 payload.get("expected_content", ""),
                 1 if is_main_barcode else 0,
+                *plc_values,
                 step_id,
             ),
         )
@@ -233,6 +427,7 @@ def get_station_config(path):
                 "barcode_end": step["barcode_end"],
                 "expected_content": step["expected_content"],
                 "is_main_barcode": bool(step["is_main_barcode"]),
+                **plc_step_config(step),
             }
             for step in steps
         ],
@@ -241,9 +436,42 @@ def get_station_config(path):
 
 def normalize_main_barcode(payload, step_type: str) -> bool:
     is_main_barcode = bool(payload.get("is_main_barcode", False))
-    if is_main_barcode and step_type != "扫码":
-        raise ValueError("只有扫码工序可以设置为主条码")
+    if is_main_barcode and step_type not in (SCAN_TYPE, PLC_TYPE):
+        raise ValueError("只有扫码工序或PLC接收工序可以设置为主条码")
     return is_main_barcode
+
+
+def plc_payload_values(payload):
+    values = dict(PLC_DEFAULTS)
+    for key in PLC_DEFAULTS:
+        if key in payload and payload.get(key) not in ("", None):
+            values[key] = payload.get(key)
+    int_keys = [
+        "plc_rack",
+        "plc_slot",
+        "plc_barcode1_db",
+        "plc_barcode1_offset",
+        "plc_barcode1_length",
+        "plc_barcode2_db",
+        "plc_barcode2_offset",
+        "plc_barcode2_length",
+        "plc_parts_ok_db",
+        "plc_parts_ok_offset",
+        "plc_use_barcode_index",
+        "plc_barcode_strip_null",
+        "plc_barcode_strip_space",
+        "plc_timeout_seconds",
+        "plc_poll_interval_ms",
+        "plc_barcode_wait_ok_timeout_seconds",
+    ]
+    for key in int_keys:
+        values[key] = int(bool(values[key])) if key in ("plc_barcode_strip_null", "plc_barcode_strip_space") else int(values[key])
+    return [values[key] for key in PLC_DEFAULTS]
+
+
+def plc_step_config(step):
+    keys = step.keys() if hasattr(step, "keys") else []
+    return {key: step[key] for key in PLC_DEFAULTS if key in keys}
 
 
 def clear_station_main_barcode(conn, station_id: int):
@@ -252,12 +480,12 @@ def clear_station_main_barcode(conn, station_id: int):
 
 def validate_station_main_barcode(conn, station_id: int):
     conn.execute(
-        "UPDATE steps SET is_main_barcode = 0 WHERE station_id = ? AND type != ?",
-        (station_id, "扫码"),
+        "UPDATE steps SET is_main_barcode = 0 WHERE station_id = ? AND type NOT IN (?, ?)",
+        (station_id, SCAN_TYPE, PLC_TYPE),
     )
     scan_count = conn.execute(
-        "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND type = ?",
-        (station_id, "扫码"),
+        "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND type IN (?, ?)",
+        (station_id, SCAN_TYPE, PLC_TYPE),
     ).fetchone()["total"]
     if scan_count == 0:
         return
@@ -265,9 +493,9 @@ def validate_station_main_barcode(conn, station_id: int):
         """
         SELECT COUNT(*) AS total
         FROM steps
-        WHERE station_id = ? AND type = ? AND is_main_barcode = 1
+        WHERE station_id = ? AND type IN (?, ?) AND is_main_barcode = 1
         """,
-        (station_id, "扫码"),
+        (station_id, SCAN_TYPE, PLC_TYPE),
     ).fetchone()["total"]
     if main_count == 0:
         raise ValueError("每个工位必须配置一个主条码扫码工序")
@@ -277,12 +505,12 @@ def validate_station_main_barcode(conn, station_id: int):
 
 def ensure_station_has_main_barcode(conn, station_id: int):
     conn.execute(
-        "UPDATE steps SET is_main_barcode = 0 WHERE station_id = ? AND type != ?",
-        (station_id, "扫码"),
+        "UPDATE steps SET is_main_barcode = 0 WHERE station_id = ? AND type NOT IN (?, ?)",
+        (station_id, SCAN_TYPE, PLC_TYPE),
     )
     scan_count = conn.execute(
-        "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND type = ?",
-        (station_id, "扫码"),
+        "SELECT COUNT(*) AS total FROM steps WHERE station_id = ? AND type IN (?, ?)",
+        (station_id, SCAN_TYPE, PLC_TYPE),
     ).fetchone()["total"]
     if scan_count == 0:
         return
@@ -303,8 +531,8 @@ def ensure_station_has_main_barcode(conn, station_id: int):
         )
         return
     first_scan = conn.execute(
-        "SELECT id FROM steps WHERE station_id = ? AND type = ? ORDER BY step_order, id LIMIT 1",
-        (station_id, "扫码"),
+        "SELECT id FROM steps WHERE station_id = ? AND type IN (?, ?) ORDER BY step_order, id LIMIT 1",
+        (station_id, SCAN_TYPE, PLC_TYPE),
     ).fetchone()
     conn.execute("UPDATE steps SET is_main_barcode = 1 WHERE id = ?", (first_scan["id"],))
 
@@ -504,6 +732,7 @@ def list_production_records(query):
 
 def add_production_record(payload):
     with get_conn() as conn:
+        project_id, station_id = record_project_station_ids(conn, payload)
         cursor = conn.execute(
             """
             INSERT INTO station_work_records
@@ -513,8 +742,8 @@ def add_production_record(payload):
             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                int(payload.get("project_id", 0)),
-                int(payload.get("station_id", 0)),
+                project_id,
+                station_id,
                 payload.get("main_barcode", ""),
                 payload.get("product_name", ""),
                 payload.get("station_name", ""),
@@ -564,6 +793,7 @@ def list_step_records(query):
 
 def add_step_record(payload):
     with get_conn() as conn:
+        project_id, station_id = record_project_station_ids(conn, payload)
         cursor = conn.execute(
             """
             INSERT INTO step_work_records
@@ -574,8 +804,8 @@ def add_step_record(payload):
             """,
             (
                 payload.get("station_work_id"),
-                int(payload.get("project_id", 0)),
-                int(payload.get("station_id", 0)),
+                project_id,
+                station_id,
                 payload.get("main_barcode", ""),
                 payload.get("step_name", ""),
                 payload.get("step_type", ""),
@@ -622,6 +852,7 @@ def list_screw_records(query):
 
 def add_screw_record(payload):
     with get_conn() as conn:
+        project_id, station_id = record_project_station_ids(conn, payload)
         cursor = conn.execute(
             """
             INSERT INTO screw_action_records
@@ -632,8 +863,8 @@ def add_screw_record(payload):
             (
                 payload.get("station_work_id"),
                 payload.get("step_work_id"),
-                int(payload.get("project_id", 0)),
-                int(payload.get("station_id", 0)),
+                project_id,
+                station_id,
                 payload.get("main_barcode", ""),
                 payload.get("step_name", ""),
                 payload.get("screw_index"),
@@ -697,3 +928,162 @@ def get_trace(query):
         "step_records": list_step_records(trace_query)["records"],
         "screw_records": list_screw_records(trace_query)["records"],
     }
+
+
+def log_maintenance(action, message, detail=None):
+    with get_conn() as conn:
+        conn.execute(
+            "INSERT INTO maintenance_logs (action, message, detail, created_at) VALUES (?, ?, ?, ?)",
+            (action, message, json.dumps(detail or {}, ensure_ascii=False), now_text()),
+        )
+
+
+def db_status():
+    db_config = database.load_database_config()
+    tables = [
+        "projects",
+        "stations",
+        "steps",
+        "scan_records",
+        "station_completions",
+        "station_work_records",
+        "step_work_records",
+        "screw_action_records",
+        "station_sessions",
+        "maintenance_logs",
+    ]
+    counts = {}
+    recent = {}
+    with get_conn() as conn:
+        for table in tables:
+            counts[table] = conn.execute(f"SELECT COUNT(*) AS total FROM {table}").fetchone()["total"]
+            if table in MAINTENANCE_TABLES or table in ("station_completions", "maintenance_logs"):
+                row = conn.execute(f"SELECT MAX(created_at) AS last_time FROM {table}").fetchone()
+                recent[table] = row["last_time"] if row else None
+    size = ""
+    if db_config["type"] == "sqlite":
+        path = Path(db_config["path"])
+        if not path.is_absolute():
+            path = database.ROOT_DIR / path
+        size = path.stat().st_size if path.exists() else 0
+    return {
+        "database_type": db_config["type"],
+        "database_size": size,
+        "table_counts": counts,
+        "recent_times": recent,
+        "backup_dir": str(BACKUP_DIR),
+        "archive_dir": str(ARCHIVE_DIR),
+        "version": (ROOT_DIR / "VERSION").read_text(encoding="utf-8").strip() if (ROOT_DIR / "VERSION").exists() else "",
+    }
+
+
+def backup_database():
+    db_config = database.load_database_config()
+    BACKUP_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    if db_config["type"] == "sqlite":
+        source = Path(db_config["path"])
+        if not source.is_absolute():
+            source = database.ROOT_DIR / source
+        target = BACKUP_DIR / f"mes_sqlite_{stamp}.db"
+        if source.exists():
+            shutil.copy2(source, target)
+        else:
+            target.write_text("", encoding="utf-8")
+    else:
+        target = BACKUP_DIR / f"mes_db_{stamp}.dump"
+        try:
+            with target.open("wb") as file:
+                subprocess.run(
+                    [
+                        "pg_dump",
+                        "-U",
+                        db_config["user"],
+                        "-h",
+                        db_config["host"],
+                        "-p",
+                        str(db_config["port"]),
+                        "-Fc",
+                        db_config["database"],
+                    ],
+                    check=True,
+                    stdout=file,
+                )
+        except Exception:
+            target.write_text("pg_dump执行失败，请在服务器检查PostgreSQL客户端工具和权限。", encoding="utf-8")
+    log_maintenance("backup", "数据库备份完成", {"backup_file": str(target)})
+    return {"backup_file": str(target)}
+
+
+def archive_old_records(payload):
+    before_date = payload.get("before_date")
+    if not before_date:
+        raise ValueError("归档日期不能为空")
+    tables = payload.get("tables") or MAINTENANCE_TABLES
+    ARCHIVE_DIR.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    archive_file = ARCHIVE_DIR / f"mes_archive_before_{before_date}_{stamp}.csv"
+    counts = {}
+    with get_conn() as conn, archive_file.open("w", encoding="utf-8-sig", newline="") as file:
+        writer = csv.writer(file)
+        for table in tables:
+            if table not in MAINTENANCE_TABLES and table != "station_completions":
+                continue
+            time_column = table_time_column(table)
+            rows = conn.execute(f"SELECT * FROM {table} WHERE {time_column} < ? ORDER BY {time_column}", (before_date,)).fetchall()
+            counts[table] = len(rows)
+            writer.writerow([f"TABLE:{table}"])
+            if rows:
+                columns = list(dict(rows[0]).keys())
+                writer.writerow(columns)
+                for row in rows:
+                    writer.writerow([row[column] for column in columns])
+    log_maintenance("archive", "历史数据归档完成", {"archive_file": str(archive_file), "counts": counts})
+    return {"archive_file": str(archive_file), "counts": counts}
+
+
+def delete_old_records(payload):
+    if payload.get("admin_password") != ADMIN_PASSWORD:
+        raise ValueError("管理员密码错误")
+    before_date = payload.get("before_date")
+    if not before_date:
+        raise ValueError("删除日期不能为空")
+    tables = payload.get("tables") or MAINTENANCE_TABLES
+    if payload.get("include_station_completions"):
+        tables = list(tables) + ["station_completions"]
+    backup = backup_database()
+    deleted_counts = {}
+    with get_conn() as conn:
+        for table in tables:
+            if table == "station_completions" and not payload.get("include_station_completions"):
+                continue
+            if table not in MAINTENANCE_TABLES and table != "station_completions":
+                continue
+            time_column = table_time_column(table)
+            count = conn.execute(f"SELECT COUNT(*) AS total FROM {table} WHERE {time_column} < ?", (before_date,)).fetchone()["total"]
+            conn.execute(f"DELETE FROM {table} WHERE {time_column} < ?", (before_date,))
+            deleted_counts[table] = count
+    detail = {"backup_file": backup["backup_file"], "deleted_counts": deleted_counts}
+    log_maintenance("delete-old-records", "历史数据删除完成", detail)
+    return {"code": 1, "message": "历史数据删除完成", "data": detail}
+
+
+def maintenance_logs(query):
+    page, page_size, offset = pagination(query)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM maintenance_logs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (page_size, offset),
+        ).fetchall()
+    return {"page": page, "page_size": page_size, "records": [row_to_dict(row) for row in rows]}
+
+
+def vacuum_or_analyze():
+    db_config = database.load_database_config()
+    with get_conn() as conn:
+        if db_config["type"] == "sqlite":
+            conn.execute("VACUUM")
+        else:
+            conn.execute("ANALYZE")
+    log_maintenance("vacuum-or-analyze", "数据库维护命令已执行")
+    return {"ok": True}

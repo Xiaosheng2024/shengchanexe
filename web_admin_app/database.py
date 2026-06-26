@@ -15,6 +15,29 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 DB_PATH = ROOT_DIR / "quality_control.db"
 CONFIG_PATH = ROOT_DIR / "config.ini"
 
+PLC_STEP_COLUMNS = {
+    "plc_ip": "TEXT NOT NULL DEFAULT '10.162.86.65'",
+    "plc_rack": "INTEGER NOT NULL DEFAULT 0",
+    "plc_slot": "INTEGER NOT NULL DEFAULT 1",
+    "plc_barcode1_db": "INTEGER NOT NULL DEFAULT 201",
+    "plc_barcode1_offset": "INTEGER NOT NULL DEFAULT 800",
+    "plc_barcode1_length": "INTEGER NOT NULL DEFAULT 40",
+    "plc_barcode2_db": "INTEGER NOT NULL DEFAULT 201",
+    "plc_barcode2_offset": "INTEGER NOT NULL DEFAULT 840",
+    "plc_barcode2_length": "INTEGER NOT NULL DEFAULT 40",
+    "plc_parts_ok_db": "INTEGER NOT NULL DEFAULT 221",
+    "plc_parts_ok_offset": "INTEGER NOT NULL DEFAULT 358",
+    "plc_parts_ok_type": "TEXT NOT NULL DEFAULT 'int'",
+    "plc_trigger_mode": "TEXT NOT NULL DEFAULT 'barcode_changed_then_parts_ok_increment'",
+    "plc_use_barcode_index": "INTEGER NOT NULL DEFAULT 1",
+    "plc_barcode_encoding": "TEXT NOT NULL DEFAULT 'ascii'",
+    "plc_barcode_strip_null": "INTEGER NOT NULL DEFAULT 1",
+    "plc_barcode_strip_space": "INTEGER NOT NULL DEFAULT 1",
+    "plc_timeout_seconds": "INTEGER NOT NULL DEFAULT 3",
+    "plc_poll_interval_ms": "INTEGER NOT NULL DEFAULT 500",
+    "plc_barcode_wait_ok_timeout_seconds": "INTEGER NOT NULL DEFAULT 30",
+}
+
 
 def load_database_config():
     config = configparser.ConfigParser()
@@ -32,7 +55,7 @@ def load_database_config():
         "port": section.getint("port", fallback=5432),
         "database": section.get("database", "mes_db"),
         "user": section.get("user", "mes_user"),
-        "password": section.get("password", "mes_password"),
+        "password": section.get("password", "change_me_random_password"),
     }
 
 
@@ -251,6 +274,26 @@ def create_sqlite_schema(conn):
             barcode_end INTEGER NOT NULL DEFAULT 7,
             expected_content TEXT NOT NULL DEFAULT '',
             is_main_barcode INTEGER NOT NULL DEFAULT 0,
+            plc_ip TEXT NOT NULL DEFAULT '10.162.86.65',
+            plc_rack INTEGER NOT NULL DEFAULT 0,
+            plc_slot INTEGER NOT NULL DEFAULT 1,
+            plc_barcode1_db INTEGER NOT NULL DEFAULT 201,
+            plc_barcode1_offset INTEGER NOT NULL DEFAULT 800,
+            plc_barcode1_length INTEGER NOT NULL DEFAULT 40,
+            plc_barcode2_db INTEGER NOT NULL DEFAULT 201,
+            plc_barcode2_offset INTEGER NOT NULL DEFAULT 840,
+            plc_barcode2_length INTEGER NOT NULL DEFAULT 40,
+            plc_parts_ok_db INTEGER NOT NULL DEFAULT 221,
+            plc_parts_ok_offset INTEGER NOT NULL DEFAULT 358,
+            plc_parts_ok_type TEXT NOT NULL DEFAULT 'int',
+            plc_trigger_mode TEXT NOT NULL DEFAULT 'barcode_changed_then_parts_ok_increment',
+            plc_use_barcode_index INTEGER NOT NULL DEFAULT 1,
+            plc_barcode_encoding TEXT NOT NULL DEFAULT 'ascii',
+            plc_barcode_strip_null INTEGER NOT NULL DEFAULT 1,
+            plc_barcode_strip_space INTEGER NOT NULL DEFAULT 1,
+            plc_timeout_seconds INTEGER NOT NULL DEFAULT 3,
+            plc_poll_interval_ms INTEGER NOT NULL DEFAULT 500,
+            plc_barcode_wait_ok_timeout_seconds INTEGER NOT NULL DEFAULT 30,
             created_at TEXT NOT NULL,
             FOREIGN KEY(station_id) REFERENCES stations(id)
         );
@@ -303,6 +346,26 @@ def create_postgresql_schema(conn):
             barcode_end INTEGER NOT NULL DEFAULT 7,
             expected_content TEXT NOT NULL DEFAULT '',
             is_main_barcode INTEGER NOT NULL DEFAULT 0,
+            plc_ip TEXT NOT NULL DEFAULT '10.162.86.65',
+            plc_rack INTEGER NOT NULL DEFAULT 0,
+            plc_slot INTEGER NOT NULL DEFAULT 1,
+            plc_barcode1_db INTEGER NOT NULL DEFAULT 201,
+            plc_barcode1_offset INTEGER NOT NULL DEFAULT 800,
+            plc_barcode1_length INTEGER NOT NULL DEFAULT 40,
+            plc_barcode2_db INTEGER NOT NULL DEFAULT 201,
+            plc_barcode2_offset INTEGER NOT NULL DEFAULT 840,
+            plc_barcode2_length INTEGER NOT NULL DEFAULT 40,
+            plc_parts_ok_db INTEGER NOT NULL DEFAULT 221,
+            plc_parts_ok_offset INTEGER NOT NULL DEFAULT 358,
+            plc_parts_ok_type TEXT NOT NULL DEFAULT 'int',
+            plc_trigger_mode TEXT NOT NULL DEFAULT 'barcode_changed_then_parts_ok_increment',
+            plc_use_barcode_index INTEGER NOT NULL DEFAULT 1,
+            plc_barcode_encoding TEXT NOT NULL DEFAULT 'ascii',
+            plc_barcode_strip_null INTEGER NOT NULL DEFAULT 1,
+            plc_barcode_strip_space INTEGER NOT NULL DEFAULT 1,
+            plc_timeout_seconds INTEGER NOT NULL DEFAULT 3,
+            plc_poll_interval_ms INTEGER NOT NULL DEFAULT 500,
+            plc_barcode_wait_ok_timeout_seconds INTEGER NOT NULL DEFAULT 30,
             created_at TIMESTAMP NOT NULL
         );
         CREATE TABLE IF NOT EXISTS station_completions (
@@ -377,6 +440,10 @@ def create_traceability_schema(conn):
             duration_seconds INTEGER DEFAULT 0,
             barcode TEXT,
             scan_result TEXT,
+            plc_barcode1 TEXT,
+            plc_barcode2 TEXT,
+            parts_ok_before INTEGER,
+            parts_ok_after INTEGER,
             screw_required_count INTEGER DEFAULT 0,
             screw_ok_count INTEGER DEFAULT 0,
             screw_ng_count INTEGER DEFAULT 0,
@@ -402,6 +469,36 @@ def create_traceability_schema(conn):
             ng_reason TEXT,
             created_at {ts_type} NOT NULL DEFAULT {current_ts}
         );
+        CREATE TABLE IF NOT EXISTS station_sessions (
+            id {id_type},
+            project_id INTEGER NOT NULL,
+            station_id INTEGER NOT NULL,
+            client_id TEXT NOT NULL,
+            computer_name TEXT,
+            ip_address TEXT,
+            status TEXT NOT NULL DEFAULT 'online',
+            acquired_at {ts_type} NOT NULL DEFAULT {current_ts},
+            last_heartbeat_at {ts_type} NOT NULL DEFAULT {current_ts},
+            note TEXT
+        );
+        CREATE TABLE IF NOT EXISTS station_session_logs (
+            id {id_type},
+            project_id INTEGER,
+            station_id INTEGER,
+            client_id TEXT,
+            computer_name TEXT,
+            ip_address TEXT,
+            action TEXT NOT NULL,
+            message TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS maintenance_logs (
+            id {id_type},
+            action TEXT NOT NULL,
+            message TEXT,
+            detail TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
         CREATE INDEX IF NOT EXISTS idx_station_work_barcode ON station_work_records(main_barcode);
         CREATE INDEX IF NOT EXISTS idx_station_work_project_station_time ON station_work_records(project_id, station_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_station_work_result ON station_work_records(result);
@@ -411,6 +508,10 @@ def create_traceability_schema(conn):
         CREATE INDEX IF NOT EXISTS idx_screw_action_barcode ON screw_action_records(main_barcode);
         CREATE INDEX IF NOT EXISTS idx_screw_action_project_station_time ON screw_action_records(project_id, station_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_screw_action_result ON screw_action_records(result);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_station_sessions_online ON station_sessions(project_id, station_id) WHERE status = 'online';
+        CREATE INDEX IF NOT EXISTS idx_station_sessions_client ON station_sessions(client_id);
+        CREATE INDEX IF NOT EXISTS idx_station_session_logs_created_at ON station_session_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_maintenance_logs_created_at ON maintenance_logs(created_at);
         """
     )
 
@@ -419,6 +520,10 @@ def migrate_sqlite_db(conn):
     columns = [row["name"] for row in conn.execute("PRAGMA table_info(steps)").fetchall()]
     if "is_main_barcode" not in columns:
         conn.execute("ALTER TABLE steps ADD COLUMN is_main_barcode INTEGER NOT NULL DEFAULT 0")
+        columns.append("is_main_barcode")
+    for column, definition in PLC_STEP_COLUMNS.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
 
 
 def seed_default_data(conn):
@@ -431,12 +536,17 @@ def seed_default_data(conn):
             (project_id, f"工位{index}", created_at),
         )
         station_id = cursor.lastrowid
-        default_steps = [
-            (1, "扫码A零件", "扫码", 0, 1, 1, "A", 1),
-            (2, "扫码B零件条码", "扫码", 0, 1, 1, "B", 0),
-            (3, "打螺丝10颗", "螺丝", 10, 1, 7, "", 0),
-            (4, "扫码C零件", "扫码", 0, 1, 1, "C", 0),
-        ]
+        if index == 1:
+            default_steps = [
+                (1, "PLC接收主条码", "PLC接收", 0, 1, 7, "", 1),
+            ]
+        else:
+            default_steps = [
+                (1, "扫码A零件", "扫码", 0, 1, 1, "A", 1),
+                (2, "扫码B零件条码", "扫码", 0, 1, 1, "B", 0),
+                (3, "打螺丝10颗", "螺丝", 10, 1, 7, "", 0),
+                (4, "扫码C零件", "扫码", 0, 1, 1, "C", 0),
+            ]
         conn.executemany(
             """
             INSERT INTO steps
@@ -457,8 +567,8 @@ def ensure_default_main_barcodes(conn):
         if main_count:
             continue
         first_scan = conn.execute(
-            "SELECT id FROM steps WHERE station_id = ? AND type = ? ORDER BY step_order, id LIMIT 1",
-            (station["id"], "扫码"),
+            "SELECT id FROM steps WHERE station_id = ? AND type IN (?, ?) ORDER BY step_order, id LIMIT 1",
+            (station["id"], "扫码", "PLC接收"),
         ).fetchone()
         if first_scan:
             conn.execute("UPDATE steps SET is_main_barcode = 1 WHERE id = ?", (first_scan["id"],))

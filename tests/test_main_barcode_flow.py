@@ -29,7 +29,8 @@ class MainBarcodeFlowTest(unittest.TestCase):
 
     def test_station_has_exactly_one_main_barcode(self):
         self.assertEqual(len(self.main_steps(self.station1["id"])), 1)
-        self.assertEqual(self.main_steps(self.station1["id"])[0]["type"], "扫码")
+        self.assertEqual(self.main_steps(self.station1["id"])[0]["type"], "PLC接收")
+        self.assertEqual(self.main_steps(self.station1["id"])[0]["plc_ip"], "10.162.86.65")
 
     def test_setting_new_main_barcode_clears_old_main(self):
         services.add_step(
@@ -66,7 +67,7 @@ class MainBarcodeFlowTest(unittest.TestCase):
         self.assertEqual(len(self.main_steps(self.station1["id"])), 1)
 
     def test_screw_step_cannot_be_main_barcode(self):
-        with self.assertRaisesRegex(ValueError, "只有扫码工序可以设置为主条码"):
+        with self.assertRaisesRegex(ValueError, "只有扫码工序或PLC接收工序可以设置为主条码"):
             services.add_step(
                 {
                     "station_id": self.station1["id"],
@@ -154,6 +155,29 @@ class MainBarcodeFlowTest(unittest.TestCase):
         self.assertEqual(trace["production_records"][0]["main_barcode"], barcode)
         self.assertEqual(trace["step_records"][0]["step_name"], "打螺丝")
         self.assertEqual(trace["screw_records"][0]["result"], "OK")
+
+    def test_station_session_conflict_and_force_acquire(self):
+        payload1 = {
+            "project_id": self.project["id"],
+            "station_id": self.station1["id"],
+            "client_id": "client-a",
+            "computer_name": "PC-A",
+            "ip_address": "10.0.0.1",
+        }
+        payload2 = {
+            "project_id": self.project["id"],
+            "station_id": self.station1["id"],
+            "client_id": "client-b",
+            "computer_name": "PC-B",
+            "ip_address": "10.0.0.2",
+        }
+        self.assertTrue(services.acquire_station_session(payload1)["ok"])
+        conflict = services.acquire_station_session(payload2)
+        self.assertFalse(conflict["ok"])
+        self.assertEqual(conflict["conflict"]["computer_name"], "PC-A")
+        with self.assertRaisesRegex(ValueError, "管理员密码错误"):
+            services.acquire_station_session(dict(payload2, admin_password="1111"), force=True)
+        self.assertTrue(services.acquire_station_session(dict(payload2, admin_password="0000"), force=True)["ok"])
         self.assertFalse(
             services.check_station_completion(
                 {

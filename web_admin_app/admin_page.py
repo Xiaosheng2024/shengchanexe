@@ -52,6 +52,7 @@ HTML = r"""<!doctype html>
       <button class="tab" data-page="stationPage">工位管理</button>
       <button class="tab" data-page="stepPage">工序规则管理</button>
       <button class="tab" data-page="recordPage">扫描记录查询</button>
+      <button class="tab" data-page="maintenancePage">系统维护</button>
       <div class="tree-title">项目 / 工位 / 规则</div>
       <div id="menuTree"></div>
     </nav>
@@ -121,6 +122,7 @@ HTML = r"""<!doctype html>
             <select id="stepType" onchange="toggleStepFields()">
               <option value="扫码">条码扫描</option>
               <option value="螺丝">螺丝数量</option>
+              <option value="PLC接收">PLC接收</option>
             </select>
             <label>顺序</label>
             <input id="stepOrder" type="number" min="1" value="1">
@@ -137,6 +139,35 @@ HTML = r"""<!doctype html>
           <div class="toolbar" id="screwFields" style="display:none">
             <label>螺丝数量</label>
             <input id="requiredCount" type="number" min="1" value="10">
+          </div>
+          <div id="plcFields" style="display:none">
+            <div class="toolbar">
+              <label>PLC IP</label><input id="plcIp" value="10.162.86.65">
+              <label>Rack</label><input id="plcRack" type="number" value="0">
+              <label>Slot</label><input id="plcSlot" type="number" value="1">
+              <label class="checkbox-label"><input id="plcIsMainBarcode" type="checkbox" checked> 是否主条码</label>
+            </div>
+            <div class="toolbar">
+              <label>条码1 DB</label><input id="plcBarcode1Db" type="number" value="201">
+              <label>Offset</label><input id="plcBarcode1Offset" type="number" value="800">
+              <label>Length</label><input id="plcBarcode1Length" type="number" value="40">
+              <label>条码2 DB</label><input id="plcBarcode2Db" type="number" value="201">
+              <label>Offset</label><input id="plcBarcode2Offset" type="number" value="840">
+              <label>Length</label><input id="plcBarcode2Length" type="number" value="40">
+            </div>
+            <div class="toolbar">
+              <label>PARTS_OK DB</label><input id="plcPartsOkDb" type="number" value="221">
+              <label>Offset</label><input id="plcPartsOkOffset" type="number" value="358">
+              <label>类型</label><input id="plcPartsOkType" value="int">
+              <label>触发模式</label><input id="plcTriggerMode" value="barcode_changed_then_parts_ok_increment">
+            </div>
+            <div class="toolbar">
+              <label>使用条码</label><input id="plcUseBarcodeIndex" type="number" min="1" max="2" value="1">
+              <label>编码</label><input id="plcBarcodeEncoding" value="ascii">
+              <label>轮询ms</label><input id="plcPollIntervalMs" type="number" value="500">
+              <label>超时秒</label><input id="plcTimeoutSeconds" type="number" value="3">
+              <label>等待OK秒</label><input id="plcBarcodeWaitOkTimeoutSeconds" type="number" value="30">
+            </div>
           </div>
           <button class="primary" onclick="addStep()">添加工序规则</button>
           <button class="primary" onclick="updateStep()">保存修改</button>
@@ -179,6 +210,32 @@ HTML = r"""<!doctype html>
           <table>
             <thead><tr><th>时间</th><th>项目</th><th>工位</th><th>条码</th><th>工序</th><th>结果</th><th>说明</th><th>操作</th></tr></thead>
             <tbody id="recordRows"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <section id="maintenancePage" class="page">
+        <div class="panel">
+          <h2>系统维护 / 数据维护</h2>
+          <div class="toolbar">
+            <button class="primary" onclick="loadDbStatus()">查看数据库状态</button>
+            <button class="secondary" onclick="backupDb()">一键备份数据库</button>
+            <label>日期前</label>
+            <input id="maintBeforeDate" type="date">
+            <label>管理员密码</label>
+            <input id="maintPassword" type="password" placeholder="0000">
+            <button class="secondary" onclick="archiveOldRecords()">归档历史数据</button>
+            <button class="danger" onclick="deleteOldRecords()">删除历史数据</button>
+          </div>
+          <p class="hint">默认不删除 station_completions；它用于前后工位校验。删除前系统会先自动备份。</p>
+          <pre id="dbStatusText" style="white-space:pre-wrap;background:#f9fafb;border:1px solid #e5e7eb;padding:12px;border-radius:6px;"></pre>
+        </div>
+        <div class="panel">
+          <h2>维护日志</h2>
+          <button class="secondary" onclick="loadMaintenanceLogs()">刷新日志</button>
+          <table>
+            <thead><tr><th>时间</th><th>动作</th><th>消息</th><th>详情</th></tr></thead>
+            <tbody id="maintenanceLogRows"></tbody>
           </table>
         </div>
       </section>
@@ -516,9 +573,12 @@ HTML = r"""<!doctype html>
     }
 
     function toggleStepFields() {
-      const isScrew = document.getElementById("stepType").value === "螺丝";
-      document.getElementById("barcodeFields").style.display = isScrew ? "none" : "flex";
+      const type = document.getElementById("stepType").value;
+      const isScrew = type === "螺丝";
+      const isPlc = type === "PLC接收";
+      document.getElementById("barcodeFields").style.display = (!isScrew && !isPlc) ? "flex" : "none";
       document.getElementById("screwFields").style.display = isScrew ? "flex" : "none";
+      document.getElementById("plcFields").style.display = isPlc ? "block" : "none";
       const mainBarcode = document.getElementById("isMainBarcode");
       mainBarcode.disabled = isScrew;
       if (isScrew) mainBarcode.checked = false;
@@ -554,7 +614,27 @@ HTML = r"""<!doctype html>
         barcode_start: Number(document.getElementById("barcodeStart").value || 1),
         barcode_end: Number(document.getElementById("barcodeEnd").value || 7),
         expected_content: document.getElementById("expectedContent").value.trim(),
-        is_main_barcode: type === "扫码" && document.getElementById("isMainBarcode").checked
+        is_main_barcode: (type === "PLC接收" && document.getElementById("plcIsMainBarcode").checked) || (type === "扫码" && document.getElementById("isMainBarcode").checked),
+        plc_ip: document.getElementById("plcIp").value.trim(),
+        plc_rack: Number(document.getElementById("plcRack").value || 0),
+        plc_slot: Number(document.getElementById("plcSlot").value || 1),
+        plc_barcode1_db: Number(document.getElementById("plcBarcode1Db").value || 201),
+        plc_barcode1_offset: Number(document.getElementById("plcBarcode1Offset").value || 800),
+        plc_barcode1_length: Number(document.getElementById("plcBarcode1Length").value || 40),
+        plc_barcode2_db: Number(document.getElementById("plcBarcode2Db").value || 201),
+        plc_barcode2_offset: Number(document.getElementById("plcBarcode2Offset").value || 840),
+        plc_barcode2_length: Number(document.getElementById("plcBarcode2Length").value || 40),
+        plc_parts_ok_db: Number(document.getElementById("plcPartsOkDb").value || 221),
+        plc_parts_ok_offset: Number(document.getElementById("plcPartsOkOffset").value || 358),
+        plc_parts_ok_type: document.getElementById("plcPartsOkType").value || "int",
+        plc_trigger_mode: document.getElementById("plcTriggerMode").value || "barcode_changed_then_parts_ok_increment",
+        plc_use_barcode_index: Number(document.getElementById("plcUseBarcodeIndex").value || 1),
+        plc_barcode_encoding: document.getElementById("plcBarcodeEncoding").value || "ascii",
+        plc_barcode_strip_null: true,
+        plc_barcode_strip_space: true,
+        plc_timeout_seconds: Number(document.getElementById("plcTimeoutSeconds").value || 3),
+        plc_poll_interval_ms: Number(document.getElementById("plcPollIntervalMs").value || 500),
+        plc_barcode_wait_ok_timeout_seconds: Number(document.getElementById("plcBarcodeWaitOkTimeoutSeconds").value || 30)
       };
     }
 
@@ -568,6 +648,25 @@ HTML = r"""<!doctype html>
       document.getElementById("barcodeEnd").value = step.barcode_end || 7;
       document.getElementById("expectedContent").value = step.expected_content || "";
       document.getElementById("isMainBarcode").checked = !!step.is_main_barcode;
+      document.getElementById("plcIsMainBarcode").checked = !!step.is_main_barcode;
+      document.getElementById("plcIp").value = step.plc_ip || "10.162.86.65";
+      document.getElementById("plcRack").value = step.plc_rack ?? 0;
+      document.getElementById("plcSlot").value = step.plc_slot ?? 1;
+      document.getElementById("plcBarcode1Db").value = step.plc_barcode1_db ?? 201;
+      document.getElementById("plcBarcode1Offset").value = step.plc_barcode1_offset ?? 800;
+      document.getElementById("plcBarcode1Length").value = step.plc_barcode1_length ?? 40;
+      document.getElementById("plcBarcode2Db").value = step.plc_barcode2_db ?? 201;
+      document.getElementById("plcBarcode2Offset").value = step.plc_barcode2_offset ?? 840;
+      document.getElementById("plcBarcode2Length").value = step.plc_barcode2_length ?? 40;
+      document.getElementById("plcPartsOkDb").value = step.plc_parts_ok_db ?? 221;
+      document.getElementById("plcPartsOkOffset").value = step.plc_parts_ok_offset ?? 358;
+      document.getElementById("plcPartsOkType").value = step.plc_parts_ok_type || "int";
+      document.getElementById("plcTriggerMode").value = step.plc_trigger_mode || "barcode_changed_then_parts_ok_increment";
+      document.getElementById("plcUseBarcodeIndex").value = step.plc_use_barcode_index ?? 1;
+      document.getElementById("plcBarcodeEncoding").value = step.plc_barcode_encoding || "ascii";
+      document.getElementById("plcPollIntervalMs").value = step.plc_poll_interval_ms ?? 500;
+      document.getElementById("plcTimeoutSeconds").value = step.plc_timeout_seconds ?? 3;
+      document.getElementById("plcBarcodeWaitOkTimeoutSeconds").value = step.plc_barcode_wait_ok_timeout_seconds ?? 30;
       toggleStepFields();
     }
 
@@ -708,6 +807,57 @@ HTML = r"""<!doctype html>
       await api(`/api/scan-records/${id}`, {method: "DELETE"});
       showStatus("记录已删除");
       loadRecords();
+    }
+
+    async function loadDbStatus() {
+      const data = await api("/api/admin/db/status");
+      document.getElementById("dbStatusText").textContent = JSON.stringify(data, null, 2);
+      await loadMaintenanceLogs();
+    }
+
+    async function backupDb() {
+      const data = await api("/api/admin/db/backup", {method: "POST", headers: {"Content-Type": "application/json"}, body: "{}"});
+      showStatus(`备份完成：${data.backup_file}`);
+      await loadMaintenanceLogs();
+    }
+
+    async function archiveOldRecords() {
+      const before_date = document.getElementById("maintBeforeDate").value;
+      if (!before_date) return showStatus("请选择日期");
+      const data = await api("/api/admin/db/archive", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({before_date})
+      });
+      showStatus(`归档完成：${data.archive_file}`);
+      await loadMaintenanceLogs();
+    }
+
+    async function deleteOldRecords() {
+      const before_date = document.getElementById("maintBeforeDate").value;
+      const admin_password = document.getElementById("maintPassword").value;
+      if (!before_date) return showStatus("请选择日期");
+      if (!admin_password) return showStatus("请输入管理员密码");
+      if (!confirm(`确定删除 ${before_date} 之前的历史数据吗？系统会先自动备份。`)) return;
+      const data = await api("/api/admin/db/delete-old-records", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          before_date,
+          admin_password,
+          tables: ["scan_records", "station_work_records", "step_work_records", "screw_action_records", "station_session_logs"],
+          include_station_completions: false
+        })
+      });
+      showStatus(data.message || "删除完成");
+      await loadMaintenanceLogs();
+    }
+
+    async function loadMaintenanceLogs() {
+      const data = await api("/api/admin/db/maintenance-logs?page=1&page_size=100");
+      document.getElementById("maintenanceLogRows").innerHTML = data.records.map(row =>
+        `<tr><td>${row.created_at}</td><td>${htmlEscape(row.action)}</td><td>${htmlEscape(row.message || "")}</td><td>${htmlEscape(row.detail || "")}</td></tr>`
+      ).join("") || `<tr><td colspan="4">暂无日志</td></tr>`;
     }
 
     refreshAll().catch(err => showStatus(err.message));

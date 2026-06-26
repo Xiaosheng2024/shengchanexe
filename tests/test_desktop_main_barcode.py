@@ -9,7 +9,7 @@ from PyQt5.QtWidgets import QApplication, QLabel
 
 import desktop_app.window as window_module
 from desktop_app.window import APP_VERSION, QualityControlWindow
-from shared.models import ProcessStep, ProductConfig, SCAN, SCREW
+from shared.models import PLC, ProcessStep, ProductConfig, SCAN, SCREW
 
 
 class DesktopMainBarcodeTest(unittest.TestCase):
@@ -110,6 +110,31 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window = self.make_window()
         self.assertEqual(window.tool_ip_input.text(), "127.0.0.1")
         self.assertIn(APP_VERSION, window.windowTitle())
+
+    def test_plc_step_waits_for_barcode_change_then_parts_ok_increment(self):
+        window = self.make_window()
+        step = ProcessStep("PLC接收主条码", PLC, is_main_barcode=True)
+        window.current_product = ProductConfig("PLC测试", [step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.stop_plc_worker = lambda: None
+        advances = {"count": 0}
+        window.advance_step = lambda *args, **kwargs: advances.__setitem__("count", advances["count"] + 1)
+        records = []
+        window.add_history_record = lambda *args, **kwargs: records.append((args, kwargs))
+        window.post_plc_step_record = lambda *args, **kwargs: None
+
+        window.on_plc_snapshot(10, "OLD", "", "", "")
+        self.assertFalse(step.done)
+        window.on_plc_snapshot(10, "MAIN-PLC-001", "TRACE-2", "", "")
+        self.assertFalse(step.done)
+        self.assertEqual(window.current_barcode, "")
+        window.on_plc_snapshot(11, "MAIN-PLC-001", "TRACE-2", "", "")
+
+        self.assertTrue(step.done)
+        self.assertEqual(window.current_barcode, "MAIN-PLC-001")
+        self.assertEqual(advances["count"], 1)
+        self.assertEqual(len(records), 1)
 
     def test_tool_main_panel_hides_advanced_settings(self):
         window = self.make_window()

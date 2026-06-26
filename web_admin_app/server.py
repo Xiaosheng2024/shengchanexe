@@ -14,12 +14,21 @@ from web_admin_app.services import (
     add_station_completion,
     add_step_record,
     add_step,
+    acquire_station_session,
+    archive_old_records,
+    backup_database,
     check_station_completion,
+    db_status,
     delete_project,
     delete_scan_record,
     delete_station,
     delete_step,
+    delete_old_records,
+    heartbeat_station_session,
+    maintenance_logs,
+    release_station_session,
     get_station_config,
+    get_trace,
     list_projects,
     list_projects_full,
     list_production_records,
@@ -27,11 +36,11 @@ from web_admin_app.services import (
     list_screw_records,
     list_steps,
     list_step_records,
-    get_trace,
     update_project,
     update_scan_record,
     update_station,
     update_step,
+    vacuum_or_analyze,
 )
 
 
@@ -125,6 +134,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, list_screw_records(query))
         elif path == "/api/trace":
             json_response(self, get_trace(query))
+        elif path == "/api/admin/db/status":
+            json_response(self, db_status())
+        elif path == "/api/admin/db/maintenance-logs":
+            json_response(self, maintenance_logs(query))
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -147,6 +160,22 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, add_step_record(payload))
         elif path == "/api/screw-records":
             json_response(self, add_screw_record(payload))
+        elif path == "/api/station-session/acquire":
+            json_response(self, acquire_station_session(payload))
+        elif path == "/api/station-session/force-acquire":
+            json_response(self, acquire_station_session(payload, force=True))
+        elif path == "/api/station-session/heartbeat":
+            json_response(self, heartbeat_station_session(payload))
+        elif path == "/api/station-session/release":
+            json_response(self, release_station_session(payload))
+        elif path == "/api/admin/db/backup":
+            json_response(self, backup_database())
+        elif path == "/api/admin/db/archive":
+            json_response(self, archive_old_records(payload))
+        elif path == "/api/admin/db/delete-old-records":
+            json_response(self, delete_old_records(payload))
+        elif path == "/api/admin/db/vacuum-or-analyze":
+            json_response(self, vacuum_or_analyze())
         else:
             json_response(self, {"error": "not found"}, 404)
 
