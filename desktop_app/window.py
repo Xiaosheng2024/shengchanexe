@@ -42,12 +42,15 @@ from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, SCAN, SCREW
 
 
+APP_VERSION = "v0.2.0"
+
+
 class QualityControlWindow(QMainWindow):
     tool_worker_write_requested = pyqtSignal(int, int)
 
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("生产工艺过程质量控制系统")
+        self.setWindowTitle(f"生产工艺过程质量控制系统 {APP_VERSION}")
         self.resize(1280, 820)
 
         self.projects = self.default_projects()
@@ -74,6 +77,8 @@ class QualityControlWindow(QMainWindow):
         self.tool_worker: Optional[ToolPollWorker] = None
         self.processing_tool_signal = False
         self.waiting_tool_trigger_reset = False
+        self.tool_ng_locked = False
+        self.tool_ng_dialog_open = False
         self.tool_lock_state = None
 
         self.build_ui()
@@ -212,9 +217,13 @@ class QualityControlWindow(QMainWindow):
         action_row = QHBoxLayout()
         self.screw_ok_btn = QPushButton("模拟螺钉枪OK信号")
         self.screw_ok_btn.clicked.connect(self.handle_screw_ok)
+        self.tool_admin_unlock_btn = QPushButton("管理员解锁")
+        self.tool_admin_unlock_btn.setEnabled(False)
+        self.tool_admin_unlock_btn.clicked.connect(self.reopen_tool_ng_unlock_dialog)
         reset_btn = QPushButton("重新开始当前产品")
         reset_btn.clicked.connect(self.reset_current_product)
         action_row.addWidget(self.screw_ok_btn)
+        action_row.addWidget(self.tool_admin_unlock_btn)
         action_row.addWidget(reset_btn)
         right_layout.addLayout(action_row)
 
@@ -268,6 +277,18 @@ class QualityControlWindow(QMainWindow):
         self.tool_unlock_value_input.setRange(0, 65535)
         self.tool_unlock_value_input.setValue(1)
         self.tool_unlock_value_input.setFixedWidth(60)
+        self.tool_direction_register_input = QSpinBox()
+        self.tool_direction_register_input.setRange(0, 65535)
+        self.tool_direction_register_input.setValue(54)
+        self.tool_direction_register_input.setFixedWidth(60)
+        self.tool_forward_value_input = QSpinBox()
+        self.tool_forward_value_input.setRange(0, 65535)
+        self.tool_forward_value_input.setValue(0)
+        self.tool_forward_value_input.setFixedWidth(60)
+        self.tool_reverse_value_input = QSpinBox()
+        self.tool_reverse_value_input.setRange(0, 65535)
+        self.tool_reverse_value_input.setValue(1)
+        self.tool_reverse_value_input.setFixedWidth(60)
         self.tool_poll_interval_input = QSpinBox()
         self.tool_poll_interval_input.setRange(200, 5000)
         self.tool_poll_interval_input.setSingleStep(100)
@@ -292,6 +313,11 @@ class QualityControlWindow(QMainWindow):
         self.tool_enable_dedup_checkbox = QCheckBox("启用防重复触发")
         self.tool_enable_dedup_checkbox.setChecked(True)
         self.tool_verbose_log_checkbox = QCheckBox("显示详细通讯日志")
+        self.tool_clear_trigger_when_reverse_checkbox = QCheckBox("反向触发时自动清53")
+        self.tool_clear_trigger_when_reverse_checkbox.setChecked(True)
+        self.tool_admin_password_input = QLineEdit("0000")
+        self.tool_admin_password_input.setEchoMode(QLineEdit.Password)
+        self.tool_admin_password_input.setFixedWidth(120)
         self.tool_status_label = QLabel("未连接")
         self.tool_status_label.setFixedWidth(90)
         self.tool_status_label.setAlignment(Qt.AlignCenter)
@@ -646,7 +672,8 @@ class QualityControlWindow(QMainWindow):
             "地址4控制螺钉枪锁定/解锁：\n"
             "- 地址4 = 2：锁定螺钉枪，禁止启动\n"
             "- 地址4 = 0 或 1：解锁螺钉枪，允许启动\n"
-            "默认使用：锁定值 = 2，解锁值 = 1"
+            "默认使用：锁定值 = 2，解锁值 = 1\n"
+            "地址54控制方向：0=正向允许计数，1=反向不计数"
         )
         note.setWordWrap(True)
         note.setStyleSheet("font-size: 15px; color: #374151; padding: 8px; background: #f3f4f6; border-radius: 6px;")
@@ -659,8 +686,13 @@ class QualityControlWindow(QMainWindow):
         form.addRow("锁定地址", self.tool_control_register_input)
         form.addRow("锁定值", self.tool_lock_value_input)
         form.addRow("解锁值", self.tool_unlock_value_input)
+        form.addRow("方向地址", self.tool_direction_register_input)
+        form.addRow("正向值", self.tool_forward_value_input)
+        form.addRow("反向值", self.tool_reverse_value_input)
+        form.addRow("反向触发是否自动清53", self.tool_clear_trigger_when_reverse_checkbox)
         form.addRow("轮询间隔ms", self.tool_poll_interval_input)
         form.addRow("通讯超时秒", self.tool_timeout_input)
+        form.addRow("管理员密码", self.tool_admin_password_input)
         form.addRow("是否启用防重复触发", self.tool_enable_dedup_checkbox)
         form.addRow("是否显示详细通讯日志", self.tool_verbose_log_checkbox)
         layout.addLayout(form)
@@ -690,8 +722,13 @@ class QualityControlWindow(QMainWindow):
         self.tool_control_register_input.setValue(4)
         self.tool_lock_value_input.setValue(2)
         self.tool_unlock_value_input.setValue(1)
+        self.tool_direction_register_input.setValue(54)
+        self.tool_forward_value_input.setValue(0)
+        self.tool_reverse_value_input.setValue(1)
+        self.tool_clear_trigger_when_reverse_checkbox.setChecked(True)
         self.tool_poll_interval_input.setValue(800)
         self.tool_timeout_input.setValue(1)
+        self.tool_admin_password_input.setText("0000")
         self.tool_enable_dedup_checkbox.setChecked(True)
         self.tool_verbose_log_checkbox.setChecked(False)
 
@@ -715,8 +752,13 @@ class QualityControlWindow(QMainWindow):
         self.tool_control_register_input.setValue(tool.getint("lock_address", fallback=self.tool_control_register_input.value()))
         self.tool_lock_value_input.setValue(tool.getint("lock_value", fallback=self.tool_lock_value_input.value()))
         self.tool_unlock_value_input.setValue(tool.getint("unlock_value", fallback=self.tool_unlock_value_input.value()))
+        self.tool_direction_register_input.setValue(tool.getint("direction_address", fallback=self.tool_direction_register_input.value()))
+        self.tool_forward_value_input.setValue(tool.getint("forward_value", fallback=self.tool_forward_value_input.value()))
+        self.tool_reverse_value_input.setValue(tool.getint("reverse_value", fallback=self.tool_reverse_value_input.value()))
+        self.tool_clear_trigger_when_reverse_checkbox.setChecked(tool.getboolean("clear_trigger_when_reverse", fallback=True))
         self.tool_poll_interval_input.setValue(tool.getint("poll_interval_ms", fallback=self.tool_poll_interval_input.value()))
         self.tool_timeout_input.setValue(tool.getint("timeout_seconds", fallback=self.tool_timeout_input.value()))
+        self.tool_admin_password_input.setText(tool.get("admin_unlock_password", self.tool_admin_password_input.text()))
         self.tool_enable_dedup_checkbox.setChecked(tool.getboolean("enable_dedup", fallback=True))
         self.tool_verbose_log_checkbox.setChecked(tool.getboolean("verbose_log", fallback=False))
 
@@ -740,8 +782,13 @@ class QualityControlWindow(QMainWindow):
                 "lock_address": str(self.tool_control_register_input.value()),
                 "lock_value": str(self.tool_lock_value_input.value()),
                 "unlock_value": str(self.tool_unlock_value_input.value()),
+                "direction_address": str(self.tool_direction_register_input.value()),
+                "forward_value": str(self.tool_forward_value_input.value()),
+                "reverse_value": str(self.tool_reverse_value_input.value()),
+                "clear_trigger_when_reverse": str(self.tool_clear_trigger_when_reverse_checkbox.isChecked()).lower(),
                 "poll_interval_ms": str(self.tool_poll_interval_input.value()),
                 "timeout_seconds": str(self.tool_timeout_input.value()),
+                "admin_unlock_password": self.tool_admin_password_input.text(),
                 "enable_dedup": str(self.tool_enable_dedup_checkbox.isChecked()).lower(),
                 "verbose_log": str(self.tool_verbose_log_checkbox.isChecked()).lower(),
             }
@@ -813,6 +860,11 @@ class QualityControlWindow(QMainWindow):
         self.step_started_at = datetime.now()
         self.last_voice_step_key = None
         self.current_barcode = ""
+        self.waiting_tool_trigger_reset = False
+        self.tool_ng_locked = False
+        self.tool_ng_dialog_open = False
+        if hasattr(self, "tool_admin_unlock_btn"):
+            self.tool_admin_unlock_btn.setEnabled(False)
         self.barcode_input.clear()
         self.message_label.setText("等待第1工序条码进入")
         if update_table:
@@ -992,6 +1044,7 @@ class QualityControlWindow(QMainWindow):
             unit_id=self.tool_unit_input.value(),
             status_register=self.tool_status_register_input.value(),
             trigger_register=self.tool_trigger_register_input.value(),
+            direction_register=self.tool_direction_register_input.value(),
             timeout_seconds=float(self.tool_timeout_input.value()),
             poll_interval_ms=self.tool_poll_interval_input.value(),
         )
@@ -999,7 +1052,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_worker = ToolPollWorker(config)
         self.tool_worker.moveToThread(self.tool_thread)
         self.tool_thread.started.connect(self.tool_worker.start)
-        self.tool_worker_write_requested.connect(self.tool_worker.write_register)
+        self.tool_worker_write_requested.connect(self.tool_worker.write_register, Qt.QueuedConnection)
         self.tool_worker.result.connect(self.on_tool_poll_result)
         self.tool_worker.error.connect(self.on_tool_poll_error)
         self.tool_worker.write_error.connect(self.on_tool_write_error)
@@ -1029,6 +1082,8 @@ class QualityControlWindow(QMainWindow):
         self.tool_thread = None
         self.processing_tool_signal = False
         self.waiting_tool_trigger_reset = False
+        self.tool_ng_locked = False
+        self.tool_ng_dialog_open = False
         self.tool_lock_state = None
         if hasattr(self, "tool_connect_btn"):
             self.tool_connect_btn.setText("连接")
@@ -1051,16 +1106,16 @@ class QualityControlWindow(QMainWindow):
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
         self.message_label.setText(f"螺钉枪写入异常：{message}")
 
-    def on_tool_poll_result(self, status: int, trigger: int):
+    def on_tool_poll_result(self, status: int, trigger: int, direction: int):
         if self.processing_tool_signal:
             return
         self.processing_tool_signal = True
         try:
-            self.process_tool_poll_result(status, trigger)
+            self.process_tool_poll_result(status, trigger, direction)
         finally:
             self.processing_tool_signal = False
 
-    def process_tool_poll_result(self, status: int, trigger: int):
+    def process_tool_poll_result(self, status: int, trigger: int, direction: Optional[int] = None):
         step = self.current_step()
         if step is None or step.step_type != SCREW:
             self.lock_tool()
@@ -1071,19 +1126,45 @@ class QualityControlWindow(QMainWindow):
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
             return
 
+        if self.tool_ng_locked:
+            self.lock_tool()
+            self.tool_status_label.setText("NG锁定")
+            self.message_label.setText("NG锁定：等待管理员解锁")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+            return
+
+        if direction is None:
+            direction = self.tool_forward_value_input.value()
         ok_value = self.tool_ok_value_input.value()
         ng_value = self.tool_ng_value_input.value()
         trigger_value = self.tool_trigger_value_input.value()
         trigger_reset_value = self.tool_trigger_reset_value_input.value()
+        forward_value = self.tool_forward_value_input.value()
+        reverse_value = self.tool_reverse_value_input.value()
         dedup_enabled = self.tool_enable_dedup_checkbox.isChecked()
         status_text = self.tightening_status_text(status)
         if self.tool_verbose_log_checkbox.isChecked():
-            logging.info("螺钉枪读取：trigger=%s status=%s-%s", trigger, status, status_text)
+            logging.info("螺钉枪读取：direction=%s trigger=%s status=%s-%s", direction, trigger, status, status_text)
         self.tool_status_label.setText("已连接")
         self.message_label.setText(
-            f"螺钉枪触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
+            f"螺钉枪方向：{direction}，触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
         )
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
+
+        if direction == reverse_value:
+            self.tool_status_label.setText("反向")
+            self.message_label.setText("反向状态，不计数")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #f59e0b;")
+            if trigger == trigger_value and self.tool_clear_trigger_when_reverse_checkbox.isChecked():
+                self.reset_tool_trigger()
+                logging.info("反向动作触发已忽略并清53")
+                if dedup_enabled:
+                    self.waiting_tool_trigger_reset = True
+            return
+
+        if direction != forward_value:
+            self.message_label.setText(f"未知方向值 {direction}，不计数")
+            return
 
         if trigger == trigger_reset_value:
             if dedup_enabled:
@@ -1104,10 +1185,7 @@ class QualityControlWindow(QMainWindow):
         if status == ng_value:
             if dedup_enabled:
                 self.waiting_tool_trigger_reset = True
-            self.add_screw_ng_record()
-            self.speak("螺丝NG，请重新打当前这颗")
-            self.show_auto_close_warning("螺丝NG", "螺丝NG，请重新打当前这颗")
-            self.reset_tool_trigger()
+            self.handle_screw_ng()
             return
 
         if status == 4:
@@ -1150,6 +1228,98 @@ class QualityControlWindow(QMainWindow):
         self.add_history_record(step, "NG", "螺钉枪NG", "螺丝NG，请重新打当前这颗", completed=False)
         self.message_label.setText("螺丝NG，请重新打当前这颗")
 
+    def handle_screw_ng(self):
+        self.add_screw_ng_record()
+        self.tool_ng_locked = True
+        self.tool_admin_unlock_btn.setEnabled(True)
+        self.lock_tool()
+        self.reset_tool_trigger()
+        self.speak("螺丝NG，请管理员解锁")
+        self.tool_status_label.setText("NG锁定")
+        self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+        self.message_label.setText("检测到螺丝NG，螺钉枪已锁定，请管理员输入密码解锁")
+        self.show_tool_ng_unlock_dialog()
+
+    def reopen_tool_ng_unlock_dialog(self):
+        if self.tool_ng_locked and not self.tool_ng_dialog_open:
+            self.show_tool_ng_unlock_dialog()
+
+    def show_tool_ng_unlock_dialog(self):
+        if self.tool_ng_dialog_open:
+            return
+        self.tool_ng_dialog_open = True
+        dialog = QDialog(self)
+        dialog.setWindowTitle("螺丝NG确认 / 管理解锁")
+        dialog.setModal(True)
+        layout = QVBoxLayout(dialog)
+        prompt = QLabel("检测到螺丝NG，螺钉枪已锁定，请管理员输入密码解锁")
+        prompt.setWordWrap(True)
+        layout.addWidget(prompt)
+
+        password_input = QLineEdit()
+        password_input.setEchoMode(QLineEdit.Password)
+        password_input.setPlaceholderText("请输入管理员密码")
+        layout.addWidget(password_input)
+
+        keypad = QGridLayout()
+        for index, digit in enumerate("123456789"):
+            button = QPushButton(digit)
+            button.clicked.connect(lambda _, value=digit: password_input.setText(password_input.text() + value))
+            keypad.addWidget(button, index // 3, index % 3)
+        clear_btn = QPushButton("清除")
+        zero_btn = QPushButton("0")
+        backspace_btn = QPushButton("退格")
+        clear_btn.clicked.connect(password_input.clear)
+        zero_btn.clicked.connect(lambda: password_input.setText(password_input.text() + "0"))
+        backspace_btn.clicked.connect(lambda: password_input.setText(password_input.text()[:-1]))
+        keypad.addWidget(clear_btn, 3, 0)
+        keypad.addWidget(zero_btn, 3, 1)
+        keypad.addWidget(backspace_btn, 3, 2)
+        layout.addLayout(keypad)
+
+        button_row = QHBoxLayout()
+        confirm_btn = QPushButton("确认")
+        cancel_btn = QPushButton("取消")
+        button_row.addStretch(1)
+        button_row.addWidget(confirm_btn)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+        def confirm_unlock():
+            if self.unlock_tool_after_ng(password_input.text()):
+                dialog.accept()
+                return
+            password_input.clear()
+            QMessageBox.warning(dialog, "密码错误", "密码错误")
+
+        confirm_btn.clicked.connect(confirm_unlock)
+        cancel_btn.clicked.connect(dialog.reject)
+        password_input.returnPressed.connect(confirm_unlock)
+        dialog.finished.connect(lambda _: self._tool_ng_dialog_finished())
+        dialog.exec_()
+
+    def _tool_ng_dialog_finished(self):
+        self.tool_ng_dialog_open = False
+        if self.tool_ng_locked:
+            self.lock_tool()
+            self.tool_status_label.setText("NG锁定")
+            self.message_label.setText("NG锁定：等待管理员解锁")
+
+    def unlock_tool_after_ng(self, password: str) -> bool:
+        if password != self.tool_admin_password_input.text():
+            self.lock_tool()
+            return False
+        self.unlock_tool()
+        self.reset_tool_trigger()
+        self.tool_ng_locked = False
+        self.tool_ng_dialog_open = False
+        self.tool_admin_unlock_btn.setEnabled(False)
+        self.waiting_tool_trigger_reset = False
+        self.tool_status_label.setText("已解锁")
+        self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
+        self.message_label.setText("已解锁，请重新打当前这颗螺丝")
+        return True
+
     def tightening_status_text(self, value: int) -> str:
         status_map = {
             0: "准备",
@@ -1174,6 +1344,11 @@ class QualityControlWindow(QMainWindow):
             self.current_product.reset()
             self.current_step_index = 0
             self.current_barcode = ""
+            self.waiting_tool_trigger_reset = False
+            self.tool_ng_locked = False
+            self.tool_ng_dialog_open = False
+            if hasattr(self, "tool_admin_unlock_btn"):
+                self.tool_admin_unlock_btn.setEnabled(False)
         self.step_started_at = datetime.now()
         self.last_voice_step_key = None
         self.refresh_work_area()

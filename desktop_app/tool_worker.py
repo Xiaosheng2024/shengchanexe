@@ -12,12 +12,13 @@ class ToolPollConfig:
     unit_id: int
     status_register: int
     trigger_register: int
+    direction_register: int
     timeout_seconds: float
     poll_interval_ms: int
 
 
 class ToolPollWorker(QObject):
-    result = pyqtSignal(int, int)
+    result = pyqtSignal(int, int, int)
     error = pyqtSignal(str)
     write_error = pyqtSignal(str)
     stopped = pyqtSignal()
@@ -55,11 +56,11 @@ class ToolPollWorker(QObject):
             return
         self.reading = True
         try:
-            status = self.client.read_register(
+            direction = self.client.read_register(
                 self.config.host,
                 self.config.port,
                 self.config.unit_id,
-                self.config.status_register,
+                self.config.direction_register,
             )
             trigger = self.client.read_register(
                 self.config.host,
@@ -67,7 +68,13 @@ class ToolPollWorker(QObject):
                 self.config.unit_id,
                 self.config.trigger_register,
             )
-            self.result.emit(status, trigger)
+            status = self.client.read_register(
+                self.config.host,
+                self.config.port,
+                self.config.unit_id,
+                self.config.status_register,
+            )
+            self.result.emit(status, trigger, direction)
         except Exception as exc:
             self.error.emit(str(exc))
         finally:
