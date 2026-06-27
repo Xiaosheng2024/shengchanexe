@@ -47,10 +47,11 @@ from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
 
 
-APP_VERSION = "v0.8.3"
+APP_VERSION = "v0.8.4"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
+DEFAULT_TOOL_COMMAND_DELAY_MS = 50
 
 
 def runtime_data_dir() -> Path:
@@ -369,6 +370,11 @@ class QualityControlWindow(QMainWindow):
         self.tool_timeout_input.setRange(1, 10)
         self.tool_timeout_input.setValue(1)
         self.tool_timeout_input.setFixedWidth(60)
+        self.tool_command_delay_input = QSpinBox()
+        self.tool_command_delay_input.setRange(0, 1000)
+        self.tool_command_delay_input.setValue(DEFAULT_TOOL_COMMAND_DELAY_MS)
+        self.tool_command_delay_input.setSuffix(" ms")
+        self.tool_command_delay_input.setFixedWidth(90)
         self.disable_tool_auto_listen_checkbox = QCheckBox("禁用螺钉枪自动监听")
         self.disable_tool_auto_listen_checkbox.setToolTip("现场临时保护：勾选后不启动螺钉枪后台监听，可用模拟OK按钮测试流程")
         self.tool_connect_btn = QPushButton("连接")
@@ -800,12 +806,18 @@ class QualityControlWindow(QMainWindow):
             config.read(self.app_config_path, encoding="utf-8")
         changed = False
         if "TOOL" not in config:
-            config["TOOL"] = {
-                "direction_address": str(DEFAULT_TOOL_DIRECTION_ADDRESS),
-                "forward_value": str(DEFAULT_TOOL_FORWARD_VALUE),
-                "reverse_value": str(DEFAULT_TOOL_REVERSE_VALUE),
-            }
+            config["TOOL"] = {}
             changed = True
+        tool_defaults = {
+            "direction_address": str(DEFAULT_TOOL_DIRECTION_ADDRESS),
+            "forward_value": str(DEFAULT_TOOL_FORWARD_VALUE),
+            "reverse_value": str(DEFAULT_TOOL_REVERSE_VALUE),
+            "command_delay_ms": str(DEFAULT_TOOL_COMMAND_DELAY_MS),
+        }
+        for key, value in tool_defaults.items():
+            if key not in config["TOOL"]:
+                config["TOOL"][key] = value
+                changed = True
         if "LOCAL_DEVICE" not in config:
             config["LOCAL_DEVICE"] = {}
             changed = True
@@ -1091,7 +1103,7 @@ class QualityControlWindow(QMainWindow):
             "- 地址4 = 2：锁定螺钉枪，禁止启动\n"
             "- 地址4 = 0 或 1：解锁螺钉枪，允许启动\n"
             "默认使用：锁定值 = 2，解锁值 = 1\n"
-            "地址54控制方向：0=正向允许计数，1=反向不计数"
+            "地址54控制方向：3=正转允许处理，2=反转不计数"
         )
         note.setWordWrap(True)
         note.setStyleSheet("font-size: 15px; color: #374151; padding: 8px; background: #f3f4f6; border-radius: 6px;")
@@ -1110,6 +1122,7 @@ class QualityControlWindow(QMainWindow):
         form.addRow("反向触发是否自动清53", self.tool_clear_trigger_when_reverse_checkbox)
         form.addRow("轮询间隔ms", self.tool_poll_interval_input)
         form.addRow("通讯超时秒", self.tool_timeout_input)
+        form.addRow("写指令延迟", self.tool_command_delay_input)
         form.addRow("管理员密码", self.tool_admin_password_input)
         form.addRow("是否启用防重复触发", self.tool_enable_dedup_checkbox)
         form.addRow("是否显示详细通讯日志", self.tool_verbose_log_checkbox)
@@ -1146,6 +1159,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_clear_trigger_when_reverse_checkbox.setChecked(True)
         self.tool_poll_interval_input.setValue(800)
         self.tool_timeout_input.setValue(1)
+        self.tool_command_delay_input.setValue(DEFAULT_TOOL_COMMAND_DELAY_MS)
         self.tool_admin_password_input.setText("0000")
         self.tool_enable_dedup_checkbox.setChecked(True)
         self.tool_verbose_log_checkbox.setChecked(False)
@@ -1176,6 +1190,9 @@ class QualityControlWindow(QMainWindow):
         self.tool_clear_trigger_when_reverse_checkbox.setChecked(tool.getboolean("clear_trigger_when_reverse", fallback=True))
         self.tool_poll_interval_input.setValue(tool.getint("poll_interval_ms", fallback=self.tool_poll_interval_input.value()))
         self.tool_timeout_input.setValue(tool.getint("timeout_seconds", fallback=self.tool_timeout_input.value()))
+        self.tool_command_delay_input.setValue(
+            tool.getint("command_delay_ms", fallback=self.tool_command_delay_input.value())
+        )
         self.tool_admin_password_input.setText(tool.get("admin_unlock_password", self.tool_admin_password_input.text()))
         self.tool_enable_dedup_checkbox.setChecked(tool.getboolean("enable_dedup", fallback=True))
         self.tool_verbose_log_checkbox.setChecked(tool.getboolean("verbose_log", fallback=False))
@@ -1206,6 +1223,7 @@ class QualityControlWindow(QMainWindow):
                 "clear_trigger_when_reverse": str(self.tool_clear_trigger_when_reverse_checkbox.isChecked()).lower(),
                 "poll_interval_ms": str(self.tool_poll_interval_input.value()),
                 "timeout_seconds": str(self.tool_timeout_input.value()),
+                "command_delay_ms": str(self.tool_command_delay_input.value()),
                 "admin_unlock_password": self.tool_admin_password_input.text(),
                 "enable_dedup": str(self.tool_enable_dedup_checkbox.isChecked()).lower(),
                 "verbose_log": str(self.tool_verbose_log_checkbox.isChecked()).lower(),
@@ -1545,6 +1563,10 @@ class QualityControlWindow(QMainWindow):
             step.completed_count = step.required_count
             step.done = True
             self.add_history_record(step, "完成", "螺钉枪OK", "螺丝数量已满足", completed=True)
+            logging.info(
+                "螺丝打满后延迟%sms再锁枪",
+                self.tool_command_delay_input.value(),
+            )
             self.close_tool_for_screw_step()
             self.speak("螺丝已完成")
             self.message_label.setText(f"{step.name} 已完成 {step.required_count}/{step.required_count}")
@@ -1577,6 +1599,7 @@ class QualityControlWindow(QMainWindow):
             poll_interval_ms=self.tool_poll_interval_input.value(),
             lock_register=self.tool_control_register_input.value(),
             lock_value=self.tool_lock_value_input.value(),
+            command_delay_ms=self.tool_command_delay_input.value(),
         )
         self.tool_thread = QThread(self)
         self.tool_worker = ToolPollWorker(config)
@@ -1890,6 +1913,11 @@ class QualityControlWindow(QMainWindow):
             return
         step = self.current_step()
         if step is None or step.step_type != SCREW:
+            if self.tool_lock_state != "locked":
+                logging.info(
+                    "非螺丝工序延迟%sms后锁枪",
+                    self.tool_command_delay_input.value(),
+                )
             self.lock_tool()
             self.tool_status_label.setText("已连接")
             self.message_label.setText(
@@ -1937,8 +1965,11 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText("反向状态，不计数")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #f59e0b;")
             if trigger == trigger_value and self.tool_clear_trigger_when_reverse_checkbox.isChecked():
+                logging.info(
+                    "反转后延迟%sms再清53",
+                    self.tool_command_delay_input.value(),
+                )
                 self.reset_tool_trigger()
-                logging.info("反向动作触发已忽略并清53")
                 if dedup_enabled:
                     self.waiting_tool_trigger_reset = True
             return
@@ -1959,6 +1990,10 @@ class QualityControlWindow(QMainWindow):
         if status == ok_value:
             if dedup_enabled:
                 self.waiting_tool_trigger_reset = True
+            logging.info(
+                "OK后延迟%sms再清53",
+                self.tool_command_delay_input.value(),
+            )
             self.reset_tool_trigger()
             self.handle_screw_ok()
             return
@@ -2024,6 +2059,10 @@ class QualityControlWindow(QMainWindow):
         self.add_screw_ng_record()
         self.tool_ng_locked = True
         self.tool_admin_unlock_btn.setEnabled(True)
+        logging.info(
+            "NG后延迟%sms再锁枪并清53",
+            self.tool_command_delay_input.value(),
+        )
         self.lock_tool()
         self.reset_tool_trigger()
         self.speak("螺丝NG，请管理员解锁")

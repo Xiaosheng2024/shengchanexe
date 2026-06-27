@@ -386,6 +386,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             "反转值",
             "轮询间隔ms",
             "通讯超时秒",
+            "写指令延迟",
         ]:
             self.assertNotIn(text, main_labels)
         self.assertEqual(window.tool_settings_dialog.windowTitle(), "螺钉枪高级设置")
@@ -406,24 +407,48 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(window.tool_direction_register_input.value(), 54)
             self.assertEqual(window.tool_forward_value_input.value(), 3)
             self.assertEqual(window.tool_reverse_value_input.value(), 2)
+            self.assertEqual(window.tool_command_delay_input.value(), 50)
             self.assertTrue(config_path.exists())
             generated = configparser.ConfigParser()
             generated.read(config_path, encoding="utf-8")
             self.assertEqual(generated.getint("TOOL", "direction_address"), 54)
             self.assertEqual(generated.getint("TOOL", "forward_value"), 3)
             self.assertEqual(generated.getint("TOOL", "reverse_value"), 2)
+            self.assertEqual(generated.getint("TOOL", "command_delay_ms"), 50)
 
     def test_restore_defaults_uses_new_direction_protocol(self):
         window = self.make_window()
         window.tool_direction_register_input.setValue(99)
         window.tool_forward_value_input.setValue(0)
         window.tool_reverse_value_input.setValue(1)
+        window.tool_command_delay_input.setValue(0)
 
         window.restore_default_tool_settings()
 
         self.assertEqual(window.tool_direction_register_input.value(), 54)
         self.assertEqual(window.tool_forward_value_input.value(), 3)
         self.assertEqual(window.tool_reverse_value_input.value(), 2)
+        self.assertEqual(window.tool_command_delay_input.value(), 50)
+
+    def test_old_tool_config_gets_command_delay_without_overwriting_values(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.ini"
+            config_path.write_text(
+                "[TOOL]\nforward_value = 9\nreverse_value = 8\n"
+                "[LOCAL_DEVICE]\nclient_id = fixed-client\n",
+                encoding="utf-8",
+            )
+
+            window = QualityControlWindow(config_path)
+
+            self.assertEqual(window.tool_forward_value_input.value(), 9)
+            self.assertEqual(window.tool_reverse_value_input.value(), 8)
+            self.assertEqual(window.tool_command_delay_input.value(), 50)
+            updated = configparser.ConfigParser()
+            updated.read(config_path, encoding="utf-8")
+            self.assertEqual(updated.getint("TOOL", "command_delay_ms"), 50)
+            self.assertEqual(updated.getint("TOOL", "forward_value"), 9)
+            self.assertEqual(updated.getint("TOOL", "reverse_value"), 8)
 
     def test_tool_settings_are_saved_and_loaded_from_config(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -445,6 +470,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             window.tool_direction_register_input.setValue(55)
             window.tool_forward_value_input.setValue(10)
             window.tool_reverse_value_input.setValue(11)
+            window.tool_command_delay_input.setValue(75)
             window.tool_clear_trigger_when_reverse_checkbox.setChecked(False)
             window.tool_poll_interval_input.setValue(1200)
             window.tool_timeout_input.setValue(2)
@@ -471,6 +497,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(loaded.tool_direction_register_input.value(), 55)
             self.assertEqual(loaded.tool_forward_value_input.value(), 10)
             self.assertEqual(loaded.tool_reverse_value_input.value(), 11)
+            self.assertEqual(loaded.tool_command_delay_input.value(), 75)
             self.assertFalse(loaded.tool_clear_trigger_when_reverse_checkbox.isChecked())
             self.assertEqual(loaded.tool_poll_interval_input.value(), 1200)
             self.assertEqual(loaded.tool_timeout_input.value(), 2)

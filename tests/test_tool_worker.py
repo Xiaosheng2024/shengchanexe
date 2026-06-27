@@ -1,4 +1,5 @@
 import unittest
+from unittest.mock import patch
 
 from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
 
@@ -15,6 +16,7 @@ def make_config():
         poll_interval_ms=800,
         lock_register=4,
         lock_value=2,
+        command_delay_ms=0,
     )
 
 
@@ -90,6 +92,20 @@ class ToolPollWorkerTest(unittest.TestCase):
         worker.poll_once()
 
         self.assertEqual(client.connect_attempts, 1)
+
+    def test_write_command_waits_configured_delay_inside_worker(self):
+        config = make_config()
+        config.command_delay_ms = 50
+        worker = ToolPollWorker(config)
+        client = FakeConnectedClient()
+        worker.client = client
+        worker.polling = True
+
+        with patch("desktop_app.tool_worker.sleep") as sleep_mock:
+            worker.write_register(53, 0)
+
+        sleep_mock.assert_called_once_with(0.05)
+        self.assertEqual(client.writes, [(53, 0)])
 
 
 if __name__ == "__main__":

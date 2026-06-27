@@ -40,7 +40,7 @@ class ToolModbusClient:
             sock.settimeout(self.timeout)
             self.sock = sock
             self.connected = True
-            logging.info("螺钉枪连接成功：%s:%s", self.host, self.port)
+            logging.info("螺钉枪长连接建立成功：%s:%s", self.host, self.port)
         except (socket.timeout, ConnectionRefusedError, OSError, ValueError):
             self.disconnect()
             raise
@@ -60,7 +60,7 @@ class ToolModbusClient:
             except OSError:
                 pass
         if was_connected:
-            logging.info("关闭螺钉枪 socket")
+            logging.info("螺钉枪长连接断开，socket已关闭")
 
     def is_connected(self) -> bool:
         return self.connected and self.sock is not None

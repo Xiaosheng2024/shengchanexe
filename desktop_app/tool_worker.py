@@ -1,6 +1,6 @@
 import logging
 from dataclasses import dataclass
-from time import monotonic
+from time import monotonic, sleep
 
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
@@ -19,6 +19,7 @@ class ToolPollConfig:
     poll_interval_ms: int
     lock_register: int = 4
     lock_value: int = 2
+    command_delay_ms: int = 50
     reconnect_interval_seconds: float = 2.0
 
 
@@ -92,7 +93,11 @@ class ToolPollWorker(QObject):
             self.timer = None
         if self.client.is_connected():
             try:
-                self.client.write_register(self.config.lock_register, self.config.lock_value)
+                self.write_register_with_delay(
+                    self.config.lock_register,
+                    self.config.lock_value,
+                    "主动断开前锁枪",
+                )
             except Exception as exc:
                 logging.warning("断开前锁定螺钉枪失败：%s", exc)
         self.client.disconnect()
@@ -112,7 +117,7 @@ class ToolPollWorker(QObject):
             status = self.client.read_register(self.config.status_register)
             self.result.emit(status, trigger, direction)
         except Exception as exc:
-            logging.error("螺钉枪读寄存器失败：%s", exc)
+            logging.error("螺钉枪读取54/53/100失败：%s", exc)
             self.mark_connection_failed(str(exc))
             self.error.emit(str(exc))
         finally:
@@ -126,8 +131,26 @@ class ToolPollWorker(QObject):
             self.write_error.emit("螺钉枪通讯断开，正在重连")
             return
         try:
-            self.client.write_register(register_address, value)
+            self.write_register_with_delay(register_address, value, "业务指令")
         except Exception as exc:
-            logging.error("螺钉枪写寄存器失败：%s", exc)
+            logging.error(
+                "螺钉枪写寄存器失败 address=%s value=%s：%s",
+                register_address,
+                value,
+                exc,
+            )
             self.mark_connection_failed(str(exc))
             self.write_error.emit(str(exc))
+
+    def write_register_with_delay(self, register_address: int, value: int, reason: str):
+        delay_ms = max(int(self.config.command_delay_ms), 0)
+        if delay_ms:
+            logging.info(
+                "螺钉枪%s：延迟%sms后写寄存器 address=%s value=%s",
+                reason,
+                delay_ms,
+                register_address,
+                value,
+            )
+            sleep(delay_ms / 1000.0)
+        self.client.write_register(register_address, value)
