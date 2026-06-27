@@ -51,7 +51,7 @@ class ToolPollWorker(QObject):
             return
         self.polling = True
         self.timer = QTimer(self)
-        self.timer.setInterval(max(self.config.poll_interval_ms, 200))
+        self.timer.setInterval(max(self.config.poll_interval_ms, 50))
         self.timer.timeout.connect(self.poll_once)
         self.timer.start()
         self.poll_once()
@@ -112,12 +112,12 @@ class ToolPollWorker(QObject):
         try:
             if not self.ensure_connection_for_poll():
                 return
-            direction = self.client.read_register(self.config.direction_register)
             trigger = self.client.read_register(self.config.trigger_register)
+            direction = self.client.read_register(self.config.direction_register)
             status = self.client.read_register(self.config.status_register)
             self.result.emit(status, trigger, direction)
         except Exception as exc:
-            logging.error("螺钉枪读取54/53/100失败：%s", exc)
+            logging.error("螺钉枪读取53/54/100失败：%s", exc)
             self.mark_connection_failed(str(exc))
             self.error.emit(str(exc))
         finally:
@@ -154,3 +154,9 @@ class ToolPollWorker(QObject):
             )
             sleep(delay_ms / 1000.0)
         self.client.write_register(register_address, value)
+        logging.info(
+            "延迟%sms后写寄存器成功 address=%s value=%s",
+            delay_ms,
+            register_address,
+            value,
+        )

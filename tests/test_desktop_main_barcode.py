@@ -408,6 +408,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(window.tool_forward_value_input.value(), 3)
             self.assertEqual(window.tool_reverse_value_input.value(), 2)
             self.assertEqual(window.tool_command_delay_input.value(), 50)
+            self.assertEqual(window.tool_poll_interval_input.value(), 100)
             self.assertTrue(config_path.exists())
             generated = configparser.ConfigParser()
             generated.read(config_path, encoding="utf-8")
@@ -415,6 +416,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(generated.getint("TOOL", "forward_value"), 3)
             self.assertEqual(generated.getint("TOOL", "reverse_value"), 2)
             self.assertEqual(generated.getint("TOOL", "command_delay_ms"), 50)
+            self.assertEqual(generated.getint("TOOL", "poll_interval_ms"), 100)
 
     def test_restore_defaults_uses_new_direction_protocol(self):
         window = self.make_window()
@@ -422,6 +424,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.tool_forward_value_input.setValue(0)
         window.tool_reverse_value_input.setValue(1)
         window.tool_command_delay_input.setValue(0)
+        window.tool_poll_interval_input.setValue(800)
 
         window.restore_default_tool_settings()
 
@@ -429,6 +432,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_forward_value_input.value(), 3)
         self.assertEqual(window.tool_reverse_value_input.value(), 2)
         self.assertEqual(window.tool_command_delay_input.value(), 50)
+        self.assertEqual(window.tool_poll_interval_input.value(), 100)
 
     def test_old_tool_config_gets_command_delay_without_overwriting_values(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -756,11 +760,28 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.render_screw_blocks(step)
 
         self.assertEqual(len(window.screw_blocks), 5)
-        self.assertEqual((window.screw_blocks[0].width(), window.screw_blocks[0].height()), (56, 56))
-        progress_labels = window.screw_box.findChildren(QLabel)
-        self.assertTrue(any(label.text() == "已完成 3 / 共 5" for label in progress_labels))
+        self.assertEqual((window.screw_blocks[0].width(), window.screw_blocks[0].height()), (80, 72))
+        self.assertEqual(window.screw_progress_label.text(), "已完成：3 / 5")
         self.assertIn("#22c55e", window.screw_blocks[2].styleSheet())
         self.assertIn("#d1d5db", window.screw_blocks[3].styleSheet())
+
+    def test_ten_screw_blocks_render_as_two_rows_of_five(self):
+        window = self.make_window()
+        step = ProcessStep("打螺丝10颗", SCREW, required_count=10)
+
+        window.render_screw_blocks(step)
+
+        positions = [window.screw_grid.getItemPosition(index + 1) for index in range(10)]
+        self.assertEqual([position[0] for position in positions[:5]], [1] * 5)
+        self.assertEqual([position[0] for position in positions[5:]], [2] * 5)
+        self.assertEqual([position[1] for position in positions[:5]], list(range(5)))
+        self.assertIn("4px solid #2563eb", window.screw_blocks[0].styleSheet())
+
+    def test_scan_input_is_compact_single_row(self):
+        window = self.make_window()
+
+        self.assertEqual(window.barcode_input.height(), 40)
+        self.assertEqual(window.scan_btn.height(), 40)
 
 
 if __name__ == "__main__":

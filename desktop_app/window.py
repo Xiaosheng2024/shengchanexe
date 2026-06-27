@@ -47,11 +47,12 @@ from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
 
 
-APP_VERSION = "v0.8.4"
+APP_VERSION = "v0.8.5"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
 DEFAULT_TOOL_COMMAND_DELAY_MS = 50
+DEFAULT_TOOL_POLL_INTERVAL_MS = 100
 
 
 def runtime_data_dir() -> Path:
@@ -263,21 +264,25 @@ class QualityControlWindow(QMainWindow):
         right_layout.addLayout(stats_row)
 
         scanner_row = QHBoxLayout()
+        scanner_row.setSpacing(8)
         self.barcode_input = QLineEdit()
         self.barcode_input.setPlaceholderText("输入或扫码条码，按回车提交")
-        self.barcode_input.setStyleSheet("font-size: 20px; padding: 10px;")
+        self.barcode_input.setFixedHeight(40)
+        self.barcode_input.setStyleSheet("font-size: 15px; padding: 4px 8px;")
         self.barcode_input.returnPressed.connect(self.handle_scan)
-        scan_btn = QPushButton("扫码确认")
-        scan_btn.clicked.connect(self.handle_scan)
+        self.scan_btn = QPushButton("扫码确认")
+        self.scan_btn.setFixedSize(92, 40)
+        self.scan_btn.setStyleSheet("font-size: 14px; padding: 4px 10px;")
+        self.scan_btn.clicked.connect(self.handle_scan)
         scanner_row.addWidget(self.barcode_input, 1)
-        scanner_row.addWidget(scan_btn)
+        scanner_row.addWidget(self.scan_btn)
         right_layout.addLayout(scanner_row)
 
         self.screw_box = QGroupBox("螺丝数量提示")
         self.screw_grid = QGridLayout(self.screw_box)
-        self.screw_grid.setHorizontalSpacing(10)
-        self.screw_grid.setVerticalSpacing(10)
-        self.screw_grid.setContentsMargins(18, 18, 18, 14)
+        self.screw_grid.setHorizontalSpacing(18)
+        self.screw_grid.setVerticalSpacing(14)
+        self.screw_grid.setContentsMargins(20, 14, 20, 18)
         self.screw_box.setMinimumHeight(300)
         self.screw_box.setStyleSheet(
             "QGroupBox { font-size: 14px; font-weight: 700; border: 2px solid #93c5fd;"
@@ -301,7 +306,8 @@ class QualityControlWindow(QMainWindow):
 
         self.tool_box = QGroupBox("螺钉枪TCP OK信号")
         tool_layout = QHBoxLayout(self.tool_box)
-        tool_layout.setSpacing(8)
+        tool_layout.setSpacing(5)
+        tool_layout.setContentsMargins(8, 10, 8, 8)
         self.tool_ip_input = QLineEdit("127.0.0.1")
         self.tool_ip_input.setPlaceholderText("设备IP")
         self.tool_ip_input.setFixedWidth(120)
@@ -362,9 +368,9 @@ class QualityControlWindow(QMainWindow):
         self.tool_reverse_value_input.setValue(DEFAULT_TOOL_REVERSE_VALUE)
         self.tool_reverse_value_input.setFixedWidth(60)
         self.tool_poll_interval_input = QSpinBox()
-        self.tool_poll_interval_input.setRange(200, 5000)
-        self.tool_poll_interval_input.setSingleStep(100)
-        self.tool_poll_interval_input.setValue(800)
+        self.tool_poll_interval_input.setRange(50, 5000)
+        self.tool_poll_interval_input.setSingleStep(50)
+        self.tool_poll_interval_input.setValue(DEFAULT_TOOL_POLL_INTERVAL_MS)
         self.tool_poll_interval_input.setFixedWidth(70)
         self.tool_timeout_input = QSpinBox()
         self.tool_timeout_input.setRange(1, 10)
@@ -379,13 +385,16 @@ class QualityControlWindow(QMainWindow):
         self.disable_tool_auto_listen_checkbox.setToolTip("现场临时保护：勾选后不启动螺钉枪后台监听，可用模拟OK按钮测试流程")
         self.tool_connect_btn = QPushButton("连接")
         self.tool_connect_btn.setFixedWidth(80)
+        self.tool_connect_btn.setFixedHeight(30)
         self.tool_connect_btn.clicked.connect(self.toggle_tool_connection)
         self.tool_disconnect_btn = QPushButton("断开")
         self.tool_disconnect_btn.setFixedWidth(80)
+        self.tool_disconnect_btn.setFixedHeight(30)
         self.tool_disconnect_btn.setEnabled(False)
         self.tool_disconnect_btn.clicked.connect(self.stop_tool_worker)
         self.tool_settings_btn = QPushButton("设置")
         self.tool_settings_btn.setFixedWidth(80)
+        self.tool_settings_btn.setFixedHeight(30)
         self.tool_settings_btn.clicked.connect(self.open_tool_settings_dialog)
         self.tool_enable_dedup_checkbox = QCheckBox("启用防重复触发")
         self.tool_enable_dedup_checkbox.setChecked(True)
@@ -398,7 +407,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_status_label = QLabel("未连接")
         self.tool_status_label.setFixedWidth(90)
         self.tool_status_label.setAlignment(Qt.AlignCenter)
-        self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+        self.tool_status_label.setStyleSheet("font-size: 12px; color: #6b7280;")
         main_tool_fields = [
             ("IP", self.tool_ip_input),
             ("端口", self.tool_port_input),
@@ -408,13 +417,19 @@ class QualityControlWindow(QMainWindow):
             ("NG值", self.tool_ng_value_input),
         ]
         for label_text, widget in main_tool_fields:
-            tool_layout.addWidget(QLabel(label_text))
+            label = QLabel(label_text)
+            label.setStyleSheet("font-size: 12px;")
+            widget.setFixedHeight(30)
+            tool_layout.addWidget(label)
             tool_layout.addWidget(widget)
         tool_layout.addWidget(self.tool_connect_btn)
         tool_layout.addWidget(self.tool_disconnect_btn)
         tool_layout.addWidget(self.tool_settings_btn)
+        self.disable_tool_auto_listen_checkbox.setStyleSheet("font-size: 12px;")
         tool_layout.addWidget(self.disable_tool_auto_listen_checkbox)
-        tool_layout.addWidget(QLabel("状态"))
+        status_title = QLabel("状态")
+        status_title.setStyleSheet("font-size: 12px;")
+        tool_layout.addWidget(status_title)
         tool_layout.addWidget(self.tool_status_label)
         tool_layout.addStretch(1)
         right_layout.addWidget(self.tool_box)
@@ -813,6 +828,7 @@ class QualityControlWindow(QMainWindow):
             "forward_value": str(DEFAULT_TOOL_FORWARD_VALUE),
             "reverse_value": str(DEFAULT_TOOL_REVERSE_VALUE),
             "command_delay_ms": str(DEFAULT_TOOL_COMMAND_DELAY_MS),
+            "poll_interval_ms": str(DEFAULT_TOOL_POLL_INTERVAL_MS),
         }
         for key, value in tool_defaults.items():
             if key not in config["TOOL"]:
@@ -1095,7 +1111,7 @@ class QualityControlWindow(QMainWindow):
     def build_tool_settings_dialog(self):
         self.tool_settings_dialog = QDialog(self)
         self.tool_settings_dialog.setWindowTitle("螺钉枪高级设置")
-        self.tool_settings_dialog.resize(560, 460)
+        self.tool_settings_dialog.resize(580, 560)
         layout = QVBoxLayout(self.tool_settings_dialog)
 
         note = QLabel(
@@ -1157,7 +1173,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_forward_value_input.setValue(DEFAULT_TOOL_FORWARD_VALUE)
         self.tool_reverse_value_input.setValue(DEFAULT_TOOL_REVERSE_VALUE)
         self.tool_clear_trigger_when_reverse_checkbox.setChecked(True)
-        self.tool_poll_interval_input.setValue(800)
+        self.tool_poll_interval_input.setValue(DEFAULT_TOOL_POLL_INTERVAL_MS)
         self.tool_timeout_input.setValue(1)
         self.tool_command_delay_input.setValue(DEFAULT_TOOL_COMMAND_DELAY_MS)
         self.tool_admin_password_input.setText("0000")
@@ -1449,6 +1465,7 @@ class QualityControlWindow(QMainWindow):
                 widget.setParent(None)
                 widget.deleteLater()
         self.screw_blocks = []
+        self.screw_progress_label = None
 
         if step is None or step.step_type != SCREW:
             label = QLabel("当前不是螺丝工序")
@@ -1457,21 +1474,35 @@ class QualityControlWindow(QMainWindow):
             self.screw_grid.addWidget(label, 0, 0)
             return
 
-        progress = QLabel(f"已完成 {step.completed_count} / 共 {step.required_count}")
-        progress.setAlignment(Qt.AlignCenter)
-        progress.setStyleSheet("font-size: 22px; font-weight: 700; color: #111827; padding: 4px;")
-        self.screw_grid.addWidget(progress, 0, 0, 1, 10)
+        columns = min(max((step.required_count + 1) // 2, 1), 5)
+        self.screw_progress_label = QLabel(f"已完成：{step.completed_count} / {step.required_count}")
+        self.screw_progress_label.setAlignment(Qt.AlignRight | Qt.AlignVCenter)
+        self.screw_progress_label.setStyleSheet(
+            "font-size: 15px; font-weight: 700; color: #374151; padding: 0 4px 2px 4px;"
+        )
+        self.screw_grid.addWidget(
+            self.screw_progress_label,
+            0,
+            0,
+            1,
+            columns,
+            Qt.AlignRight | Qt.AlignTop,
+        )
 
-        columns = min(max(step.required_count, 1), 10)
         for number in range(step.required_count):
             block = QLabel(str(number + 1))
             block.setAlignment(Qt.AlignCenter)
-            block.setFixedSize(56, 56)
+            block.setFixedSize(80, 72)
             color = "#22c55e" if number < step.completed_count else "#d1d5db"
-            border = "3px solid #15803d" if number < step.completed_count else "2px solid #9ca3af"
+            if number < step.completed_count:
+                border = "3px solid #15803d"
+            elif number == step.completed_count:
+                border = "4px solid #2563eb"
+            else:
+                border = "2px solid #9ca3af"
             block.setStyleSheet(
-                f"background: {color}; border: {border}; border-radius: 7px;"
-                " font-size: 20px; font-weight: 700;"
+                f"background: {color}; border: {border}; border-radius: 10px;"
+                " font-size: 28px; font-weight: 700;"
                 " color: #111827;"
             )
             self.screw_grid.addWidget(block, 1 + number // columns, number % columns, Qt.AlignCenter)
@@ -1585,7 +1616,7 @@ class QualityControlWindow(QMainWindow):
         if self.disable_tool_auto_listen_checkbox.isChecked():
             self.message_label.setText("已禁用螺钉枪自动监听，可使用模拟OK按钮测试流程")
             self.tool_status_label.setText("未连接")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #6b7280;")
             return
 
         config = ToolPollConfig(
@@ -1623,7 +1654,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_connect_btn.setEnabled(False)
         self.tool_disconnect_btn.setEnabled(True)
         self.tool_status_label.setText("连接中")
-        self.tool_status_label.setStyleSheet("font-size: 16px; color: #2563eb;")
+        self.tool_status_label.setStyleSheet("font-size: 12px; color: #2563eb;")
 
     def is_tool_worker_running(self) -> bool:
         return self.tool_thread is not None and self.tool_thread.isRunning()
@@ -1663,12 +1694,12 @@ class QualityControlWindow(QMainWindow):
             self.tool_disconnect_btn.setEnabled(False)
         if hasattr(self, "tool_status_label"):
             self.tool_status_label.setText("未连接")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #6b7280;")
 
     def on_tool_connection_state(self, state: str):
         if state == "connected":
             self.tool_status_label.setText("已连接")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #16a34a;")
             self.tool_lock_state = None
             self.tool_connection_rearming = True
             self.waiting_tool_trigger_reset = True
@@ -1686,12 +1717,12 @@ class QualityControlWindow(QMainWindow):
         if state == "reconnecting":
             self.tool_lock_state = None
             self.tool_status_label.setText("正在重连")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #f59e0b;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #f59e0b;")
             self.message_label.setText("螺钉枪通讯断开，正在重连")
             return
         if state == "disconnected":
             self.tool_status_label.setText("已断开")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #6b7280;")
 
     def start_plc_worker(self, step: ProcessStep):
         if not self.ensure_station_session_for_production():
@@ -1884,13 +1915,13 @@ class QualityControlWindow(QMainWindow):
     def on_tool_poll_error(self, message: str):
         logging.error("螺钉枪通讯异常：%s", message)
         self.tool_status_label.setText("正在重连")
-        self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+        self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
         self.message_label.setText("螺钉枪通讯断开，正在重连")
 
     def on_tool_write_error(self, message: str):
         logging.error("螺钉枪写入异常：%s", message)
         self.tool_status_label.setText("正在重连")
-        self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+        self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
         self.message_label.setText("螺钉枪通讯断开，正在重连")
 
     def on_tool_poll_result_for_generation(self, generation: int, status: int, trigger: int, direction: int):
@@ -1909,10 +1940,22 @@ class QualityControlWindow(QMainWindow):
             self.processing_tool_signal = False
 
     def process_tool_poll_result(self, status: int, trigger: int, direction: Optional[int] = None):
+        trigger_value = self.tool_trigger_value_input.value()
+        if trigger == trigger_value:
+            logging.info(
+                "检测到地址53=%s：direction=%s status=%s",
+                trigger,
+                direction,
+                status,
+            )
         if not self.ensure_station_session_for_production():
+            if trigger == trigger_value:
+                logging.warning("设备状态未计数：当前工位未占用成功")
             return
         step = self.current_step()
         if step is None or step.step_type != SCREW:
+            if trigger == trigger_value:
+                logging.warning("设备状态未计数：当前不是螺丝工序")
             if self.tool_lock_state != "locked":
                 logging.info(
                     "非螺丝工序延迟%sms后锁枪",
@@ -1923,21 +1966,22 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText(
                 f"非螺丝工序，螺钉枪锁定；触发：{trigger}，状态：{status}-{self.tightening_status_text(status)}"
             )
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #6b7280;")
             return
 
         if self.tool_ng_locked:
+            if trigger == trigger_value:
+                logging.warning("设备状态未计数：NG锁定中")
             self.lock_tool()
             self.tool_status_label.setText("NG锁定")
             self.message_label.setText("NG锁定：等待管理员解锁")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
             return
 
         if direction is None:
             direction = self.tool_forward_value_input.value()
         ok_value = self.tool_ok_value_input.value()
         ng_value = self.tool_ng_value_input.value()
-        trigger_value = self.tool_trigger_value_input.value()
         trigger_reset_value = self.tool_trigger_reset_value_input.value()
         forward_value = self.tool_forward_value_input.value()
         reverse_value = self.tool_reverse_value_input.value()
@@ -1949,7 +1993,7 @@ class QualityControlWindow(QMainWindow):
         self.message_label.setText(
             f"螺钉枪方向：{direction}，触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
         )
-        self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
+        self.tool_status_label.setStyleSheet("font-size: 12px; color: #16a34a;")
 
         if self.tool_connection_rearming:
             if trigger == trigger_reset_value:
@@ -1957,13 +2001,16 @@ class QualityControlWindow(QMainWindow):
                 self.waiting_tool_trigger_reset = False
                 self.message_label.setText("螺钉枪通讯已恢复，等待下一次动作")
             else:
+                logging.warning("设备状态未计数：通讯恢复后正在等待53复位")
                 self.reset_tool_trigger()
             return
 
         if direction == reverse_value:
+            if trigger == trigger_value:
+                logging.info("设备状态未计数：direction=%s为反转", direction)
             self.tool_status_label.setText("反向")
             self.message_label.setText("反向状态，不计数")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #f59e0b;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #f59e0b;")
             if trigger == trigger_value and self.tool_clear_trigger_when_reverse_checkbox.isChecked():
                 logging.info(
                     "反转后延迟%sms再清53",
@@ -1975,6 +2022,8 @@ class QualityControlWindow(QMainWindow):
             return
 
         if direction != forward_value:
+            if trigger == trigger_value:
+                logging.warning("设备状态未计数：direction不是正转%s，实际=%s", forward_value, direction)
             self.message_label.setText(f"未知方向值 {direction}，不计数")
             return
 
@@ -1985,17 +2034,26 @@ class QualityControlWindow(QMainWindow):
         if trigger != trigger_value:
             return
         if dedup_enabled and self.waiting_tool_trigger_reset:
+            logging.info("设备状态未计数：正在等待53复位")
             return
 
         if status == ok_value:
             if dedup_enabled:
                 self.waiting_tool_trigger_reset = True
+            completed_after_ok = min(step.completed_count + 1, step.required_count)
+            required_count = step.required_count
             logging.info(
                 "OK后延迟%sms再清53",
                 self.tool_command_delay_input.value(),
             )
             self.reset_tool_trigger()
             self.handle_screw_ok()
+            logging.info(
+                "螺钉枪OK：第%s颗，已完成%s/共%s",
+                completed_after_ok,
+                completed_after_ok,
+                required_count,
+            )
             return
 
         if status == ng_value:
@@ -2005,8 +2063,11 @@ class QualityControlWindow(QMainWindow):
             return
 
         if status == 4:
+            logging.info("设备状态未计数：螺钉枪暂停 status=4")
             self.message_label.setText("螺钉枪暂停")
             return
+
+        logging.warning("设备状态未计数：status不是OK%s或NG%s，实际=%s", ok_value, ng_value, status)
 
     def write_tool_register(self, register_address: int, value: int):
         if not self.is_tool_worker_running():
@@ -2067,7 +2128,7 @@ class QualityControlWindow(QMainWindow):
         self.reset_tool_trigger()
         self.speak("螺丝NG，请管理员解锁")
         self.tool_status_label.setText("NG锁定")
-        self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+        self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
         self.message_label.setText("检测到螺丝NG，螺钉枪已锁定，请管理员输入密码解锁")
         self.show_tool_ng_unlock_dialog()
 
@@ -2147,7 +2208,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_admin_unlock_btn.setEnabled(False)
         self.waiting_tool_trigger_reset = False
         self.tool_status_label.setText("已解锁")
-        self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
+        self.tool_status_label.setStyleSheet("font-size: 12px; color: #16a34a;")
         self.message_label.setText("已解锁，请重新打当前这颗螺丝")
         return True
 
@@ -2289,7 +2350,7 @@ class QualityControlWindow(QMainWindow):
         except Exception as exc:
             self.tool_status_label.setText("通讯异常")
             self.message_label.setText(f"螺钉枪初始化异常：{exc}")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
 
     def close_tool_for_screw_step(self):
         if not self.is_tool_worker_running():
@@ -2300,7 +2361,7 @@ class QualityControlWindow(QMainWindow):
         except Exception as exc:
             self.tool_status_label.setText("通讯异常")
             self.message_label.setText(f"螺钉枪关闭异常：{exc}")
-            self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
 
     def speak(self, text: str):
         if self.say_command:

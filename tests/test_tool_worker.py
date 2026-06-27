@@ -1,5 +1,10 @@
+import os
 import unittest
 from unittest.mock import patch
+
+os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+
+from PyQt5.QtWidgets import QApplication
 
 from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
 
@@ -13,7 +18,7 @@ def make_config():
         trigger_register=53,
         direction_register=54,
         timeout_seconds=1.0,
-        poll_interval_ms=800,
+        poll_interval_ms=100,
         lock_register=4,
         lock_value=2,
         command_delay_ms=0,
@@ -22,7 +27,7 @@ def make_config():
 
 class FakeConnectedClient:
     def __init__(self):
-        self.values = {54: 0, 53: 1, 100: 2}
+        self.values = {54: 3, 53: 1, 100: 2}
         self.reads = []
         self.writes = []
         self.disconnected = False
@@ -57,6 +62,10 @@ class FakeDisconnectedClient:
 
 
 class ToolPollWorkerTest(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.app = QApplication.instance() or QApplication([])
+
     def test_poll_reuses_worker_client_for_all_business_registers(self):
         worker = ToolPollWorker(make_config())
         client = FakeConnectedClient()
@@ -67,8 +76,23 @@ class ToolPollWorkerTest(unittest.TestCase):
 
         worker.poll_once()
 
-        self.assertEqual(client.reads, [54, 53, 100])
-        self.assertEqual(results, [(2, 1, 0)])
+        self.assertEqual(client.reads, [53, 54, 100])
+        self.assertEqual(results, [(2, 1, 3)])
+
+        worker.poll_once()
+        self.assertEqual(client.reads, [53, 54, 100, 53, 54, 100])
+        self.assertEqual(results, [(2, 1, 3), (2, 1, 3)])
+
+    def test_start_keeps_100ms_poll_timer_active(self):
+        worker = ToolPollWorker(make_config())
+        worker.client = FakeConnectedClient()
+
+        worker.start()
+
+        self.assertTrue(worker.polling)
+        self.assertTrue(worker.timer.isActive())
+        self.assertEqual(worker.timer.interval(), 100)
+        worker.stop()
 
     def test_stop_locks_tool_then_disconnects_long_connection(self):
         worker = ToolPollWorker(make_config())
