@@ -123,7 +123,7 @@ class ToolPollWorker(QObject):
         if not self.polling:
             return
         if not self.ensure_connection_for_poll():
-            self.write_error.emit("螺钉枪通讯中断，正在重连")
+            self.write_error.emit("螺钉枪通讯断开，正在重连")
             return
         try:
             self.client.write_register(register_address, value)

@@ -119,6 +119,7 @@ class QualityControlWindow(QMainWindow):
         self.station_heartbeat_timer.timeout.connect(self.send_station_session_heartbeat)
         self.processing_tool_signal = False
         self.waiting_tool_trigger_reset = False
+        self.tool_connection_rearming = False
         self.tool_ng_locked = False
         self.tool_ng_dialog_open = False
         self.tool_lock_state = None
@@ -341,11 +342,11 @@ class QualityControlWindow(QMainWindow):
         self.tool_direction_register_input.setFixedWidth(60)
         self.tool_forward_value_input = QSpinBox()
         self.tool_forward_value_input.setRange(0, 65535)
-        self.tool_forward_value_input.setValue(0)
+        self.tool_forward_value_input.setValue(3)
         self.tool_forward_value_input.setFixedWidth(60)
         self.tool_reverse_value_input = QSpinBox()
         self.tool_reverse_value_input.setRange(0, 65535)
-        self.tool_reverse_value_input.setValue(1)
+        self.tool_reverse_value_input.setValue(2)
         self.tool_reverse_value_input.setFixedWidth(60)
         self.tool_poll_interval_input = QSpinBox()
         self.tool_poll_interval_input.setRange(200, 5000)
@@ -1078,8 +1079,8 @@ class QualityControlWindow(QMainWindow):
         form.addRow("锁定值", self.tool_lock_value_input)
         form.addRow("解锁值", self.tool_unlock_value_input)
         form.addRow("方向地址", self.tool_direction_register_input)
-        form.addRow("正向值", self.tool_forward_value_input)
-        form.addRow("反向值", self.tool_reverse_value_input)
+        form.addRow("正转值", self.tool_forward_value_input)
+        form.addRow("反转值", self.tool_reverse_value_input)
         form.addRow("反向触发是否自动清53", self.tool_clear_trigger_when_reverse_checkbox)
         form.addRow("轮询间隔ms", self.tool_poll_interval_input)
         form.addRow("通讯超时秒", self.tool_timeout_input)
@@ -1114,8 +1115,8 @@ class QualityControlWindow(QMainWindow):
         self.tool_lock_value_input.setValue(2)
         self.tool_unlock_value_input.setValue(1)
         self.tool_direction_register_input.setValue(54)
-        self.tool_forward_value_input.setValue(0)
-        self.tool_reverse_value_input.setValue(1)
+        self.tool_forward_value_input.setValue(3)
+        self.tool_reverse_value_input.setValue(2)
         self.tool_clear_trigger_when_reverse_checkbox.setChecked(True)
         self.tool_poll_interval_input.setValue(800)
         self.tool_timeout_input.setValue(1)
@@ -1344,6 +1345,7 @@ class QualityControlWindow(QMainWindow):
         self.last_voice_step_key = None
         self.current_barcode = ""
         self.waiting_tool_trigger_reset = False
+        self.tool_connection_rearming = self.is_tool_worker_running()
         self.tool_ng_locked = False
         self.tool_ng_dialog_open = False
         if hasattr(self, "tool_admin_unlock_btn"):
@@ -1603,8 +1605,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_thread = None
         self.processing_tool_signal = False
         self.waiting_tool_trigger_reset = False
-        self.tool_ng_locked = False
-        self.tool_ng_dialog_open = False
+        self.tool_connection_rearming = False
         self.tool_lock_state = None
         if hasattr(self, "tool_connect_btn"):
             self.tool_connect_btn.setText("连接")
@@ -1619,12 +1620,25 @@ class QualityControlWindow(QMainWindow):
         if state == "connected":
             self.tool_status_label.setText("已连接")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
-            self.sync_tool_lock_for_current_step()
+            self.tool_lock_state = None
+            self.tool_connection_rearming = True
+            self.waiting_tool_trigger_reset = True
+            self.reset_tool_trigger()
+            step = self.current_step()
+            if self.tool_ng_locked:
+                self.lock_tool()
+                self.tool_status_label.setText("NG锁定")
+                self.message_label.setText("NG锁定：通讯恢复后继续保持锁枪")
+            elif self.production_enabled and step is not None and step.step_type == SCREW:
+                self.unlock_tool()
+            else:
+                self.lock_tool()
             return
         if state == "reconnecting":
+            self.tool_lock_state = None
             self.tool_status_label.setText("正在重连")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #f59e0b;")
-            self.message_label.setText("螺钉枪通讯中断，正在重连")
+            self.message_label.setText("螺钉枪通讯断开，正在重连")
             return
         if state == "disconnected":
             self.tool_status_label.setText("已断开")
@@ -1822,13 +1836,13 @@ class QualityControlWindow(QMainWindow):
         logging.error("螺钉枪通讯异常：%s", message)
         self.tool_status_label.setText("正在重连")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
-        self.message_label.setText("螺钉枪通讯中断，正在重连")
+        self.message_label.setText("螺钉枪通讯断开，正在重连")
 
     def on_tool_write_error(self, message: str):
         logging.error("螺钉枪写入异常：%s", message)
         self.tool_status_label.setText("正在重连")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
-        self.message_label.setText("螺钉枪通讯中断，正在重连")
+        self.message_label.setText("螺钉枪通讯断开，正在重连")
 
     def on_tool_poll_result_for_generation(self, generation: int, status: int, trigger: int, direction: int):
         if generation != self.tool_worker_generation:
@@ -1882,6 +1896,15 @@ class QualityControlWindow(QMainWindow):
             f"螺钉枪方向：{direction}，触发：{trigger}，状态：{status}-{status_text}，OK={'是' if status == ok_value else '否'}"
         )
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
+
+        if self.tool_connection_rearming:
+            if trigger == trigger_reset_value:
+                self.tool_connection_rearming = False
+                self.waiting_tool_trigger_reset = False
+                self.message_label.setText("螺钉枪通讯已恢复，等待下一次动作")
+            else:
+                self.reset_tool_trigger()
+            return
 
         if direction == reverse_value:
             self.tool_status_label.setText("反向")
@@ -1955,8 +1978,11 @@ class QualityControlWindow(QMainWindow):
 
     def sync_tool_lock_for_current_step(self):
         step = self.current_step()
-        if step is not None and step.step_type == SCREW:
-            self.reset_tool_trigger()
+        self.reset_tool_trigger()
+        if self.tool_ng_locked:
+            self.lock_tool()
+            return
+        if self.production_enabled and step is not None and step.step_type == SCREW:
             self.unlock_tool()
             return
         self.lock_tool()
@@ -2189,6 +2215,8 @@ class QualityControlWindow(QMainWindow):
 
     def enter_tool_screw_step(self, step: ProcessStep):
         if not self.is_tool_worker_running():
+            if not self.disable_tool_auto_listen_checkbox.isChecked():
+                self.toggle_tool_connection()
             return
         try:
             self.reset_tool_trigger()

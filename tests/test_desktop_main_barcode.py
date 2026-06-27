@@ -23,12 +23,15 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.speak = lambda text: None
         window.play_ok_sound = lambda: None
         window.show_auto_close_warning = lambda title, message: None
+        window.disable_tool_auto_listen_checkbox.setChecked(True)
         return window
 
     def set_current_step_to_screw(self, window):
         window.current_product = ProductConfig("螺丝测试", [ProcessStep("打螺丝1颗", SCREW, required_count=1)])
         window.current_station.product = window.current_product
         window.current_step_index = 0
+        window.tool_forward_value_input.setValue(3)
+        window.tool_reverse_value_input.setValue(2)
 
     def test_main_barcode_sets_current_barcode_and_part_barcode_does_not_overwrite(self):
         window = self.make_window()
@@ -363,6 +366,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
     def test_tool_main_panel_hides_advanced_settings(self):
         window = self.make_window()
+        window.restore_default_tool_settings()
         main_labels = [label.text() for label in window.tool_box.findChildren(QLabel)]
 
         for text in ["IP", "端口", "站号", "状态地址", "OK值", "NG值", "状态"]:
@@ -375,8 +379,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             "锁定值",
             "解锁值",
             "方向地址",
-            "正向值",
-            "反向值",
+            "正转值",
+            "反转值",
             "轮询间隔ms",
             "通讯超时秒",
         ]:
@@ -386,8 +390,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_lock_value_input.value(), 2)
         self.assertEqual(window.tool_unlock_value_input.value(), 1)
         self.assertEqual(window.tool_direction_register_input.value(), 54)
-        self.assertEqual(window.tool_forward_value_input.value(), 0)
-        self.assertEqual(window.tool_reverse_value_input.value(), 1)
+        self.assertEqual(window.tool_forward_value_input.value(), 3)
+        self.assertEqual(window.tool_reverse_value_input.value(), 2)
 
     def test_tool_settings_are_saved_and_loaded_from_config(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -451,12 +455,12 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: count["writes"].append((register, value))
 
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(count["ok"], 1)
 
-        window.process_tool_poll_result(status=2, trigger=0, direction=0)
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=0, direction=3)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(count["ok"], 2)
         self.assertIn((53, 0), count["writes"])
 
@@ -467,13 +471,13 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: None
 
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
-        window.process_tool_poll_result(status=2, trigger=2, direction=0)
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+        window.process_tool_poll_result(status=2, trigger=2, direction=3)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(count["ok"], 1)
 
-        window.process_tool_poll_result(status=2, trigger=0, direction=0)
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=0, direction=3)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(count["ok"], 2)
 
     def test_tool_dedup_can_be_disabled_from_advanced_settings(self):
@@ -484,8 +488,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: None
 
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
 
         self.assertEqual(count["ok"], 2)
 
@@ -496,7 +500,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: count["writes"].append((register, value)) or True
 
-        window.process_tool_poll_result(status=2, trigger=1, direction=1)
+        window.process_tool_poll_result(status=2, trigger=1, direction=2)
 
         self.assertEqual(count["ok"], 0)
         self.assertIn((53, 0), count["writes"])
@@ -509,7 +513,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__("dialog", calls["dialog"] + 1)
         window.write_tool_register = lambda register, value: calls["writes"].append((register, value)) or True
 
-        window.process_tool_poll_result(status=3, trigger=1, direction=1)
+        window.process_tool_poll_result(status=3, trigger=1, direction=2)
 
         self.assertFalse(window.tool_ng_locked)
         self.assertEqual(calls["dialog"], 0)
@@ -522,7 +526,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__("dialog", calls["dialog"] + 1)
         window.write_tool_register = lambda register, value: calls["writes"].append((register, value)) or True
 
-        window.process_tool_poll_result(status=3, trigger=1, direction=0)
+        window.process_tool_poll_result(status=3, trigger=1, direction=3)
 
         self.assertTrue(window.tool_ng_locked)
         self.assertEqual(calls["dialog"], 1)
@@ -562,12 +566,12 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: True
 
-        window.process_tool_poll_result(status=2, trigger=1, direction=1)
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=1, direction=2)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(count["ok"], 0)
 
-        window.process_tool_poll_result(status=2, trigger=0, direction=0)
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=0, direction=3)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(count["ok"], 1)
 
     def test_non_screw_step_locks_tool_and_never_counts(self):
@@ -576,7 +580,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.handle_screw_ok = lambda: count.__setitem__("ok", count["ok"] + 1)
         window.write_tool_register = lambda register, value: count["writes"].append((register, value)) or True
 
-        window.process_tool_poll_result(status=2, trigger=1, direction=0)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
 
         self.assertEqual(count["ok"], 0)
         self.assertIn((4, 2), count["writes"])
@@ -607,6 +611,73 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
         self.assertIn((53, 0), writes)
         self.assertIn((4, 1), writes)
+
+    def test_enter_screw_step_starts_long_connection_when_auto_listen_enabled(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"connect": 0}
+        window.is_tool_worker_running = lambda: False
+        window.toggle_tool_connection = lambda: calls.__setitem__("connect", calls["connect"] + 1)
+        window.disable_tool_auto_listen_checkbox.setChecked(False)
+
+        window.enter_tool_screw_step(window.current_step())
+
+        self.assertEqual(calls["connect"], 1)
+
+    def test_reconnect_requires_trigger_zero_before_next_forward_count(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"ok": 0, "writes": []}
+        window.handle_screw_ok = lambda: calls.__setitem__("ok", calls["ok"] + 1)
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append((register, value)) or True
+        )
+
+        window.on_tool_connection_state("connected")
+        self.assertIn((53, 0), calls["writes"])
+        self.assertIn((4, 1), calls["writes"])
+
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+        self.assertEqual(calls["ok"], 0)
+        self.assertTrue(window.tool_connection_rearming)
+
+        window.process_tool_poll_result(status=2, trigger=0, direction=3)
+        self.assertFalse(window.tool_connection_rearming)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+        self.assertEqual(calls["ok"], 1)
+
+    def test_ng_lock_is_preserved_when_connection_recovers(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.tool_ng_locked = True
+        writes = []
+        window.write_tool_register = lambda register, value: writes.append((register, value)) or True
+
+        window.on_tool_connection_state("connected")
+
+        self.assertTrue(window.tool_ng_locked)
+        self.assertIn((53, 0), writes)
+        self.assertIn((4, 2), writes)
+        self.assertNotIn((4, 1), writes)
+
+    def test_non_screw_step_is_locked_when_connection_recovers(self):
+        window = self.make_window()
+        writes = []
+        window.write_tool_register = lambda register, value: writes.append((register, value)) or True
+
+        window.on_tool_connection_state("connected")
+
+        self.assertIn((53, 0), writes)
+        self.assertIn((4, 2), writes)
+        self.assertNotIn((4, 1), writes)
+
+    def test_manual_disconnect_does_not_clear_ng_business_lock(self):
+        window = self.make_window()
+        window.tool_ng_locked = True
+
+        window.cleanup_tool_worker()
+
+        self.assertTrue(window.tool_ng_locked)
 
     def test_screw_progress_uses_large_clear_blocks(self):
         window = self.make_window()
