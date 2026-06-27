@@ -4,6 +4,7 @@ import shutil
 import subprocess
 import json
 import logging
+import sys
 import urllib.parse
 import urllib.request
 import uuid
@@ -46,8 +47,19 @@ from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
 
 
-APP_VERSION = "v0.8.2"
-LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
+APP_VERSION = "v0.8.3"
+DEFAULT_TOOL_DIRECTION_ADDRESS = 54
+DEFAULT_TOOL_FORWARD_VALUE = 3
+DEFAULT_TOOL_REVERSE_VALUE = 2
+
+
+def runtime_data_dir() -> Path:
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parent.parent
+
+
+LOG_DIR = runtime_data_dir() / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
     filename=str(LOG_DIR / "app.log"),
@@ -69,7 +81,7 @@ def as_bool(value, default=False):
 class QualityControlWindow(QMainWindow):
     tool_worker_write_requested = pyqtSignal(int, int)
 
-    def __init__(self):
+    def __init__(self, app_config_path: Optional[Path] = None):
         super().__init__()
         self.setWindowTitle(f"生产工艺过程质量控制系统 {APP_VERSION}")
         self.resize(1280, 820)
@@ -98,7 +110,7 @@ class QualityControlWindow(QMainWindow):
         self.history_dialog: Optional[QDialog] = None
         self.tool_settings_dialog: Optional[QDialog] = None
         self.local_device_dialog: Optional[QDialog] = None
-        self.app_config_path = Path(__file__).resolve().parent.parent / "config.ini"
+        self.app_config_path = Path(app_config_path) if app_config_path else runtime_data_dir() / "config.ini"
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
         self.tool_thread: Optional[QThread] = None
@@ -338,15 +350,15 @@ class QualityControlWindow(QMainWindow):
         self.tool_unlock_value_input.setFixedWidth(60)
         self.tool_direction_register_input = QSpinBox()
         self.tool_direction_register_input.setRange(0, 65535)
-        self.tool_direction_register_input.setValue(54)
+        self.tool_direction_register_input.setValue(DEFAULT_TOOL_DIRECTION_ADDRESS)
         self.tool_direction_register_input.setFixedWidth(60)
         self.tool_forward_value_input = QSpinBox()
         self.tool_forward_value_input.setRange(0, 65535)
-        self.tool_forward_value_input.setValue(3)
+        self.tool_forward_value_input.setValue(DEFAULT_TOOL_FORWARD_VALUE)
         self.tool_forward_value_input.setFixedWidth(60)
         self.tool_reverse_value_input = QSpinBox()
         self.tool_reverse_value_input.setRange(0, 65535)
-        self.tool_reverse_value_input.setValue(2)
+        self.tool_reverse_value_input.setValue(DEFAULT_TOOL_REVERSE_VALUE)
         self.tool_reverse_value_input.setFixedWidth(60)
         self.tool_poll_interval_input = QSpinBox()
         self.tool_poll_interval_input.setRange(200, 5000)
@@ -786,15 +798,29 @@ class QualityControlWindow(QMainWindow):
         config = configparser.ConfigParser()
         if self.app_config_path.exists():
             config.read(self.app_config_path, encoding="utf-8")
+        changed = False
+        if "TOOL" not in config:
+            config["TOOL"] = {
+                "direction_address": str(DEFAULT_TOOL_DIRECTION_ADDRESS),
+                "forward_value": str(DEFAULT_TOOL_FORWARD_VALUE),
+                "reverse_value": str(DEFAULT_TOOL_REVERSE_VALUE),
+            }
+            changed = True
         if "LOCAL_DEVICE" not in config:
             config["LOCAL_DEVICE"] = {}
+            changed = True
         client_id = config["LOCAL_DEVICE"].get("client_id", "").strip()
-        if client_id:
-            return client_id
-        client_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
-        config["LOCAL_DEVICE"]["client_id"] = client_id
-        with self.app_config_path.open("w", encoding="utf-8") as file:
-            config.write(file)
+        if not client_id:
+            client_id = f"{socket.gethostname()}-{uuid.uuid4().hex[:12]}"
+            config["LOCAL_DEVICE"]["client_id"] = client_id
+            changed = True
+        if changed:
+            try:
+                self.app_config_path.parent.mkdir(parents=True, exist_ok=True)
+                with self.app_config_path.open("w", encoding="utf-8") as file:
+                    config.write(file)
+            except OSError as exc:
+                logging.warning("写入本机配置失败，将继续使用内置默认值：%s", exc)
         return client_id
 
     def recompute_production_enabled(self):
@@ -1114,9 +1140,9 @@ class QualityControlWindow(QMainWindow):
         self.tool_control_register_input.setValue(4)
         self.tool_lock_value_input.setValue(2)
         self.tool_unlock_value_input.setValue(1)
-        self.tool_direction_register_input.setValue(54)
-        self.tool_forward_value_input.setValue(3)
-        self.tool_reverse_value_input.setValue(2)
+        self.tool_direction_register_input.setValue(DEFAULT_TOOL_DIRECTION_ADDRESS)
+        self.tool_forward_value_input.setValue(DEFAULT_TOOL_FORWARD_VALUE)
+        self.tool_reverse_value_input.setValue(DEFAULT_TOOL_REVERSE_VALUE)
         self.tool_clear_trigger_when_reverse_checkbox.setChecked(True)
         self.tool_poll_interval_input.setValue(800)
         self.tool_timeout_input.setValue(1)

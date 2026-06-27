@@ -1,3 +1,4 @@
+import configparser
 import os
 import tempfile
 import unittest
@@ -19,7 +20,9 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
     def make_window(self):
         window_module.shutil.which = lambda command: None
-        window = QualityControlWindow()
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        window = QualityControlWindow(Path(temp_dir.name) / "config.ini")
         window.speak = lambda text: None
         window.play_ok_sound = lambda: None
         window.show_auto_close_warning = lambda title, message: None
@@ -393,6 +396,35 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_forward_value_input.value(), 3)
         self.assertEqual(window.tool_reverse_value_input.value(), 2)
 
+    def test_missing_config_uses_and_generates_new_direction_defaults(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.ini"
+            self.assertFalse(config_path.exists())
+
+            window = QualityControlWindow(config_path)
+
+            self.assertEqual(window.tool_direction_register_input.value(), 54)
+            self.assertEqual(window.tool_forward_value_input.value(), 3)
+            self.assertEqual(window.tool_reverse_value_input.value(), 2)
+            self.assertTrue(config_path.exists())
+            generated = configparser.ConfigParser()
+            generated.read(config_path, encoding="utf-8")
+            self.assertEqual(generated.getint("TOOL", "direction_address"), 54)
+            self.assertEqual(generated.getint("TOOL", "forward_value"), 3)
+            self.assertEqual(generated.getint("TOOL", "reverse_value"), 2)
+
+    def test_restore_defaults_uses_new_direction_protocol(self):
+        window = self.make_window()
+        window.tool_direction_register_input.setValue(99)
+        window.tool_forward_value_input.setValue(0)
+        window.tool_reverse_value_input.setValue(1)
+
+        window.restore_default_tool_settings()
+
+        self.assertEqual(window.tool_direction_register_input.value(), 54)
+        self.assertEqual(window.tool_forward_value_input.value(), 3)
+        self.assertEqual(window.tool_reverse_value_input.value(), 2)
+
     def test_tool_settings_are_saved_and_loaded_from_config(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
             config_path = Path(tmp_dir) / "config.ini"
@@ -422,9 +454,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
             window.save_tool_settings()
 
-            loaded = self.make_window()
-            loaded.app_config_path = config_path
-            loaded.load_tool_settings()
+            loaded = QualityControlWindow(config_path)
 
             self.assertEqual(loaded.tool_ip_input.text(), "192.168.1.50")
             self.assertEqual(loaded.tool_port_input.value(), 1502)
@@ -518,6 +548,19 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertFalse(window.tool_ng_locked)
         self.assertEqual(calls["dialog"], 0)
         self.assertNotIn((4, 2), calls["writes"])
+
+    def test_unknown_direction_does_not_count_or_process_ng(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"ok": 0, "ng": 0}
+        window.handle_screw_ok = lambda: calls.__setitem__("ok", calls["ok"] + 1)
+        window.handle_screw_ng = lambda: calls.__setitem__("ng", calls["ng"] + 1)
+
+        window.process_tool_poll_result(status=2, trigger=1, direction=9)
+        window.process_tool_poll_result(status=3, trigger=1, direction=9)
+
+        self.assertEqual(calls, {"ok": 0, "ng": 0})
+        self.assertEqual(window.message_label.text(), "未知方向值 9，不计数")
 
     def test_forward_direction_ng_locks_tool_and_opens_admin_unlock(self):
         window = self.make_window()

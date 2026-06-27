@@ -1,14 +1,13 @@
 import logging
-from pathlib import Path
 import sys
 
 from PyQt5.QtWidgets import QApplication
 
-from desktop_app.window import QualityControlWindow
+from desktop_app.window import QualityControlWindow, runtime_data_dir
 
 
 def setup_crash_logging():
-    log_dir = Path(__file__).resolve().parent / "logs"
+    log_dir = runtime_data_dir() / "logs"
     log_dir.mkdir(parents=True, exist_ok=True)
     logging.basicConfig(
         filename=log_dir / "app_crash.log",
