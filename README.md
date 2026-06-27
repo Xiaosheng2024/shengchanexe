@@ -322,6 +322,7 @@ POST /api/admin/db/vacuum-or-analyze
 
 ## 版本说明
 
+- `v0.8.2`：螺钉枪 Modbus TCP 改为 worker 线程内长连接和自动重连，切换工位/项目及退出时安全锁枪断开；压缩生产状态文字并突出螺丝数量进度。
 - `v0.8.1`：补全 PLC 接收工序正式流转，统一主条码字段，增加 PLC 主条码前后工位校验、本机 PLC 覆盖配置和工位占用超时释放。
 - `v0.8.0`：正式生产版集成 S7 PLC 接收工序、第一工位默认 PLC 主条码、工位占用检查、数据库维护归档/删除接口。
 - `v0.5.0`：MES 服务端数据库支持 PostgreSQL，增加 SQLite 到 PostgreSQL 迁移方案、分页追溯接口和 Rocky Linux PostgreSQL 部署/备份脚本。

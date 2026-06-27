@@ -608,6 +608,19 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertIn((53, 0), writes)
         self.assertIn((4, 1), writes)
 
+    def test_screw_progress_uses_large_clear_blocks(self):
+        window = self.make_window()
+        step = ProcessStep("打螺丝5颗", SCREW, required_count=5, completed_count=3)
+
+        window.render_screw_blocks(step)
+
+        self.assertEqual(len(window.screw_blocks), 5)
+        self.assertEqual((window.screw_blocks[0].width(), window.screw_blocks[0].height()), (56, 56))
+        progress_labels = window.screw_box.findChildren(QLabel)
+        self.assertTrue(any(label.text() == "已完成 3 / 共 5" for label in progress_labels))
+        self.assertIn("#22c55e", window.screw_blocks[2].styleSheet())
+        self.assertIn("#d1d5db", window.screw_blocks[3].styleSheet())
+
 
 if __name__ == "__main__":
     unittest.main()

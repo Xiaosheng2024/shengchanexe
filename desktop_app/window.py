@@ -46,7 +46,7 @@ from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
 
 
-APP_VERSION = "v0.8.1"
+APP_VERSION = "v0.8.2"
 LOG_DIR = Path(__file__).resolve().parent.parent / "logs"
 LOG_DIR.mkdir(exist_ok=True)
 logging.basicConfig(
@@ -216,22 +216,23 @@ class QualityControlWindow(QMainWindow):
 
         right_box = QGroupBox("当前生产状态")
         right_layout = QVBoxLayout(right_box)
-        right_layout.setSpacing(14)
+        right_layout.setSpacing(7)
+        right_layout.setContentsMargins(12, 14, 12, 10)
         content.addWidget(right_box, 2)
 
         self.product_label = QLabel()
-        self.product_label.setStyleSheet("font-size: 28px; font-weight: 700; color: #111827;")
+        self.product_label.setStyleSheet("font-size: 15px; font-weight: 700; color: #111827;")
         right_layout.addWidget(self.product_label)
 
         self.current_step_label = QLabel()
-        self.current_step_label.setStyleSheet("font-size: 22px; color: #2563eb;")
+        self.current_step_label.setStyleSheet("font-size: 14px; font-weight: 700; color: #2563eb;")
         right_layout.addWidget(self.current_step_label)
 
         self.main_barcode_label = QLabel("当前主条码：未扫描")
-        self.main_barcode_label.setAlignment(Qt.AlignCenter)
+        self.main_barcode_label.setAlignment(Qt.AlignLeft | Qt.AlignVCenter)
         self.main_barcode_label.setStyleSheet(
-            "font-size: 24px; font-weight: 700; padding: 14px;"
-            "background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 8px; color: #1d4ed8;"
+            "font-size: 14px; font-weight: 700; padding: 5px 8px;"
+            "background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 6px; color: #1d4ed8;"
         )
         right_layout.addWidget(self.main_barcode_label)
 
@@ -241,8 +242,8 @@ class QualityControlWindow(QMainWindow):
         for label in [self.finished_count_label, self.scan_error_count_label]:
             label.setAlignment(Qt.AlignCenter)
             label.setStyleSheet(
-                "font-size: 22px; font-weight: 700; padding: 14px;"
-                "background: #f3f4f6; border-radius: 8px; color: #111827;"
+                "font-size: 12px; font-weight: 700; padding: 5px 8px;"
+                "background: #f3f4f6; border-radius: 6px; color: #111827;"
             )
             stats_row.addWidget(label)
         right_layout.addLayout(stats_row)
@@ -260,9 +261,16 @@ class QualityControlWindow(QMainWindow):
 
         self.screw_box = QGroupBox("螺丝数量提示")
         self.screw_grid = QGridLayout(self.screw_box)
-        self.screw_grid.setSpacing(16)
-        self.screw_box.setMinimumHeight(260)
-        right_layout.addWidget(self.screw_box, 1)
+        self.screw_grid.setHorizontalSpacing(10)
+        self.screw_grid.setVerticalSpacing(10)
+        self.screw_grid.setContentsMargins(18, 18, 18, 14)
+        self.screw_box.setMinimumHeight(300)
+        self.screw_box.setStyleSheet(
+            "QGroupBox { font-size: 14px; font-weight: 700; border: 2px solid #93c5fd;"
+            " border-radius: 8px; margin-top: 10px; padding: 10px; background: #f8fafc; }"
+            "QGroupBox::title { subcontrol-origin: margin; left: 10px; padding: 0 4px; color: #1d4ed8; }"
+        )
+        right_layout.addWidget(self.screw_box, 3)
 
         action_row = QHBoxLayout()
         self.screw_ok_btn = QPushButton("模拟螺钉枪OK信号")
@@ -394,9 +402,8 @@ class QualityControlWindow(QMainWindow):
         self.build_tool_settings_dialog()
 
         self.message_label = QLabel("等待第1工序条码进入")
-        self.message_label.setStyleSheet("font-size: 18px; color: #374151;")
+        self.message_label.setStyleSheet("font-size: 12px; color: #374151;")
         right_layout.addWidget(self.message_label)
-        right_layout.addStretch(1)
 
         window_row = QHBoxLayout()
         settings_btn = QPushButton("设置功能")
@@ -524,12 +531,15 @@ class QualityControlWindow(QMainWindow):
         if self.is_switching_station:
             return
         project = next((item for item in self.projects if item.name == project_name), None)
-        if project is None:
+        if project is None or not project.stations:
             return
-        self.current_project = project
-        self.current_station = project.stations[0]
-        self.refresh_station_selector()
-        self.load_station(project.name, self.current_station.name)
+        target_station = project.stations[0]
+        self.station_combo.blockSignals(True)
+        self.station_combo.clear()
+        self.station_combo.addItems([station.name for station in project.stations])
+        self.station_combo.setCurrentText(target_station.name)
+        self.station_combo.blockSignals(False)
+        self.switch_station(project.name, target_station.name)
 
     def on_station_selected(self, station_name: str):
         if not station_name or self.is_switching_station:
@@ -1388,27 +1398,37 @@ class QualityControlWindow(QMainWindow):
     def render_screw_blocks(self, step: Optional[ProcessStep]):
         while self.screw_grid.count():
             child = self.screw_grid.takeAt(0)
-            if child.widget():
-                child.widget().deleteLater()
+            widget = child.widget()
+            if widget:
+                widget.setParent(None)
+                widget.deleteLater()
         self.screw_blocks = []
 
         if step is None or step.step_type != SCREW:
             label = QLabel("当前不是螺丝工序")
             label.setAlignment(Qt.AlignCenter)
-            label.setStyleSheet("font-size: 24px; color: #6b7280; padding: 48px;")
+            label.setStyleSheet("font-size: 15px; color: #6b7280; padding: 28px;")
             self.screw_grid.addWidget(label, 0, 0)
             return
 
+        progress = QLabel(f"已完成 {step.completed_count} / 共 {step.required_count}")
+        progress.setAlignment(Qt.AlignCenter)
+        progress.setStyleSheet("font-size: 22px; font-weight: 700; color: #111827; padding: 4px;")
+        self.screw_grid.addWidget(progress, 0, 0, 1, 10)
+
+        columns = min(max(step.required_count, 1), 10)
         for number in range(step.required_count):
             block = QLabel(str(number + 1))
             block.setAlignment(Qt.AlignCenter)
-            block.setFixedSize(86, 86)
+            block.setFixedSize(56, 56)
             color = "#22c55e" if number < step.completed_count else "#d1d5db"
+            border = "3px solid #15803d" if number < step.completed_count else "2px solid #9ca3af"
             block.setStyleSheet(
-                f"background: {color}; border-radius: 8px; font-size: 28px; font-weight: 700;"
+                f"background: {color}; border: {border}; border-radius: 7px;"
+                " font-size: 20px; font-weight: 700;"
                 " color: #111827;"
             )
-            self.screw_grid.addWidget(block, number // 8, number % 8)
+            self.screw_grid.addWidget(block, 1 + number // columns, number % columns, Qt.AlignCenter)
             self.screw_blocks.append(block)
 
     def current_step(self) -> Optional[ProcessStep]:
@@ -1527,44 +1547,58 @@ class QualityControlWindow(QMainWindow):
             direction_register=self.tool_direction_register_input.value(),
             timeout_seconds=float(self.tool_timeout_input.value()),
             poll_interval_ms=self.tool_poll_interval_input.value(),
+            lock_register=self.tool_control_register_input.value(),
+            lock_value=self.tool_lock_value_input.value(),
         )
         self.tool_thread = QThread(self)
         self.tool_worker = ToolPollWorker(config)
+        worker = self.tool_worker
+        thread = self.tool_thread
         generation = self.tool_worker_generation
-        self.tool_worker.moveToThread(self.tool_thread)
-        self.tool_thread.started.connect(self.tool_worker.start)
-        self.tool_worker_write_requested.connect(self.tool_worker.write_register, Qt.QueuedConnection)
-        self.tool_worker.result.connect(lambda status, trigger, direction, gen=generation: self.on_tool_poll_result_for_generation(gen, status, trigger, direction))
-        self.tool_worker.error.connect(self.on_tool_poll_error)
-        self.tool_worker.write_error.connect(self.on_tool_write_error)
-        self.tool_worker.stopped.connect(self.tool_thread.quit)
-        self.tool_thread.finished.connect(self.tool_worker.deleteLater)
-        self.tool_thread.finished.connect(self.cleanup_tool_worker)
-        self.tool_thread.start()
+        worker.moveToThread(thread)
+        thread.started.connect(worker.start)
+        self.tool_worker_write_requested.connect(worker.write_register, Qt.QueuedConnection)
+        worker.result.connect(
+            lambda status, trigger, direction, gen=generation:
+            self.on_tool_poll_result_for_generation(gen, status, trigger, direction)
+        )
+        worker.error.connect(self.on_tool_poll_error)
+        worker.write_error.connect(self.on_tool_write_error)
+        worker.connection_state.connect(self.on_tool_connection_state)
+        worker.stopped.connect(thread.quit)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(lambda w=worker, t=thread: self.cleanup_tool_worker(w, t))
+        thread.start()
         self.tool_connect_btn.setEnabled(False)
         self.tool_disconnect_btn.setEnabled(True)
-        self.tool_status_label.setText("已连接")
+        self.tool_status_label.setText("连接中")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #2563eb;")
-        self.sync_tool_lock_for_current_step()
 
     def is_tool_worker_running(self) -> bool:
         return self.tool_thread is not None and self.tool_thread.isRunning()
 
     def stop_tool_worker(self):
-        if self.tool_thread is not None:
-            if self.tool_worker is not None and self.tool_thread.isRunning():
+        worker = self.tool_worker
+        thread = self.tool_thread
+        if thread is not None:
+            if worker is not None and thread.isRunning():
                 try:
-                    self.tool_worker.polling = False
-                    QMetaObject.invokeMethod(self.tool_worker, "stop", Qt.QueuedConnection)
+                    QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
                 except Exception as exc:
                     logging.warning("停止螺钉枪 worker 通知失败：%s", exc)
-            self.tool_thread.quit()
-            if not self.tool_thread.wait(1500):
+            if not thread.wait(1500):
                 logging.warning("停止螺钉枪 worker 超时")
-        self.cleanup_tool_worker()
+                thread.requestInterruption()
+                thread.quit()
+                thread.wait(200)
+        self.cleanup_tool_worker(worker, thread)
         self.tool_worker_generation += 1
 
-    def cleanup_tool_worker(self):
+    def cleanup_tool_worker(self, worker=None, thread=None):
+        if worker is not None and self.tool_worker is not worker:
+            return
+        if thread is not None and self.tool_thread is not thread:
+            return
         self.tool_worker = None
         self.tool_thread = None
         self.processing_tool_signal = False
@@ -1579,6 +1613,21 @@ class QualityControlWindow(QMainWindow):
             self.tool_disconnect_btn.setEnabled(False)
         if hasattr(self, "tool_status_label"):
             self.tool_status_label.setText("未连接")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
+
+    def on_tool_connection_state(self, state: str):
+        if state == "connected":
+            self.tool_status_label.setText("已连接")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #16a34a;")
+            self.sync_tool_lock_for_current_step()
+            return
+        if state == "reconnecting":
+            self.tool_status_label.setText("正在重连")
+            self.tool_status_label.setStyleSheet("font-size: 16px; color: #f59e0b;")
+            self.message_label.setText("螺钉枪通讯中断，正在重连")
+            return
+        if state == "disconnected":
+            self.tool_status_label.setText("已断开")
             self.tool_status_label.setStyleSheet("font-size: 16px; color: #6b7280;")
 
     def start_plc_worker(self, step: ProcessStep):
@@ -1771,15 +1820,15 @@ class QualityControlWindow(QMainWindow):
 
     def on_tool_poll_error(self, message: str):
         logging.error("螺钉枪通讯异常：%s", message)
-        self.tool_status_label.setText("通讯异常")
+        self.tool_status_label.setText("正在重连")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
-        self.message_label.setText(f"螺钉枪通讯异常：{message}")
+        self.message_label.setText("螺钉枪通讯中断，正在重连")
 
     def on_tool_write_error(self, message: str):
         logging.error("螺钉枪写入异常：%s", message)
-        self.tool_status_label.setText("通讯异常")
+        self.tool_status_label.setText("正在重连")
         self.tool_status_label.setStyleSheet("font-size: 16px; color: #dc2626;")
-        self.message_label.setText(f"螺钉枪写入异常：{message}")
+        self.message_label.setText("螺钉枪通讯中断，正在重连")
 
     def on_tool_poll_result_for_generation(self, generation: int, status: int, trigger: int, direction: int):
         if generation != self.tool_worker_generation:
