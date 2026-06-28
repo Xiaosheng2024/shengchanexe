@@ -3,6 +3,8 @@ import json
 import shutil
 import socket
 import subprocess
+import hashlib
+import os
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
@@ -16,6 +18,8 @@ DEFAULT_PAGE_SIZE = 100
 ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKUP_DIR = Path("/opt/mes/backup") if Path("/opt/mes").exists() else ROOT_DIR / "backup"
 ARCHIVE_DIR = Path("/opt/mes/archive") if Path("/opt/mes").exists() else ROOT_DIR / "archive"
+RELEASES_DIR = Path("/opt/mes/releases") if Path("/opt/mes").exists() else ROOT_DIR / "releases"
+UPLOADS_DIR = Path("/opt/mes/uploads") if Path("/opt/mes").exists() else ROOT_DIR / "uploads"
 MAINTENANCE_TABLES = ["scan_records", "station_work_records", "step_work_records", "screw_action_records", "station_session_logs"]
 
 
@@ -1084,6 +1088,8 @@ def db_status():
         "screw_action_records",
         "station_sessions",
         "maintenance_logs",
+        "client_releases",
+        "client_update_logs",
     ]
     counts = {}
     recent = {}
@@ -1220,3 +1226,245 @@ def vacuum_or_analyze():
             conn.execute("ANALYZE")
     log_maintenance("vacuum-or-analyze", "数据库维护命令已执行")
     return {"ok": True}
+
+
+def _version_key(version):
+    raw = str(version or "").strip().lower().lstrip("v")
+    parts = []
+    for part in raw.split("."):
+        try:
+            parts.append(int(part))
+        except ValueError:
+            parts.append(part)
+    return parts
+
+
+def _safe_release_dir(version):
+    version = str(version or "").strip()
+    if not version or any(part in version for part in ("..", "/", "\\")):
+        raise ValueError("版本号非法")
+    return RELEASES_DIR / version
+
+
+def _sha256_file(path: Path):
+    digest = hashlib.sha256()
+    with path.open("rb") as file:
+        for chunk in iter(lambda: file.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _release_row_to_dict(row):
+    data = row_to_dict(row)
+    if not data:
+        return data
+    try:
+        data["release_notes"] = json.loads(data.get("release_notes") or "[]")
+    except json.JSONDecodeError:
+        data["release_notes"] = []
+    data["stable"] = bool(data.get("stable"))
+    data["force_update"] = bool(data.get("force_update"))
+    return data
+
+
+def list_client_releases():
+    with get_conn() as conn:
+        rows = conn.execute("SELECT * FROM client_releases ORDER BY release_date DESC, id DESC").fetchall()
+    return [_release_row_to_dict(row) for row in rows]
+
+
+def get_client_release(version):
+    with get_conn() as conn:
+        row = conn.execute("SELECT * FROM client_releases WHERE version = ?", (version,)).fetchone()
+    return _release_row_to_dict(row)
+
+
+def upsert_client_release(payload, files=None):
+    version = str(payload.get("version", "")).strip()
+    if not version:
+        raise ValueError("版本号不能为空")
+    title = str(payload.get("title", "")).strip()
+    release_notes = payload.get("release_notes", [])
+    if isinstance(release_notes, str):
+        try:
+            release_notes = json.loads(release_notes)
+        except json.JSONDecodeError:
+            release_notes = [line.strip() for line in release_notes.splitlines() if line.strip()]
+    if not isinstance(release_notes, list):
+        release_notes = [str(release_notes)]
+    release_date = payload.get("release_date") or now_text()
+    stable = bool(payload.get("stable", True))
+    force_update = bool(payload.get("force_update", False))
+    min_required_version = str(payload.get("min_required_version", "")).strip()
+    release_dir = _safe_release_dir(version)
+    release_dir.mkdir(parents=True, exist_ok=True)
+
+    def store_file(key, target_name):
+        file_obj = (files or {}).get(key)
+        if not file_obj:
+            return None, None
+        target_path = release_dir / target_name
+        with target_path.open("wb") as target:
+            shutil.copyfileobj(file_obj, target)
+        return str(target_path), _sha256_file(target_path)
+
+    with get_conn() as conn:
+        existing = conn.execute("SELECT * FROM client_releases WHERE version = ?", (version,)).fetchone()
+        release_file_path, release_sha256 = store_file("release_file", payload.get("release_filename") or "QualityControlSystem.exe")
+        debug_file_path, debug_sha256 = store_file("debug_file", payload.get("debug_filename") or "QualityControlSystem_Debug.exe")
+        s7_tool_file_path, s7_tool_sha256 = store_file("s7_tool_file", payload.get("s7_tool_filename") or "S7_PLC_Test_Tool.exe")
+        release_file_path = release_file_path or (existing["release_file_path"] if existing else "")
+        debug_file_path = debug_file_path or (existing["debug_file_path"] if existing else "")
+        s7_tool_file_path = s7_tool_file_path or (existing["s7_tool_file_path"] if existing else "")
+        release_sha256 = release_sha256 or (existing["release_sha256"] if existing else "")
+        debug_sha256 = debug_sha256 or (existing["debug_sha256"] if existing else "")
+        s7_tool_sha256 = s7_tool_sha256 or (existing["s7_tool_sha256"] if existing else "")
+        if existing:
+            conn.execute(
+                """
+                UPDATE client_releases
+                SET title = ?, release_notes = ?, release_date = ?, stable = ?, force_update = ?,
+                    min_required_version = ?, release_file_path = ?, debug_file_path = ?, s7_tool_file_path = ?,
+                    release_sha256 = ?, debug_sha256 = ?, s7_tool_sha256 = ?, updated_at = ?
+                WHERE version = ?
+                """,
+                (
+                    title,
+                    json.dumps(release_notes, ensure_ascii=False),
+                    release_date,
+                    stable,
+                    force_update,
+                    min_required_version,
+                    release_file_path,
+                    debug_file_path,
+                    s7_tool_file_path,
+                    release_sha256,
+                    debug_sha256,
+                    s7_tool_sha256,
+                    now_text(),
+                    version,
+                ),
+            )
+        else:
+            conn.execute(
+                """
+                INSERT INTO client_releases
+                (version, title, release_notes, release_date, stable, force_update, min_required_version,
+                 release_file_path, debug_file_path, s7_tool_file_path, release_sha256, debug_sha256, s7_tool_sha256,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version,
+                    title,
+                    json.dumps(release_notes, ensure_ascii=False),
+                    release_date,
+                    stable,
+                    force_update,
+                    min_required_version,
+                    release_file_path,
+                    debug_file_path,
+                    s7_tool_file_path,
+                    release_sha256,
+                    debug_sha256,
+                    s7_tool_sha256,
+                    now_text(),
+                    now_text(),
+                ),
+            )
+    return {"ok": True, "version": version}
+
+
+def delete_client_release(version):
+    release = get_client_release(version)
+    if not release:
+        raise ValueError("版本不存在")
+    with get_conn() as conn:
+        conn.execute("DELETE FROM client_releases WHERE version = ?", (version,))
+    return {"ok": True}
+
+
+def latest_client_release(query):
+    client_version = str(query.get("client_version", [""])[0]).strip()
+    channel = str(query.get("channel", ["stable"])[0]).strip().lower() or "stable"
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM client_releases ORDER BY release_date DESC, id DESC",
+        ).fetchall()
+    if channel == "stable":
+        candidates = [row for row in rows if bool(row["stable"])]
+    else:
+        candidates = rows
+    if not candidates:
+        return {"code": 1, "data": {"has_update": False, "current_version": client_version, "latest_version": client_version}}
+    latest = _release_row_to_dict(candidates[0])
+    has_update = _version_key(latest["version"]) > _version_key(client_version)
+    download_base = f"/api/client-update/download/{latest['version']}"
+    return {
+        "code": 1,
+        "data": {
+            "has_update": has_update,
+            "current_version": client_version,
+            "latest_version": latest["version"],
+            "force_update": latest["force_update"],
+            "title": latest["title"],
+            "release_notes": latest["release_notes"],
+            "download_url": f"{download_base}/release",
+            "debug_download_url": f"{download_base}/debug",
+            "s7_tool_download_url": f"{download_base}/s7_tool",
+            "sha256": latest["release_sha256"],
+            "size": Path(latest["release_file_path"]).stat().st_size if latest.get("release_file_path") and Path(latest["release_file_path"]).exists() else 0,
+        },
+    }
+
+
+def download_client_release(version, kind):
+    release = get_client_release(version)
+    if not release:
+        raise ValueError("版本不存在")
+    field_map = {
+        "release": ("release_file_path", "release.exe"),
+        "debug": ("debug_file_path", "debug.exe"),
+        "s7_tool": ("s7_tool_file_path", "s7_tool.exe"),
+    }
+    if kind not in field_map:
+        raise ValueError("文件类型不正确")
+    path_key, _default_name = field_map[kind]
+    file_path = release.get(path_key)
+    if not file_path or not Path(file_path).exists():
+        raise ValueError("文件不存在")
+    path = Path(file_path)
+    return path, path.name or _default_name
+
+
+def report_client_update(payload):
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO client_update_logs
+            (client_id, computer_name, ip_address, current_version, target_version, action, result, message, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                payload.get("client_id", ""),
+                payload.get("computer_name", ""),
+                payload.get("ip_address", ""),
+                payload.get("current_version", ""),
+                payload.get("target_version", ""),
+                payload.get("action", ""),
+                payload.get("result", ""),
+                payload.get("message", ""),
+                now_text(),
+            ),
+        )
+    return {"ok": True}
+
+
+def list_client_update_logs(query):
+    page, page_size, offset = pagination(query)
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM client_update_logs ORDER BY created_at DESC LIMIT ? OFFSET ?",
+            (page_size, offset),
+        ).fetchall()
+    return {"page": page, "page_size": page_size, "records": [row_to_dict(row) for row in rows]}

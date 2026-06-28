@@ -41,6 +41,24 @@ PLC_STEP_COLUMNS = {
     "plc_barcode_wait_ok_timeout_seconds": "INTEGER NOT NULL DEFAULT 30",
 }
 
+CLIENT_RELEASE_COLUMNS = {
+    "version": "TEXT NOT NULL UNIQUE",
+    "title": "TEXT NOT NULL DEFAULT ''",
+    "release_notes": "TEXT NOT NULL DEFAULT '[]'",
+    "release_date": "TEXT NOT NULL",
+    "stable": "INTEGER NOT NULL DEFAULT 1",
+    "force_update": "INTEGER NOT NULL DEFAULT 0",
+    "min_required_version": "TEXT NOT NULL DEFAULT ''",
+    "release_file_path": "TEXT NOT NULL DEFAULT ''",
+    "debug_file_path": "TEXT NOT NULL DEFAULT ''",
+    "s7_tool_file_path": "TEXT NOT NULL DEFAULT ''",
+    "release_sha256": "TEXT NOT NULL DEFAULT ''",
+    "debug_sha256": "TEXT NOT NULL DEFAULT ''",
+    "s7_tool_sha256": "TEXT NOT NULL DEFAULT ''",
+    "created_at": "TEXT NOT NULL",
+    "updated_at": "TEXT NOT NULL",
+}
+
 
 def load_database_config():
     config = configparser.ConfigParser()
@@ -249,6 +267,7 @@ def init_db():
         if row["total"] == 0:
             seed_default_data(conn)
         ensure_default_main_barcodes(conn)
+        ensure_default_client_release_tables(conn)
 
 
 def create_sqlite_schema(conn):
@@ -509,6 +528,38 @@ def create_traceability_schema(conn):
             detail TEXT,
             created_at {ts_type} NOT NULL DEFAULT {current_ts}
         );
+        CREATE TABLE IF NOT EXISTS client_releases (
+            id {id_type},
+            version TEXT NOT NULL UNIQUE,
+            title TEXT NOT NULL DEFAULT '',
+            release_notes TEXT NOT NULL DEFAULT '[]',
+            release_date {ts_type} NOT NULL,
+            stable {bool_type},
+            force_update {bool_type},
+            min_required_version TEXT NOT NULL DEFAULT '',
+            release_file_path TEXT NOT NULL DEFAULT '',
+            debug_file_path TEXT NOT NULL DEFAULT '',
+            s7_tool_file_path TEXT NOT NULL DEFAULT '',
+            release_sha256 TEXT NOT NULL DEFAULT '',
+            debug_sha256 TEXT NOT NULL DEFAULT '',
+            s7_tool_sha256 TEXT NOT NULL DEFAULT '',
+            created_at {ts_type} NOT NULL DEFAULT {current_ts},
+            updated_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS client_update_logs (
+            id {id_type},
+            client_id TEXT,
+            computer_name TEXT,
+            ip_address TEXT,
+            current_version TEXT,
+            target_version TEXT,
+            action TEXT NOT NULL,
+            result TEXT NOT NULL,
+            message TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE INDEX IF NOT EXISTS idx_client_update_logs_created_at ON client_update_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
         CREATE INDEX IF NOT EXISTS idx_station_work_barcode ON station_work_records(main_barcode);
         CREATE INDEX IF NOT EXISTS idx_station_work_project_station_time ON station_work_records(project_id, station_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_station_work_result ON station_work_records(result);
@@ -547,6 +598,48 @@ def migrate_sqlite_db(conn):
                OR plc_barcode_length IS NULL
             """
         )
+    release_columns = [row["name"] for row in conn.execute("PRAGMA table_info(client_releases)").fetchall()]
+    if release_columns:
+        for column, definition in CLIENT_RELEASE_COLUMNS.items():
+            if column not in release_columns:
+                conn.execute(f"ALTER TABLE client_releases ADD COLUMN {column} {definition}")
+    else:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS client_releases (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                version TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL DEFAULT '',
+                release_notes TEXT NOT NULL DEFAULT '[]',
+                release_date TEXT NOT NULL,
+                stable INTEGER NOT NULL DEFAULT 1,
+                force_update INTEGER NOT NULL DEFAULT 0,
+                min_required_version TEXT NOT NULL DEFAULT '',
+                release_file_path TEXT NOT NULL DEFAULT '',
+                debug_file_path TEXT NOT NULL DEFAULT '',
+                s7_tool_file_path TEXT NOT NULL DEFAULT '',
+                release_sha256 TEXT NOT NULL DEFAULT '',
+                debug_sha256 TEXT NOT NULL DEFAULT '',
+                s7_tool_sha256 TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS client_update_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                client_id TEXT,
+                computer_name TEXT,
+                ip_address TEXT,
+                current_version TEXT,
+                target_version TEXT,
+                action TEXT NOT NULL,
+                result TEXT NOT NULL,
+                message TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_client_update_logs_created_at ON client_update_logs(created_at);
+            CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
+            """
+        )
 
 
 def migrate_postgresql_db(conn):
@@ -574,6 +667,56 @@ def migrate_postgresql_db(conn):
             WHERE plc_barcode_db IS NULL
                OR plc_barcode_offset IS NULL
                OR plc_barcode_length IS NULL
+            """
+        )
+    release_rows = conn.execute(
+        """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_name = 'client_releases'
+        """
+    ).fetchall()
+    release_columns = {row["column_name"] for row in release_rows}
+    if release_columns:
+        for column, definition in CLIENT_RELEASE_COLUMNS.items():
+            if column in release_columns:
+                continue
+            conn.execute(f"ALTER TABLE client_releases ADD COLUMN {column} {definition.replace('INTEGER', 'INTEGER').replace('TEXT', 'TEXT')}")
+    else:
+        conn.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS client_releases (
+                id BIGSERIAL PRIMARY KEY,
+                version TEXT NOT NULL UNIQUE,
+                title TEXT NOT NULL DEFAULT '',
+                release_notes TEXT NOT NULL DEFAULT '[]',
+                release_date TIMESTAMP NOT NULL,
+                stable BOOLEAN DEFAULT true,
+                force_update BOOLEAN DEFAULT false,
+                min_required_version TEXT NOT NULL DEFAULT '',
+                release_file_path TEXT NOT NULL DEFAULT '',
+                debug_file_path TEXT NOT NULL DEFAULT '',
+                s7_tool_file_path TEXT NOT NULL DEFAULT '',
+                release_sha256 TEXT NOT NULL DEFAULT '',
+                debug_sha256 TEXT NOT NULL DEFAULT '',
+                s7_tool_sha256 TEXT NOT NULL DEFAULT '',
+                created_at TIMESTAMP NOT NULL,
+                updated_at TIMESTAMP NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS client_update_logs (
+                id BIGSERIAL PRIMARY KEY,
+                client_id TEXT,
+                computer_name TEXT,
+                ip_address TEXT,
+                current_version TEXT,
+                target_version TEXT,
+                action TEXT NOT NULL,
+                result TEXT NOT NULL,
+                message TEXT,
+                created_at TIMESTAMP NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_client_update_logs_created_at ON client_update_logs(created_at);
+            CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
             """
         )
 
@@ -624,3 +767,9 @@ def ensure_default_main_barcodes(conn):
         ).fetchone()
         if first_scan:
             conn.execute("UPDATE steps SET is_main_barcode = 1 WHERE id = ?", (first_scan["id"],))
+
+
+def ensure_default_client_release_tables(conn):
+    row = conn.execute("SELECT COUNT(*) AS total FROM client_releases").fetchone()
+    if row and row["total"]:
+        return

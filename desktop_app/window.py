@@ -18,6 +18,7 @@ from PyQt5.QtGui import QColor
 from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
+    QAction,
     QCheckBox,
     QComboBox,
     QDateEdit,
@@ -47,7 +48,7 @@ from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
 
 
-APP_VERSION = "v0.8.6"
+APP_VERSION = "v0.9.0"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
@@ -121,6 +122,9 @@ class QualityControlWindow(QMainWindow):
         self.plc_worker: Optional[PlcPollWorker] = None
         self.plc_worker_generation = 0
         self.tool_worker_generation = 0
+        self.client_version = self.load_local_version()
+        self.update_check_dialog: Optional[QDialog] = None
+        self.pending_update_info = None
         self.plc_last_main_barcode = ""
         self.plc_last_parts_ok: Optional[int] = None
         self.plc_pending_main_barcode = ""
@@ -143,6 +147,7 @@ class QualityControlWindow(QMainWindow):
         self.load_local_device_settings()
         self.refresh_project_station_selectors()
         self.load_station(self.current_project.name, self.current_station.name)
+        QTimer.singleShot(1500, self.check_for_client_update)
 
     def default_projects(self) -> List[ProjectConfig]:
         stations = []
@@ -178,6 +183,11 @@ class QualityControlWindow(QMainWindow):
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 26px; font-weight: 700; padding: 8px;")
         root_layout.addWidget(title)
+
+        help_menu = self.menuBar().addMenu("帮助")
+        check_update_action = QAction("检查更新", self)
+        check_update_action.triggered.connect(lambda: self.check_for_client_update(manual=True))
+        help_menu.addAction(check_update_action)
 
         mode_box = QGroupBox("运行模式 / 工位选择")
         mode_layout = QHBoxLayout(mode_box)
@@ -814,6 +824,135 @@ class QualityControlWindow(QMainWindow):
         )
         with urllib.request.urlopen(request, timeout=3) as response:
             return json.loads(response.read().decode("utf-8") or "{}")
+
+    def load_local_version(self) -> str:
+        version_file = runtime_data_dir() / "VERSION"
+        if version_file.exists():
+            try:
+                return version_file.read_text(encoding="utf-8").strip() or APP_VERSION
+            except OSError:
+                pass
+        return APP_VERSION
+
+    def update_channel(self) -> str:
+        exe_name = Path(sys.executable).name.lower() if getattr(sys, "frozen", False) else Path(sys.argv[0]).name.lower()
+        return "debug" if "debug" in exe_name else "stable"
+
+    def update_download_dir(self) -> Path:
+        path = runtime_data_dir() / "updates"
+        path.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def check_for_client_update(self, manual: bool = False):
+        if not self.api_base_input.text().strip():
+            return
+        try:
+            data = self.api_get(f"/api/client-update/latest?client_version={urllib.parse.quote(self.client_version)}&channel={self.update_channel()}")
+        except Exception as exc:
+            if manual:
+                QMessageBox.warning(self, "检查更新失败", str(exc))
+            return
+        update_data = data.get("data") or {}
+        if not update_data.get("has_update"):
+            if manual:
+                QMessageBox.information(self, "检查更新", f"当前已是最新版本：{self.client_version}")
+            else:
+                self.statusBar().showMessage(f"当前已是最新版本：{self.client_version}", 5000)
+            return
+        self.pending_update_info = update_data
+        self.show_client_update_dialog(update_data)
+
+    def show_client_update_dialog(self, update_data: dict):
+        if self.update_check_dialog is None:
+            dialog = QDialog(self)
+            dialog.setWindowTitle("发现新版本")
+            dialog.resize(620, 420)
+            layout = QVBoxLayout(dialog)
+            self.update_dialog_text = QLabel()
+            self.update_dialog_text.setWordWrap(True)
+            self.update_dialog_text.setStyleSheet("font-size: 15px;")
+            layout.addWidget(self.update_dialog_text)
+            self.update_download_status = QLabel("尚未下载")
+            self.update_download_status.setStyleSheet("font-size: 14px; color: #2563eb;")
+            layout.addWidget(self.update_download_status)
+            row = QHBoxLayout()
+            self.update_later_btn = QPushButton("稍后提醒")
+            self.update_download_btn = QPushButton("立即下载")
+            self.update_install_btn = QPushButton("安装更新")
+            self.update_detail_btn = QPushButton("查看详情")
+            self.update_install_btn.setEnabled(False)
+            self.update_download_btn.clicked.connect(self.download_pending_update)
+            self.update_install_btn.clicked.connect(self.launch_update_installer)
+            self.update_later_btn.clicked.connect(dialog.reject)
+            self.update_detail_btn.clicked.connect(self.open_update_detail_page)
+            for btn in [self.update_detail_btn, self.update_later_btn, self.update_download_btn, self.update_install_btn]:
+                row.addWidget(btn)
+            layout.addLayout(row)
+            self.update_check_dialog = dialog
+        notes = update_data.get("release_notes") or []
+        note_text = "\n".join(f"{i + 1}. {note}" for i, note in enumerate(notes)) or "无更新说明"
+        self.update_dialog_text.setText(
+            f"发现新版本：\n当前版本：{self.client_version}\n最新版本：{update_data.get('latest_version', '')}\n\n更新内容：\n{note_text}"
+        )
+        self.update_download_status.setText("尚未下载")
+        self.update_install_btn.setEnabled(False)
+        self.update_check_dialog.show()
+        self.update_check_dialog.raise_()
+        self.update_check_dialog.activateWindow()
+
+    def open_update_detail_page(self):
+        if self.pending_update_info:
+            QMessageBox.information(
+                self,
+                "更新详情",
+                json.dumps(self.pending_update_info, ensure_ascii=False, indent=2),
+            )
+
+    def download_pending_update(self):
+        if not self.pending_update_info:
+            return
+        version = self.pending_update_info.get("latest_version", "")
+        channel = self.update_channel()
+        download_url = self.pending_update_info.get("debug_download_url" if channel == "debug" else "download_url", "")
+        if not version or not download_url:
+            return
+        target_dir = self.update_download_dir() / version
+        target_dir.mkdir(parents=True, exist_ok=True)
+        target_file = target_dir / ("QualityControlSystem_Debug.exe" if channel == "debug" else "QualityControlSystem.exe")
+        try:
+            with urllib.request.urlopen(self.api_url(download_url), timeout=10) as response, target_file.open("wb") as file:
+                shutil.copyfileobj(response, file)
+        except Exception as exc:
+            QMessageBox.warning(self, "下载失败", str(exc))
+            return
+        self.update_download_status.setText(f"下载完成：{target_file}")
+        self.update_install_btn.setEnabled(True)
+        try:
+            self.api_post("/api/client-update/report", {
+                "client_id": self.station_session_client_id,
+                "computer_name": socket.gethostname(),
+                "current_version": self.client_version,
+                "target_version": version,
+                "action": "download",
+                "result": "success",
+                "message": f"下载完成:{channel}",
+            })
+        except Exception:
+            pass
+
+    def launch_update_installer(self):
+        if not self.pending_update_info:
+            return
+        if self.online_mode and self.production_enabled:
+            QMessageBox.information(self, "暂不能更新", "当前工位正在生产，不能立即更新。请完成当前产品后再更新。")
+            return
+        version = self.pending_update_info.get("latest_version", "")
+        update_dir = self.update_download_dir() / version
+        update_file = update_dir / ("QualityControlSystem_Debug.exe" if self.update_channel() == "debug" else "QualityControlSystem.exe")
+        if not update_file.exists():
+            QMessageBox.warning(self, "提示", "请先下载更新包")
+            return
+        QMessageBox.information(self, "提示", f"更新包已下载到：{update_file}\n当前版本程序关闭后可手动替换安装。")
 
     def load_station_session_client_id(self) -> str:
         config = configparser.ConfigParser()

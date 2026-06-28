@@ -1,4 +1,5 @@
 import json
+import cgi
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -15,6 +16,7 @@ from web_admin_app.services import (
     add_step_record,
     add_step,
     acquire_station_session,
+    delete_client_release,
     admin_release_station_session,
     archive_old_records,
     backup_database,
@@ -29,9 +31,12 @@ from web_admin_app.services import (
     maintenance_logs,
     release_station_session,
     get_station_config,
+    latest_client_release,
     get_trace,
     list_projects,
     list_projects_full,
+    list_client_releases,
+    list_client_update_logs,
     list_production_records,
     list_scan_records,
     list_screw_records,
@@ -42,6 +47,9 @@ from web_admin_app.services import (
     update_scan_record,
     update_station,
     update_step,
+    upsert_client_release,
+    report_client_update,
+    download_client_release,
     vacuum_or_analyze,
 )
 
@@ -73,6 +81,26 @@ def read_json(handler):
     if length == 0:
         return {}
     return json.loads(handler.rfile.read(length).decode("utf-8"))
+
+
+def read_form(handler):
+    content_type = handler.headers.get("Content-Type", "")
+    environ = {
+        "REQUEST_METHOD": "POST",
+        "CONTENT_TYPE": content_type,
+    }
+    form = cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ=environ, keep_blank_values=True)
+    payload = {}
+    files = {}
+    if not form.list:
+        return payload, files
+    for item in form.list:
+        if item.filename:
+            files[item.name] = item.file
+            payload[f"{item.name}_filename"] = item.filename
+        else:
+            payload[item.name] = item.value
+    return payload, files
 
 
 class AdminHandler(BaseHTTPRequestHandler):
@@ -142,12 +170,37 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, db_status())
         elif path == "/api/admin/db/maintenance-logs":
             json_response(self, maintenance_logs(query))
+        elif path == "/api/client-releases":
+            json_response(self, {"releases": list_client_releases()})
+        elif path == "/api/client-update/logs":
+            json_response(self, list_client_update_logs(query))
+        elif path == "/api/client-update/latest":
+            json_response(self, latest_client_release(query))
+        elif path.startswith("/api/client-update/download/"):
+            parts = path.strip("/").split("/")
+            if len(parts) != 5:
+                json_response(self, {"error": "not found"}, 404)
+                return
+            version, kind = parts[3], parts[4]
+            file_path, default_name = download_client_release(version, kind)
+            data = file_path.read_bytes()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", f'attachment; filename="{default_name}"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
         else:
             json_response(self, {"error": "not found"}, 404)
 
     def route_post(self):
         path = urlparse(self.path).path
-        payload = read_json(self)
+        content_type = self.headers.get("Content-Type", "")
+        is_multipart = content_type.startswith("multipart/form-data")
+        if is_multipart:
+            payload, files = read_form(self)
+        else:
+            payload, files = read_json(self), None
         if path == "/api/projects":
             json_response(self, add_project(payload))
         elif path == "/api/stations":
@@ -182,6 +235,10 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, delete_old_records(payload))
         elif path == "/api/admin/db/vacuum-or-analyze":
             json_response(self, vacuum_or_analyze())
+        elif path == "/api/client-update/report":
+            json_response(self, report_client_update(payload))
+        elif path == "/api/client-releases":
+            json_response(self, upsert_client_release(payload, files=files))
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -214,6 +271,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, {"ok": True})
         elif len(parts) == 3 and parts[0] == "api" and parts[1] == "scan-records":
             delete_scan_record(int(parts[2]))
+            json_response(self, {"ok": True})
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "client-releases":
+            delete_client_release(parts[2])
             json_response(self, {"ok": True})
         else:
             json_response(self, {"error": "not found"}, 404)

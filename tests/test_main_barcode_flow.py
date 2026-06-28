@@ -333,6 +333,50 @@ class MainBarcodeFlowTest(unittest.TestCase):
             total = conn.execute("SELECT COUNT(*) AS total FROM station_sessions").fetchone()["total"]
         self.assertEqual(total, 0)
 
+    def test_client_release_latest_and_report_logging(self):
+        services.upsert_client_release(
+            {
+                "version": "v0.8.4",
+                "title": "旧版本",
+                "release_notes": ["old"],
+                "release_date": "2026-06-27 10:00:00",
+                "stable": True,
+                "force_update": False,
+                "min_required_version": "v0.8.0",
+            }
+        )
+        services.upsert_client_release(
+            {
+                "version": "v0.8.5",
+                "title": "新版本",
+                "release_notes": ["new"],
+                "release_date": "2026-06-28 10:00:00",
+                "stable": True,
+                "force_update": False,
+                "min_required_version": "v0.8.0",
+            }
+        )
+        latest = services.latest_client_release({"client_version": ["v0.8.4"], "channel": ["stable"]})
+        self.assertTrue(latest["data"]["has_update"])
+        self.assertEqual(latest["data"]["latest_version"], "v0.8.5")
+        self.assertIn("/api/client-update/download/v0.8.5/release", latest["data"]["download_url"])
+
+        services.report_client_update(
+            {
+                "client_id": "client-1",
+                "computer_name": "PC-1",
+                "ip_address": "127.0.0.1",
+                "current_version": "v0.8.4",
+                "target_version": "v0.8.5",
+                "action": "download",
+                "result": "success",
+                "message": "下载完成",
+            }
+        )
+        logs = services.list_client_update_logs({"page": ["1"], "page_size": ["10"]})["records"]
+        self.assertEqual(logs[0]["client_id"], "client-1")
+        self.assertEqual(logs[0]["target_version"], "v0.8.5")
+
 
 class OldDatabaseMigrationTest(unittest.TestCase):
     def test_old_steps_table_gets_main_barcode_column_and_default_main(self):

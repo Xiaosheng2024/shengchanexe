@@ -246,6 +246,39 @@ HTML = r"""<!doctype html>
             <tbody id="maintenanceLogRows"></tbody>
           </table>
         </div>
+        <div class="panel">
+          <h2>客户端版本管理</h2>
+          <div class="toolbar">
+            <input id="releaseVersion" placeholder="版本号，如 v0.8.5">
+            <input id="releaseTitle" placeholder="标题">
+            <input id="releaseDate" type="datetime-local">
+            <label class="checkbox-label"><input id="releaseStable" type="checkbox" checked> 稳定版</label>
+            <label class="checkbox-label"><input id="releaseForceUpdate" type="checkbox"> 强制更新</label>
+          </div>
+          <div class="toolbar">
+            <input id="releaseMinVersion" placeholder="最低可用版本">
+            <input id="releaseNotes" placeholder="更新说明，多条用 | 分隔" style="min-width:320px; flex:1">
+          </div>
+          <div class="toolbar">
+            <label>正式版文件</label><input id="releaseFile" type="file" accept=".exe,.zip">
+            <label>Debug版文件</label><input id="debugFile" type="file" accept=".exe,.zip">
+            <label>S7工具</label><input id="s7ToolFile" type="file" accept=".exe,.zip">
+            <button class="primary" onclick="saveClientRelease()">保存版本</button>
+            <button class="secondary" onclick="refreshClientReleases()">刷新版本</button>
+          </div>
+          <table>
+            <thead><tr><th>版本</th><th>标题</th><th>发布时间</th><th>稳定</th><th>强制</th><th>说明</th><th>操作</th></tr></thead>
+            <tbody id="clientReleaseRows"></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>客户端更新日志</h2>
+          <button class="secondary" onclick="refreshClientUpdateLogs()">刷新日志</button>
+          <table>
+            <thead><tr><th>时间</th><th>client_id</th><th>电脑</th><th>当前版本</th><th>目标版本</th><th>动作</th><th>结果</th><th>消息</th></tr></thead>
+            <tbody id="clientUpdateLogRows"></tbody>
+          </table>
+        </div>
       </section>
     </main>
   </div>
@@ -872,6 +905,62 @@ HTML = r"""<!doctype html>
       ).join("") || `<tr><td colspan="4">暂无日志</td></tr>`;
     }
 
+    async function refreshClientReleases() {
+      const data = await api("/api/client-releases");
+      document.getElementById("clientReleaseRows").innerHTML = data.releases.map(row =>
+        `<tr><td>${htmlEscape(row.version)}</td><td>${htmlEscape(row.title || "")}</td><td>${htmlEscape(row.release_date || "")}</td><td>${row.stable ? "是" : "否"}</td><td>${row.force_update ? "是" : "否"}</td><td>${htmlEscape((row.release_notes || []).join(" | "))}</td><td><button class="secondary" onclick="downloadClientRelease('${htmlEscape(row.version)}','release')">下载正式版</button> <button class="secondary" onclick="downloadClientRelease('${htmlEscape(row.version)}','debug')">下载Debug版</button> <button class="danger" onclick="deleteClientRelease('${htmlEscape(row.version)}')">删除</button></td></tr>`
+      ).join("") || `<tr><td colspan="7">暂无版本</td></tr>`;
+    }
+
+    async function refreshClientUpdateLogs() {
+      const data = await api("/api/client-update/logs?page=1&page_size=100");
+      document.getElementById("clientUpdateLogRows").innerHTML = data.records.map(row =>
+        `<tr><td>${htmlEscape(row.created_at || "")}</td><td>${htmlEscape(row.client_id || "")}</td><td>${htmlEscape(row.computer_name || "")}</td><td>${htmlEscape(row.current_version || "")}</td><td>${htmlEscape(row.target_version || "")}</td><td>${htmlEscape(row.action || "")}</td><td>${htmlEscape(row.result || "")}</td><td>${htmlEscape(row.message || "")}</td></tr>`
+      ).join("") || `<tr><td colspan="8">暂无日志</td></tr>`;
+    }
+
+    function readFileInput(id) {
+      const input = document.getElementById(id);
+      return input && input.files && input.files[0] ? input.files[0] : null;
+    }
+
+    async function saveClientRelease() {
+      const version = document.getElementById("releaseVersion").value.trim();
+      if (!version) return showStatus("版本号不能为空");
+      const form = new FormData();
+      form.append("version", version);
+      form.append("title", document.getElementById("releaseTitle").value.trim());
+      form.append("release_date", document.getElementById("releaseDate").value || "");
+      form.append("stable", document.getElementById("releaseStable").checked ? "1" : "0");
+      form.append("force_update", document.getElementById("releaseForceUpdate").checked ? "1" : "0");
+      form.append("min_required_version", document.getElementById("releaseMinVersion").value.trim());
+      form.append("release_notes", JSON.stringify(
+        document.getElementById("releaseNotes").value.split("|").map(item => item.trim()).filter(Boolean)
+      ));
+      const releaseFile = readFileInput("releaseFile");
+      const debugFile = readFileInput("debugFile");
+      const s7ToolFile = readFileInput("s7ToolFile");
+      if (releaseFile) form.append("release_file", releaseFile);
+      if (debugFile) form.append("debug_file", debugFile);
+      if (s7ToolFile) form.append("s7_tool_file", s7ToolFile);
+      const res = await fetch("/api/client-releases", {method:"POST", body: form});
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || "保存失败");
+      showStatus("版本已保存");
+      await refreshClientReleases();
+    }
+
+    async function deleteClientRelease(version) {
+      if (!confirm(`确定删除版本 ${version} 吗？`)) return;
+      await api(`/api/client-releases/${encodeURIComponent(version)}`, {method: "DELETE"});
+      showStatus("版本已删除");
+      refreshClientReleases();
+    }
+
+    async function downloadClientRelease(version, kind) {
+      window.open(`/api/client-update/download/${encodeURIComponent(version)}/${kind}`, "_blank");
+    }
+
     async function loadStationSessions() {
       const data = await api("/api/station-sessions?status=online");
       document.getElementById("stationSessionRows").innerHTML = data.sessions.map(row =>
@@ -893,6 +982,8 @@ HTML = r"""<!doctype html>
     }
 
     refreshAll().catch(err => showStatus(err.message));
+    refreshClientReleases().catch(() => {});
+    refreshClientUpdateLogs().catch(() => {});
   </script>
 </body>
 </html>
