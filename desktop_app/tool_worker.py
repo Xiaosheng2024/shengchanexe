@@ -26,7 +26,8 @@ class ToolPollConfig:
 class ToolPollWorker(QObject):
     result = pyqtSignal(int, int, int)
     error = pyqtSignal(str)
-    write_error = pyqtSignal(str)
+    write_succeeded = pyqtSignal(int, int)
+    write_error = pyqtSignal(int, int, str)
     connection_state = pyqtSignal(str)
     stopped = pyqtSignal()
 
@@ -128,10 +129,11 @@ class ToolPollWorker(QObject):
         if not self.polling:
             return
         if not self.ensure_connection_for_poll():
-            self.write_error.emit("螺钉枪通讯断开，正在重连")
+            self.write_error.emit(register_address, value, "螺钉枪通讯断开，正在重连")
             return
         try:
             self.write_register_with_delay(register_address, value, "业务指令")
+            self.write_succeeded.emit(register_address, value)
         except Exception as exc:
             logging.error(
                 "螺钉枪写寄存器失败 address=%s value=%s：%s",
@@ -140,7 +142,7 @@ class ToolPollWorker(QObject):
                 exc,
             )
             self.mark_connection_failed(str(exc))
-            self.write_error.emit(str(exc))
+            self.write_error.emit(register_address, value, str(exc))
 
     def write_register_with_delay(self, register_address: int, value: int, reason: str):
         delay_ms = max(int(self.config.command_delay_ms), 0)

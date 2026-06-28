@@ -62,6 +62,11 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.main_barcode_label.text(), "当前主条码：MAIN-001")
 
         window.handle_screw_ok()
+        self.assertEqual(window.current_product.steps[2].completed_count, 1)
+        self.assertTrue(window.current_product.steps[2].done)
+        self.assertEqual(window.screw_progress_label.text(), "已完成：1 / 1")
+
+        window.advance_step()
         self.assertEqual(window.current_barcode, "")
         self.assertEqual(window.main_barcode_label.text(), "当前主条码：未扫描")
         self.assertEqual(window.current_step_index, 0)
@@ -552,7 +557,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.process_tool_poll_result(status=2, trigger=1, direction=3)
         window.process_tool_poll_result(status=2, trigger=1, direction=3)
 
-        self.assertEqual(count["ok"], 2)
+        self.assertEqual(count["ok"], 1)
 
     def test_reverse_direction_ok_does_not_count(self):
         window = self.make_window()
@@ -719,6 +724,78 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertFalse(window.tool_connection_rearming)
         window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(calls["ok"], 1)
+
+    def test_trigger_still_one_while_waiting_retries_clear_without_duplicate_count(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"ok": 0, "writes": []}
+        window.handle_screw_ok = lambda: calls.__setitem__("ok", calls["ok"] + 1)
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append((register, value)) or True
+        )
+        window.waiting_tool_trigger_reset = True
+
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+
+        self.assertEqual(calls["ok"], 0)
+        self.assertIn((53, 0), calls["writes"])
+        self.assertTrue(window.waiting_tool_trigger_reset)
+
+    def test_trigger_reset_write_success_releases_waiting_lock(self):
+        window = self.make_window()
+        window.waiting_tool_trigger_reset = True
+        window.tool_connection_rearming = True
+
+        window.on_tool_write_succeeded_for_generation(
+            window.tool_worker_generation,
+            window.tool_trigger_register_input.value(),
+            window.tool_trigger_reset_value_input.value(),
+        )
+
+        self.assertFalse(window.waiting_tool_trigger_reset)
+        self.assertFalse(window.tool_connection_rearming)
+
+    def test_trigger_reset_write_failure_keeps_waiting_for_retry(self):
+        window = self.make_window()
+        window.waiting_tool_trigger_reset = False
+
+        window.on_tool_write_error_for_generation(
+            window.tool_worker_generation,
+            window.tool_trigger_register_input.value(),
+            window.tool_trigger_reset_value_input.value(),
+            "write failed",
+        )
+
+        self.assertTrue(window.waiting_tool_trigger_reset)
+
+    def test_tenth_ok_turns_green_and_queues_clear_before_lock(self):
+        window = self.make_window()
+        step = ProcessStep("打螺丝10颗", SCREW, required_count=10, completed_count=9)
+        window.current_product = ProductConfig("十颗螺丝测试", [step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.tool_forward_value_input.setValue(3)
+        window.tool_reverse_value_input.setValue(2)
+        writes = []
+        window.is_tool_worker_running = lambda: True
+        window.write_tool_register = lambda register, value: writes.append((register, value)) or True
+
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+
+        self.assertEqual(step.completed_count, 10)
+        self.assertTrue(step.done)
+        self.assertEqual(window.screw_progress_label.text(), "已完成：10 / 10")
+        self.assertTrue(all("#22c55e" in block.styleSheet() for block in window.screw_blocks))
+        self.assertEqual(writes[:3], [(53, 0), (4, 2), (53, 0)])
+        self.assertTrue(window.waiting_tool_trigger_reset)
+
+        window.on_tool_write_succeeded_for_generation(
+            window.tool_worker_generation,
+            53,
+            0,
+        )
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+        self.assertEqual(step.completed_count, 10)
 
     def test_ng_lock_is_preserved_when_connection_recovers(self):
         window = self.make_window()

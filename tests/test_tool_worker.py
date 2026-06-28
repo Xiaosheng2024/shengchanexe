@@ -61,6 +61,11 @@ class FakeDisconnectedClient:
         pass
 
 
+class FakeWriteFailClient(FakeConnectedClient):
+    def write_register(self, address, value):
+        raise BrokenPipeError("write failed")
+
+
 class ToolPollWorkerTest(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
@@ -124,12 +129,29 @@ class ToolPollWorkerTest(unittest.TestCase):
         client = FakeConnectedClient()
         worker.client = client
         worker.polling = True
+        successes = []
+        worker.write_succeeded.connect(lambda address, value: successes.append((address, value)))
 
         with patch("desktop_app.tool_worker.sleep") as sleep_mock:
             worker.write_register(53, 0)
 
         sleep_mock.assert_called_once_with(0.05)
         self.assertEqual(client.writes, [(53, 0)])
+        self.assertEqual(successes, [(53, 0)])
+
+    def test_write_failure_reports_register_for_retry(self):
+        worker = ToolPollWorker(make_config())
+        worker.client = FakeWriteFailClient()
+        worker.polling = True
+        errors = []
+        worker.write_error.connect(
+            lambda address, value, message: errors.append((address, value, message))
+        )
+
+        worker.write_register(53, 0)
+
+        self.assertEqual(errors[0][:2], (53, 0))
+        self.assertIn("write failed", errors[0][2])
 
 
 if __name__ == "__main__":

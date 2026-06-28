@@ -47,7 +47,7 @@ from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
 from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
 
 
-APP_VERSION = "v0.8.5"
+APP_VERSION = "v0.8.6"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
@@ -1594,6 +1594,7 @@ class QualityControlWindow(QMainWindow):
             step.completed_count = step.required_count
             step.done = True
             self.add_history_record(step, "完成", "螺钉枪OK", "螺丝数量已满足", completed=True)
+            self.refresh_work_area()
             logging.info(
                 "螺丝打满后延迟%sms再锁枪",
                 self.tool_command_delay_input.value(),
@@ -1601,7 +1602,12 @@ class QualityControlWindow(QMainWindow):
             self.close_tool_for_screw_step()
             self.speak("螺丝已完成")
             self.message_label.setText(f"{step.name} 已完成 {step.required_count}/{step.required_count}")
-            self.advance_step(prompt_delay_ms=1600)
+            product = self.current_product
+            QTimer.singleShot(
+                1600,
+                lambda current_product=product, completed_step=step:
+                self.finish_screw_step_after_trigger_clear(current_product, completed_step),
+            )
         else:
             self.message_label.setText(f"收到螺钉枪OK信号：{step.completed_count}/{step.required_count}")
             self.refresh_work_area()
@@ -1645,7 +1651,14 @@ class QualityControlWindow(QMainWindow):
             self.on_tool_poll_result_for_generation(gen, status, trigger, direction)
         )
         worker.error.connect(self.on_tool_poll_error)
-        worker.write_error.connect(self.on_tool_write_error)
+        worker.write_succeeded.connect(
+            lambda address, value, gen=generation:
+            self.on_tool_write_succeeded_for_generation(gen, address, value)
+        )
+        worker.write_error.connect(
+            lambda address, value, message, gen=generation:
+            self.on_tool_write_error_for_generation(gen, address, value, message)
+        )
         worker.connection_state.connect(self.on_tool_connection_state)
         worker.stopped.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
@@ -1709,7 +1722,12 @@ class QualityControlWindow(QMainWindow):
                 self.lock_tool()
                 self.tool_status_label.setText("NG锁定")
                 self.message_label.setText("NG锁定：通讯恢复后继续保持锁枪")
-            elif self.production_enabled and step is not None and step.step_type == SCREW:
+            elif (
+                self.production_enabled
+                and step is not None
+                and step.step_type == SCREW
+                and not step.done
+            ):
                 self.unlock_tool()
             else:
                 self.lock_tool()
@@ -1918,8 +1936,37 @@ class QualityControlWindow(QMainWindow):
         self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
         self.message_label.setText("螺钉枪通讯断开，正在重连")
 
-    def on_tool_write_error(self, message: str):
-        logging.error("螺钉枪写入异常：%s", message)
+    def on_tool_write_succeeded_for_generation(self, generation: int, address: int, value: int):
+        if generation != self.tool_worker_generation:
+            logging.info("忽略旧螺钉枪写成功信号 generation=%s current=%s", generation, self.tool_worker_generation)
+            return
+        if (
+            address == self.tool_trigger_register_input.value()
+            and value == self.tool_trigger_reset_value_input.value()
+        ):
+            self.waiting_tool_trigger_reset = False
+            self.tool_connection_rearming = False
+            logging.info("地址53写0成功，触发闭环完成，允许处理下一颗")
+
+    def on_tool_write_error_for_generation(
+        self,
+        generation: int,
+        address: int,
+        value: int,
+        message: str,
+    ):
+        if generation != self.tool_worker_generation:
+            return
+        if (
+            address == self.tool_trigger_register_input.value()
+            and value == self.tool_trigger_reset_value_input.value()
+        ):
+            self.waiting_tool_trigger_reset = True
+            logging.error("写53=0失败，将在后续轮询中重试：%s", message)
+        self.on_tool_write_error(address, value, message)
+
+    def on_tool_write_error(self, address: int, value: int, message: str):
+        logging.error("螺钉枪写入异常 address=%s value=%s：%s", address, value, message)
         self.tool_status_label.setText("正在重连")
         self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
         self.message_label.setText("螺钉枪通讯断开，正在重连")
@@ -1940,22 +1987,32 @@ class QualityControlWindow(QMainWindow):
             self.processing_tool_signal = False
 
     def process_tool_poll_result(self, status: int, trigger: int, direction: Optional[int] = None):
+        self.recompute_production_enabled()
         trigger_value = self.tool_trigger_value_input.value()
+        preview_step = self.current_step()
         if trigger == trigger_value:
             logging.info(
-                "检测到地址53=%s：direction=%s status=%s",
-                trigger,
+                "检测到螺钉枪触发：direction=%s trigger=%s status=%s 当前工序=%s "
+                "production_enabled=%s tool_ng_locked=%s screw_ok_count=%s required_count=%s",
                 direction,
+                trigger,
                 status,
+                preview_step.name if preview_step is not None else "无",
+                self.production_enabled,
+                self.tool_ng_locked,
+                preview_step.completed_count if preview_step is not None and preview_step.step_type == SCREW else 0,
+                preview_step.required_count if preview_step is not None and preview_step.step_type == SCREW else 0,
             )
         if not self.ensure_station_session_for_production():
             if trigger == trigger_value:
                 logging.warning("设备状态未计数：当前工位未占用成功")
+                self.clear_active_tool_trigger("工位未占用，清除触发")
             return
         step = self.current_step()
         if step is None or step.step_type != SCREW:
             if trigger == trigger_value:
                 logging.warning("设备状态未计数：当前不是螺丝工序")
+                self.clear_active_tool_trigger("非螺丝工序，清除触发")
             if self.tool_lock_state != "locked":
                 logging.info(
                     "非螺丝工序延迟%sms后锁枪",
@@ -1972,6 +2029,7 @@ class QualityControlWindow(QMainWindow):
         if self.tool_ng_locked:
             if trigger == trigger_value:
                 logging.warning("设备状态未计数：NG锁定中")
+                self.clear_active_tool_trigger("NG锁定中，清除触发")
             self.lock_tool()
             self.tool_status_label.setText("NG锁定")
             self.message_label.setText("NG锁定：等待管理员解锁")
@@ -1985,7 +2043,6 @@ class QualityControlWindow(QMainWindow):
         trigger_reset_value = self.tool_trigger_reset_value_input.value()
         forward_value = self.tool_forward_value_input.value()
         reverse_value = self.tool_reverse_value_input.value()
-        dedup_enabled = self.tool_enable_dedup_checkbox.isChecked()
         status_text = self.tightening_status_text(status)
         if self.tool_verbose_log_checkbox.isChecked():
             logging.info("螺钉枪读取：direction=%s trigger=%s status=%s-%s", direction, trigger, status, status_text)
@@ -2016,37 +2073,40 @@ class QualityControlWindow(QMainWindow):
                     "反转后延迟%sms再清53",
                     self.tool_command_delay_input.value(),
                 )
-                self.reset_tool_trigger()
-                if dedup_enabled:
-                    self.waiting_tool_trigger_reset = True
+                self.clear_active_tool_trigger("反转动作，清除触发")
             return
 
         if direction != forward_value:
             if trigger == trigger_value:
                 logging.warning("设备状态未计数：direction不是正转%s，实际=%s", forward_value, direction)
+                self.clear_active_tool_trigger("方向未知，清除触发")
             self.message_label.setText(f"未知方向值 {direction}，不计数")
             return
 
         if trigger == trigger_reset_value:
-            if dedup_enabled:
-                self.waiting_tool_trigger_reset = False
+            self.waiting_tool_trigger_reset = False
             return
         if trigger != trigger_value:
             return
-        if dedup_enabled and self.waiting_tool_trigger_reset:
-            logging.info("设备状态未计数：正在等待53复位")
+        if self.waiting_tool_trigger_reset:
+            logging.info("设备状态未计数：waiting_trigger_reset=True，触发位仍为1，正在重试清除53")
+            self.reset_tool_trigger()
+            return
+
+        if step.completed_count >= step.required_count:
+            logging.warning("设备状态未计数：已达到目标数量，继续清53并保持锁枪")
+            self.clear_active_tool_trigger("已达到目标数量，清除残留触发")
+            self.lock_tool()
             return
 
         if status == ok_value:
-            if dedup_enabled:
-                self.waiting_tool_trigger_reset = True
             completed_after_ok = min(step.completed_count + 1, step.required_count)
             required_count = step.required_count
             logging.info(
                 "OK后延迟%sms再清53",
                 self.tool_command_delay_input.value(),
             )
-            self.reset_tool_trigger()
+            self.clear_active_tool_trigger("OK后清除触发")
             self.handle_screw_ok()
             logging.info(
                 "螺钉枪OK：第%s颗，已完成%s/共%s",
@@ -2057,17 +2117,17 @@ class QualityControlWindow(QMainWindow):
             return
 
         if status == ng_value:
-            if dedup_enabled:
-                self.waiting_tool_trigger_reset = True
             self.handle_screw_ng()
             return
 
         if status == 4:
             logging.info("设备状态未计数：螺钉枪暂停 status=4")
+            self.clear_active_tool_trigger("暂停状态，清除触发")
             self.message_label.setText("螺钉枪暂停")
             return
 
         logging.warning("设备状态未计数：status不是OK%s或NG%s，实际=%s", ok_value, ng_value, status)
+        self.clear_active_tool_trigger("状态未确认，清除触发")
 
     def write_tool_register(self, register_address: int, value: int):
         if not self.is_tool_worker_running():
@@ -2085,6 +2145,11 @@ class QualityControlWindow(QMainWindow):
 
     def reset_tool_trigger(self):
         self.write_tool_register(self.tool_trigger_register_input.value(), self.tool_trigger_reset_value_input.value())
+
+    def clear_active_tool_trigger(self, reason: str):
+        self.waiting_tool_trigger_reset = True
+        logging.info("%s：延迟%sms后写53=0", reason, self.tool_command_delay_input.value())
+        return self.reset_tool_trigger()
 
     def lock_tool(self):
         if self.tool_lock_state == "locked":
@@ -2104,10 +2169,28 @@ class QualityControlWindow(QMainWindow):
         if self.tool_ng_locked:
             self.lock_tool()
             return
-        if self.production_enabled and step is not None and step.step_type == SCREW:
+        if (
+            self.production_enabled
+            and step is not None
+            and step.step_type == SCREW
+            and not step.done
+        ):
             self.unlock_tool()
             return
         self.lock_tool()
+
+    def finish_screw_step_after_trigger_clear(self, product: ProductConfig, step: ProcessStep):
+        if self.current_product is not product or self.current_step() is not step or not step.done:
+            return
+        if self.waiting_tool_trigger_reset:
+            logging.warning("螺丝工序已满，但53尚未清除成功，延后工序流转并继续重试")
+            self.reset_tool_trigger()
+            QTimer.singleShot(
+                300,
+                lambda: self.finish_screw_step_after_trigger_clear(product, step),
+            )
+            return
+        self.advance_step()
 
     def add_screw_ng_record(self):
         step = self.current_step()
@@ -2125,7 +2208,7 @@ class QualityControlWindow(QMainWindow):
             self.tool_command_delay_input.value(),
         )
         self.lock_tool()
-        self.reset_tool_trigger()
+        self.clear_active_tool_trigger("NG后清除触发")
         self.speak("螺丝NG，请管理员解锁")
         self.tool_status_label.setText("NG锁定")
         self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
