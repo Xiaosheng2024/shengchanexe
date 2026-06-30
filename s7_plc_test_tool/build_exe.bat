@@ -9,7 +9,6 @@ pyinstaller --noconfirm --clean --onefile --windowed ^
   --add-data "s7_plc_test_tool\config.ini;." ^
   --distpath s7_plc_test_tool\dist ^
   --workpath s7_plc_test_tool\build ^
-  --specpath s7_plc_test_tool ^
   s7_plc_test_tool\main.py
 echo.
 echo 打包完成，EXE位置：s7_plc_test_tool\dist\S7_PLC_Test_Tool.exe

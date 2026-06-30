@@ -37,7 +37,7 @@ jobs:
 
       - name: Build S7 PLC test tool exe
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name S7_PLC_Test_Tool --paths . --hidden-import shared --hidden-import shared.s7_plc_client --add-data "s7_plc_test_tool/config.ini;." --distpath s7_plc_test_tool/dist --workpath s7_plc_test_tool/build --specpath s7_plc_test_tool s7_plc_test_tool/main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name S7_PLC_Test_Tool --paths . --hidden-import shared --hidden-import shared.s7_plc_client --add-data "s7_plc_test_tool/config.ini;." --distpath s7_plc_test_tool/dist --workpath s7_plc_test_tool/build s7_plc_test_tool/main.py
 
       - name: Smoke test S7 PLC test tool
         shell: pwsh

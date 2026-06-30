@@ -36,6 +36,7 @@ class S7PlcTestToolPackagingTest(unittest.TestCase):
             self.assertIn("--hidden-import shared", content)
             self.assertIn("--hidden-import shared.s7_plc_client", content)
             self.assertIn("s7_plc_test_tool", content)
+            self.assertNotIn("--specpath", content)
 
 
 if __name__ == "__main__":
