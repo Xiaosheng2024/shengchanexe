@@ -2,7 +2,7 @@
 setlocal
 
 python -m pip install --upgrade pip
-python -m pip install -r requirements.txt pyinstaller
+python -m pip install -r requirements-client.txt -r requirements-dev.txt
 
 pyinstaller ^
   --noconfirm ^

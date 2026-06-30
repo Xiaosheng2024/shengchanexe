@@ -41,6 +41,56 @@ PLC_STEP_COLUMNS = {
     "plc_barcode_wait_ok_timeout_seconds": "INTEGER NOT NULL DEFAULT 30",
 }
 
+FLOW_STEP_COLUMNS = {
+    "switch_require_old": "INTEGER NOT NULL DEFAULT 1",
+    "switch_require_new": "INTEGER NOT NULL DEFAULT 1",
+    "switch_set_current": "INTEGER NOT NULL DEFAULT 1",
+    "switch_disable_old": "INTEGER NOT NULL DEFAULT 1",
+    "bind_child_project_id": "INTEGER",
+    "bind_child_material_type": "TEXT NOT NULL DEFAULT ''",
+    "bind_required_count": "INTEGER NOT NULL DEFAULT 1",
+    "bind_required_station_ids": "TEXT NOT NULL DEFAULT '[]'",
+    "bind_require_parent_switch": "INTEGER NOT NULL DEFAULT 1",
+    "bind_allow_duplicate": "INTEGER NOT NULL DEFAULT 0",
+    "bind_allow_unbind": "INTEGER NOT NULL DEFAULT 0",
+}
+FLOW_STEP_BOOLEAN_COLUMNS = {
+    "switch_require_old",
+    "switch_require_new",
+    "switch_set_current",
+    "switch_disable_old",
+    "bind_require_parent_switch",
+    "bind_allow_duplicate",
+    "bind_allow_unbind",
+}
+
+FLOW_RECORD_COLUMNS = {
+    "station_completions": {
+        "product_instance_id": "BIGINT",
+        "barcode_used": "TEXT",
+    },
+    "scan_records": {
+        "product_instance_id": "BIGINT",
+        "barcode_used": "TEXT",
+    },
+    "station_work_records": {
+        "product_instance_id": "BIGINT",
+        "barcode_used": "TEXT",
+    },
+    "step_work_records": {
+        "product_instance_id": "BIGINT",
+        "barcode_used": "TEXT",
+    },
+    "screw_action_records": {
+        "product_instance_id": "BIGINT",
+        "barcode_used": "TEXT",
+    },
+}
+PROJECT_FLOW_COLUMNS = {
+    "material_code": "TEXT NOT NULL DEFAULT ''",
+    "product_type": "TEXT NOT NULL DEFAULT ''",
+}
+
 CLIENT_RELEASE_COLUMNS = {
     "version": "TEXT NOT NULL UNIQUE",
     "title": "TEXT NOT NULL DEFAULT ''",
@@ -205,6 +255,12 @@ def needs_returning_id(sql):
             "insert into station_work_records ",
             "insert into step_work_records ",
             "insert into screw_action_records ",
+            "insert into web_admin_users ",
+            "insert into product_instances ",
+            "insert into barcode_aliases ",
+            "insert into barcode_switch_records ",
+            "insert into material_bindings ",
+            "insert into station_dependencies ",
         )
     )
 
@@ -344,6 +400,7 @@ def create_sqlite_schema(conn):
         """
     )
     create_traceability_schema(conn)
+    create_product_flow_schema(conn)
 
 
 def create_postgresql_schema(conn):
@@ -419,6 +476,7 @@ def create_postgresql_schema(conn):
         """
     )
     create_traceability_schema(conn)
+    create_product_flow_schema(conn)
 
 
 def create_traceability_schema(conn):
@@ -426,11 +484,13 @@ def create_traceability_schema(conn):
         id_type = "BIGSERIAL PRIMARY KEY"
         ts_type = "TIMESTAMP"
         bool_type = "BOOLEAN DEFAULT false"
+        bool_true_type = "BOOLEAN DEFAULT true"
         current_ts = "CURRENT_TIMESTAMP"
     else:
         id_type = "INTEGER PRIMARY KEY AUTOINCREMENT"
         ts_type = "TEXT"
         bool_type = "INTEGER DEFAULT 0"
+        bool_true_type = "INTEGER DEFAULT 1"
         current_ts = "CURRENT_TIMESTAMP"
     conn.executescript(
         f"""
@@ -558,8 +618,33 @@ def create_traceability_schema(conn):
             message TEXT,
             created_at {ts_type} NOT NULL DEFAULT {current_ts}
         );
+        CREATE TABLE IF NOT EXISTS web_admin_users (
+            id {id_type},
+            username TEXT NOT NULL UNIQUE,
+            password_hash TEXT NOT NULL,
+            role TEXT NOT NULL,
+            display_name TEXT NOT NULL DEFAULT '',
+            is_builtin {bool_type} NOT NULL,
+            is_active {bool_true_type} NOT NULL,
+            last_login_at {ts_type},
+            created_at {ts_type} NOT NULL DEFAULT {current_ts},
+            updated_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS web_admin_login_logs (
+            id {id_type},
+            username TEXT,
+            role TEXT,
+            ip_address TEXT,
+            user_agent TEXT,
+            success {bool_type} NOT NULL,
+            message TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
         CREATE INDEX IF NOT EXISTS idx_client_update_logs_created_at ON client_update_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
+        CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_created_at ON web_admin_login_logs(created_at);
+        CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_username ON web_admin_login_logs(username);
+        CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_ip ON web_admin_login_logs(ip_address);
         CREATE INDEX IF NOT EXISTS idx_station_work_barcode ON station_work_records(main_barcode);
         CREATE INDEX IF NOT EXISTS idx_station_work_project_station_time ON station_work_records(project_id, station_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_station_work_result ON station_work_records(result);
@@ -577,7 +662,101 @@ def create_traceability_schema(conn):
     )
 
 
+def create_product_flow_schema(conn):
+    if conn.db_type == "postgresql":
+        id_type = "BIGSERIAL PRIMARY KEY"
+        ts_type = "TIMESTAMP"
+        bool_type = "BOOLEAN"
+        bool_default_true = "BOOLEAN NOT NULL DEFAULT true"
+        bool_default_false = "BOOLEAN NOT NULL DEFAULT false"
+        current_ts = "CURRENT_TIMESTAMP"
+    else:
+        id_type = "INTEGER PRIMARY KEY AUTOINCREMENT"
+        ts_type = "TEXT"
+        bool_type = "INTEGER"
+        bool_default_true = "INTEGER NOT NULL DEFAULT 1"
+        bool_default_false = "INTEGER NOT NULL DEFAULT 0"
+        current_ts = "CURRENT_TIMESTAMP"
+    conn.executescript(
+        f"""
+        CREATE TABLE IF NOT EXISTS product_instances (
+            id {id_type},
+            project_id INTEGER NOT NULL,
+            material_code TEXT NOT NULL DEFAULT '',
+            product_type TEXT NOT NULL DEFAULT '',
+            current_barcode TEXT NOT NULL,
+            status TEXT NOT NULL DEFAULT 'active',
+            created_at {ts_type} NOT NULL DEFAULT {current_ts},
+            updated_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS barcode_aliases (
+            id {id_type},
+            product_instance_id BIGINT NOT NULL,
+            barcode TEXT NOT NULL UNIQUE,
+            barcode_type TEXT NOT NULL DEFAULT 'main_current',
+            is_current {bool_default_true},
+            created_at {ts_type} NOT NULL DEFAULT {current_ts},
+            disabled_at {ts_type}
+        );
+        CREATE TABLE IF NOT EXISTS barcode_switch_records (
+            id {id_type},
+            product_instance_id BIGINT NOT NULL,
+            old_barcode TEXT NOT NULL,
+            new_barcode TEXT NOT NULL,
+            project_id INTEGER NOT NULL,
+            station_id INTEGER NOT NULL,
+            step_id INTEGER,
+            operator TEXT,
+            reason TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS material_bindings (
+            id {id_type},
+            parent_product_instance_id BIGINT NOT NULL,
+            child_product_instance_id BIGINT NOT NULL,
+            parent_barcode TEXT NOT NULL,
+            child_barcode TEXT NOT NULL,
+            binding_type TEXT NOT NULL DEFAULT '',
+            project_id INTEGER NOT NULL,
+            station_id INTEGER NOT NULL,
+            step_id INTEGER,
+            operator TEXT,
+            is_active {bool_default_true},
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS station_dependencies (
+            id {id_type},
+            station_id INTEGER NOT NULL UNIQUE,
+            require_previous_station {bool_default_true},
+            required_station_ids TEXT NOT NULL DEFAULT '[]',
+            require_barcode_switch {bool_default_false},
+            required_child_project_id INTEGER,
+            required_child_material_type TEXT NOT NULL DEFAULT '',
+            required_child_count INTEGER NOT NULL DEFAULT 0,
+            required_child_station_ids TEXT NOT NULL DEFAULT '[]',
+            created_at {ts_type} NOT NULL DEFAULT {current_ts},
+            updated_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE INDEX IF NOT EXISTS idx_product_instances_project ON product_instances(project_id);
+        CREATE INDEX IF NOT EXISTS idx_product_instances_current_barcode ON product_instances(current_barcode);
+        CREATE INDEX IF NOT EXISTS idx_barcode_alias_instance ON barcode_aliases(product_instance_id);
+        CREATE INDEX IF NOT EXISTS idx_barcode_alias_current ON barcode_aliases(product_instance_id, is_current);
+        CREATE INDEX IF NOT EXISTS idx_barcode_switch_instance ON barcode_switch_records(product_instance_id);
+        CREATE INDEX IF NOT EXISTS idx_material_bind_parent ON material_bindings(parent_product_instance_id, is_active);
+        CREATE INDEX IF NOT EXISTS idx_material_bind_child ON material_bindings(child_product_instance_id, is_active);
+        CREATE UNIQUE INDEX IF NOT EXISTS ux_material_bind_child_active
+            ON material_bindings(child_product_instance_id) WHERE is_active = {('true' if conn.db_type == 'postgresql' else '1')};
+        """
+    )
+
+
 def migrate_sqlite_db(conn):
+    project_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(projects)").fetchall()
+    }
+    for column, definition in PROJECT_FLOW_COLUMNS.items():
+        if column not in project_columns:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {definition}")
     columns = [row["name"] for row in conn.execute("PRAGMA table_info(steps)").fetchall()]
     if "is_main_barcode" not in columns:
         conn.execute("ALTER TABLE steps ADD COLUMN is_main_barcode INTEGER NOT NULL DEFAULT 0")
@@ -586,6 +765,11 @@ def migrate_sqlite_db(conn):
         if column not in columns:
             conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
             columns.append(column)
+    for column, definition in FLOW_STEP_COLUMNS.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
+            columns.append(column)
+    migrate_sqlite_flow_record_columns(conn)
     if "plc_barcode_db" in columns and "plc_barcode1_db" in columns:
         conn.execute(
             """
@@ -643,6 +827,16 @@ def migrate_sqlite_db(conn):
 
 
 def migrate_postgresql_db(conn):
+    project_rows = conn.execute(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'projects'
+        """
+    ).fetchall()
+    project_columns = {row["column_name"] for row in project_rows}
+    for column, definition in PROJECT_FLOW_COLUMNS.items():
+        if column not in project_columns:
+            conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {definition}")
     rows = conn.execute(
         """
         SELECT column_name
@@ -657,6 +851,17 @@ def migrate_postgresql_db(conn):
         pg_definition = definition.replace("INTEGER", "INTEGER").replace("TEXT", "TEXT")
         conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {pg_definition}")
         columns.add(column)
+    for column, definition in FLOW_STEP_COLUMNS.items():
+        if column in columns:
+            continue
+        if column in FLOW_STEP_BOOLEAN_COLUMNS:
+            default = "false" if "DEFAULT 0" in definition else "true"
+            pg_definition = f"BOOLEAN NOT NULL DEFAULT {default}"
+        else:
+            pg_definition = definition
+        conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {pg_definition}")
+        columns.add(column)
+    migrate_postgresql_flow_record_columns(conn)
     if {"plc_barcode_db", "plc_barcode1_db", "plc_barcode_offset", "plc_barcode1_offset", "plc_barcode_length", "plc_barcode1_length"}.issubset(columns):
         conn.execute(
             """
@@ -721,6 +926,30 @@ def migrate_postgresql_db(conn):
         )
 
 
+def migrate_sqlite_flow_record_columns(conn):
+    for table, definitions in FLOW_RECORD_COLUMNS.items():
+        columns = {row["name"] for row in conn.execute(f"PRAGMA table_info({table})").fetchall()}
+        for column, definition in definitions.items():
+            if column not in columns:
+                sqlite_definition = definition.replace("BIGINT", "INTEGER")
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {sqlite_definition}")
+
+
+def migrate_postgresql_flow_record_columns(conn):
+    for table, definitions in FLOW_RECORD_COLUMNS.items():
+        rows = conn.execute(
+            """
+            SELECT column_name FROM information_schema.columns
+            WHERE table_name = ?
+            """,
+            (table,),
+        ).fetchall()
+        columns = {row["column_name"] for row in rows}
+        for column, definition in definitions.items():
+            if column not in columns:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {definition}")
+
+
 def seed_default_data(conn):
     created_at = now_text()
     cursor = conn.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", ("默认项目", created_at))
@@ -760,6 +989,16 @@ def ensure_default_main_barcodes(conn):
             (station["id"],),
         ).fetchone()["total"]
         if main_count:
+            continue
+        flow_identity = conn.execute(
+            """
+            SELECT 1 FROM steps
+            WHERE station_id = ? AND type IN (?, ?)
+            LIMIT 1
+            """,
+            (station["id"], "主条码切换", "子物料绑定"),
+        ).fetchone()
+        if flow_identity:
             continue
         first_scan = conn.execute(
             "SELECT id FROM steps WHERE station_id = ? AND type IN (?, ?) ORDER BY step_order, id LIMIT 1",

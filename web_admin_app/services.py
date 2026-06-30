@@ -11,6 +11,7 @@ from urllib.parse import unquote
 
 from web_admin_app import database
 from web_admin_app.database import get_conn, now_text, row_to_dict
+from web_admin_app import product_flow
 
 
 MAX_PAGE_SIZE = 500
@@ -28,7 +29,15 @@ def table_time_column(table):
 SCAN_TYPE = "扫码"
 SCREW_TYPE = "螺丝"
 PLC_TYPE = "PLC接收"
-STEP_TYPES = (SCAN_TYPE, SCREW_TYPE, PLC_TYPE)
+BARCODE_SWITCH_TYPE = "主条码切换"
+MATERIAL_BIND_TYPE = "子物料绑定"
+STEP_TYPES = (
+    SCAN_TYPE,
+    SCREW_TYPE,
+    PLC_TYPE,
+    BARCODE_SWITCH_TYPE,
+    MATERIAL_BIND_TYPE,
+)
 ADMIN_PASSWORD = "0000"
 
 
@@ -292,10 +301,22 @@ def list_projects():
     with get_conn() as conn:
         for project in conn.execute("SELECT * FROM projects ORDER BY id"):
             stations = conn.execute(
-                "SELECT name FROM stations WHERE project_id = ? ORDER BY id",
+                "SELECT id, name FROM stations WHERE project_id = ? ORDER BY id",
                 (project["id"],),
             ).fetchall()
-            projects.append({"name": project["name"], "stations": [row["name"] for row in stations]})
+            projects.append(
+                {
+                    "id": project["id"],
+                    "name": project["name"],
+                    "material_code": project["material_code"] or "",
+                    "product_type": project["product_type"] or project["name"],
+                    "stations": [row["name"] for row in stations],
+                    "station_items": [
+                        {"id": row["id"], "name": row["name"]}
+                        for row in stations
+                    ],
+                }
+            )
     return projects
 
 
@@ -318,7 +339,19 @@ def add_project(payload):
     if not name:
         raise ValueError("项目名称不能为空")
     with get_conn() as conn:
-        cursor = conn.execute("INSERT INTO projects (name, created_at) VALUES (?, ?)", (name, now_text()))
+        cursor = conn.execute(
+            """
+            INSERT INTO projects
+            (name, material_code, product_type, created_at)
+            VALUES (?, ?, ?, ?)
+            """,
+            (
+                name,
+                payload.get("material_code", "").strip(),
+                payload.get("product_type", "").strip() or name,
+                now_text(),
+            ),
+        )
         return {"id": cursor.lastrowid, "name": name}
 
 
@@ -327,7 +360,19 @@ def update_project(project_id, payload):
     if not name:
         raise ValueError("项目名称不能为空")
     with get_conn() as conn:
-        conn.execute("UPDATE projects SET name = ? WHERE id = ?", (name, project_id))
+        conn.execute(
+            """
+            UPDATE projects
+            SET name = ?, material_code = ?, product_type = ?
+            WHERE id = ?
+            """,
+            (
+                name,
+                payload.get("material_code", "").strip(),
+                payload.get("product_type", "").strip() or name,
+                project_id,
+            ),
+        )
     return {"ok": True}
 
 
@@ -359,6 +404,28 @@ def update_station(station_id, payload):
 
 def delete_project(project_id):
     with get_conn() as conn:
+        instance_rows = conn.execute(
+            "SELECT id FROM product_instances WHERE project_id = ?",
+            (project_id,),
+        ).fetchall()
+        instance_ids = [row["id"] for row in instance_rows]
+        for instance_id in instance_ids:
+            conn.execute(
+                """
+                DELETE FROM material_bindings
+                WHERE parent_product_instance_id = ? OR child_product_instance_id = ?
+                """,
+                (instance_id, instance_id),
+            )
+            conn.execute(
+                "DELETE FROM barcode_switch_records WHERE product_instance_id = ?",
+                (instance_id,),
+            )
+            conn.execute(
+                "DELETE FROM barcode_aliases WHERE product_instance_id = ?",
+                (instance_id,),
+            )
+        conn.execute("DELETE FROM product_instances WHERE project_id = ?", (project_id,))
         station_rows = conn.execute("SELECT id FROM stations WHERE project_id = ?", (project_id,)).fetchall()
         station_ids = [row["id"] for row in station_rows]
         for station_id in station_ids:
@@ -379,6 +446,9 @@ def delete_station(station_id):
 
 
 def delete_station_with_conn(conn, station_id):
+    conn.execute("DELETE FROM station_dependencies WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM barcode_switch_records WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM material_bindings WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM steps WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM scan_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM station_completions WHERE station_id = ?", (station_id,))
@@ -406,8 +476,9 @@ def add_step(payload):
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
     if step_type not in STEP_TYPES:
-        raise ValueError("功能只能是扫码、螺丝或PLC接收")
+        raise ValueError("功能只能是扫码、螺丝、PLC接收、主条码切换或子物料绑定")
     with get_conn() as conn:
+        validate_flow_step_payload(conn, payload, step_type)
         if is_main_barcode:
             clear_station_main_barcode(conn, station_id)
         plc_values = plc_payload_values(payload)
@@ -437,6 +508,7 @@ def add_step(payload):
                 now_text(),
             ),
         )
+        update_step_flow_config(conn, cursor.lastrowid, payload)
         validate_station_main_barcode(conn, station_id)
         return {"id": cursor.lastrowid}
 
@@ -449,8 +521,9 @@ def update_step(step_id, payload):
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
     if step_type not in STEP_TYPES:
-        raise ValueError("功能只能是扫码、螺丝或PLC接收")
+        raise ValueError("功能只能是扫码、螺丝、PLC接收、主条码切换或子物料绑定")
     with get_conn() as conn:
+        validate_flow_step_payload(conn, payload, step_type)
         old_row = conn.execute("SELECT station_id FROM steps WHERE id = ?", (step_id,)).fetchone()
         if is_main_barcode:
             clear_station_main_barcode(conn, station_id)
@@ -483,6 +556,7 @@ def update_step(step_id, payload):
                 step_id,
             ),
         )
+        update_step_flow_config(conn, step_id, payload)
         if old_row and old_row["station_id"] != station_id:
             validate_station_main_barcode(conn, old_row["station_id"])
         validate_station_main_barcode(conn, station_id)
@@ -500,14 +574,41 @@ def list_steps(station_id):
         ]
 
 
-def get_station_config(path):
-    parts = path.split("/")
-    project_name = unquote(parts[3])
-    station_name = unquote(parts[5])
+def station_config_step(step):
+    return {
+        "id": step.get("id"),
+        "name": step.get("name", "未命名工序"),
+        "type": step.get("type", SCAN_TYPE),
+        "required_count": step.get("required_count") or 0,
+        "barcode_start": step.get("barcode_start") or 1,
+        "barcode_end": step.get("barcode_end") or 7,
+        "expected_content": step.get("expected_content") or "",
+        "is_main_barcode": bool(step.get("is_main_barcode", False)),
+        **flow_step_config(step),
+        **plc_step_config(step),
+    }
+
+
+def get_station_config(project_or_path, station_name=None):
+    if station_name is None:
+        parts = project_or_path.split("/")
+        if len(parts) < 7 or parts[1:3] != ["api", "projects"] or parts[-1] != "config":
+            raise ValueError("工位配置请求路径不正确")
+        try:
+            stations_marker = parts.index("stations", 3, len(parts) - 1)
+        except ValueError as exc:
+            raise ValueError("工位配置请求路径不正确") from exc
+        project_name = unquote("/".join(parts[3:stations_marker]))
+        station_name = unquote("/".join(parts[stations_marker + 1:-1]))
+        if not project_name or not station_name:
+            raise ValueError("项目和工位不能为空")
+    else:
+        project_name = project_or_path
     with get_conn() as conn:
         row = conn.execute(
             """
-            SELECT stations.id AS station_id, projects.name AS project_name, stations.name AS station_name
+            SELECT projects.id AS project_id, stations.id AS station_id,
+                   projects.name AS project_name, stations.name AS station_name
             FROM stations
             JOIN projects ON projects.id = stations.project_id
             WHERE projects.name = ? AND stations.name = ?
@@ -518,20 +619,36 @@ def get_station_config(path):
             raise ValueError("未找到项目工位配置")
         steps = list_steps(row["station_id"])
     return {
+        "project_id": row["project_id"],
+        "station_id": row["station_id"],
         "product_name": f"{project_name} - {station_name}",
-        "steps": [
-            {
-                "name": step["name"],
-                "type": step["type"],
-                "required_count": step["required_count"],
-                "barcode_start": step["barcode_start"],
-                "barcode_end": step["barcode_end"],
-                "expected_content": step["expected_content"],
-                "is_main_barcode": bool(step["is_main_barcode"]),
-                **plc_step_config(step),
-            }
-            for step in steps
-        ],
+        "steps": [station_config_step(step) for step in steps],
+    }
+
+
+def get_station_config_by_ids(project_id, station_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            """
+            SELECT projects.id AS project_id, stations.id AS station_id,
+                   projects.name AS project_name, stations.name AS station_name
+            FROM stations
+            JOIN projects ON projects.id = stations.project_id
+            WHERE projects.id = ? AND stations.id = ?
+            """,
+            (project_id, station_id),
+        ).fetchone()
+        if not row:
+            return None
+        steps = list_steps(row["station_id"])
+    return {
+        "project_id": row["project_id"],
+        "station_id": row["station_id"],
+        "project_name": row["project_name"],
+        "station_name": row["station_name"],
+        "product_name": f"{row['project_name']} - {row['station_name']}",
+        "steps": [station_config_step(step) for step in steps],
+        "station_dependencies": product_flow.get_station_dependency(station_id),
     }
 
 
@@ -540,6 +657,90 @@ def normalize_main_barcode(payload, step_type: str) -> bool:
     if is_main_barcode and step_type not in (SCAN_TYPE, PLC_TYPE):
         raise ValueError("只有扫码工序或PLC接收工序可以设置为主条码")
     return is_main_barcode
+
+
+def update_step_flow_config(conn, step_id, payload):
+    conn.execute(
+        """
+        UPDATE steps
+        SET switch_require_old = ?, switch_require_new = ?,
+            switch_set_current = ?, switch_disable_old = ?,
+            bind_child_project_id = ?, bind_child_material_type = ?,
+            bind_required_count = ?, bind_required_station_ids = ?,
+            bind_require_parent_switch = ?, bind_allow_duplicate = ?,
+            bind_allow_unbind = ?
+        WHERE id = ?
+        """,
+        (
+            bool(payload.get("switch_require_old", True)),
+            bool(payload.get("switch_require_new", True)),
+            bool(payload.get("switch_set_current", True)),
+            bool(payload.get("switch_disable_old", True)),
+            int(payload.get("bind_child_project_id") or 0) or None,
+            payload.get("bind_child_material_type", ""),
+            max(int(payload.get("bind_required_count") or 1), 1),
+            product_flow.json_ids(payload.get("bind_required_station_ids")),
+            bool(payload.get("bind_require_parent_switch", True)),
+            bool(payload.get("bind_allow_duplicate", False)),
+            bool(payload.get("bind_allow_unbind", False)),
+            step_id,
+        ),
+    )
+
+
+def validate_flow_step_payload(conn, payload, step_type):
+    if step_type == BARCODE_SWITCH_TYPE:
+        if not bool(payload.get("switch_require_new", True)):
+            raise ValueError("主条码切换工序必须获取新主条码")
+        return
+    if step_type != MATERIAL_BIND_TYPE:
+        return
+    child_project_id = int(payload.get("bind_child_project_id") or 0)
+    child_type = str(payload.get("bind_child_material_type", "")).strip()
+    if not child_project_id:
+        raise ValueError("子物料绑定工序必须选择子物料项目")
+    if not child_type:
+        raise ValueError("子物料绑定工序必须填写子物料类型")
+    if not conn.execute(
+        "SELECT 1 FROM projects WHERE id = ?", (child_project_id,)
+    ).fetchone():
+        raise ValueError("子物料项目不存在")
+    for station_id in product_flow.int_list(
+        payload.get("bind_required_station_ids")
+    ):
+        station = conn.execute(
+            "SELECT project_id FROM stations WHERE id = ?",
+            (station_id,),
+        ).fetchone()
+        if not station:
+            raise ValueError(f"子物料要求工位不存在：{station_id}")
+        if int(station["project_id"]) != child_project_id:
+            raise ValueError("子物料要求工位不属于所选子物料项目")
+
+
+def flow_step_config(step):
+    keys = step.keys() if hasattr(step, "keys") else []
+
+    def value(name, default):
+        return step[name] if name in keys and step[name] is not None else default
+
+    return {
+        "switch_require_old": bool(value("switch_require_old", True)),
+        "switch_require_new": bool(value("switch_require_new", True)),
+        "switch_set_current": bool(value("switch_set_current", True)),
+        "switch_disable_old": bool(value("switch_disable_old", True)),
+        "bind_child_project_id": value("bind_child_project_id", None),
+        "bind_child_material_type": value("bind_child_material_type", ""),
+        "bind_required_count": int(value("bind_required_count", 1)),
+        "bind_required_station_ids": product_flow.int_list(
+            value("bind_required_station_ids", "[]")
+        ),
+        "bind_require_parent_switch": bool(
+            value("bind_require_parent_switch", True)
+        ),
+        "bind_allow_duplicate": bool(value("bind_allow_duplicate", False)),
+        "bind_allow_unbind": bool(value("bind_allow_unbind", False)),
+    }
 
 
 def station_number_from_name(name: str) -> int:
@@ -622,7 +823,17 @@ def validate_station_main_barcode(conn, station_id: int):
         """,
         (station_id, SCAN_TYPE, PLC_TYPE),
     ).fetchone()["total"]
+    flow_identity = conn.execute(
+        """
+        SELECT 1 FROM steps
+        WHERE station_id = ? AND type IN (?, ?)
+        LIMIT 1
+        """,
+        (station_id, BARCODE_SWITCH_TYPE, MATERIAL_BIND_TYPE),
+    ).fetchone()
     if main_count == 0:
+        if flow_identity:
+            return
         raise ValueError("每个工位必须配置一个主条码扫码工序")
     if main_count > 1:
         raise ValueError("每个工位只能配置一个主条码扫码工序")
@@ -667,6 +878,16 @@ def ensure_station_has_main_barcode(conn, station_id: int):
             (first_main["id"], station_id),
         )
         return
+    flow_identity = conn.execute(
+        """
+        SELECT 1 FROM steps
+        WHERE station_id = ? AND type IN (?, ?)
+        LIMIT 1
+        """,
+        (station_id, BARCODE_SWITCH_TYPE, MATERIAL_BIND_TYPE),
+    ).fetchone()
+    if flow_identity:
+        return
     first_scan = conn.execute(
         "SELECT id FROM steps WHERE station_id = ? AND type IN (?, ?) ORDER BY step_order, id LIMIT 1",
         (station_id, SCAN_TYPE, PLC_TYPE),
@@ -687,62 +908,117 @@ def find_project_station(conn, project_name, station_name):
 
 
 def check_station_completion(query):
+    project_id = query.get("project_id", [""])[0]
+    previous_station_id = query.get("previous_station_id", [""])[0]
     project = query.get("project", [""])[0]
     barcode = query.get("barcode", [""])[0]
     previous_station = query.get("previous_station", [""])[0]
+    product_instance_id = query.get("product_instance_id", [""])[0]
     with get_conn() as conn:
-        ids = find_project_station(conn, project, previous_station)
+        if project_id and previous_station_id:
+            ids = {
+                "project_id": int(project_id),
+                "station_id": int(previous_station_id),
+            }
+            valid = conn.execute(
+                "SELECT 1 FROM stations WHERE id = ? AND project_id = ?",
+                (ids["station_id"], ids["project_id"]),
+            ).fetchone()
+            if not valid:
+                return {"completed": False}
+        else:
+            ids = find_project_station(conn, project, previous_station)
         if not ids:
             return {"completed": False}
-        row = conn.execute(
-            """
-            SELECT 1 FROM station_completions
-            WHERE project_id = ? AND station_id = ? AND barcode = ?
-            """,
-            (ids["project_id"], ids["station_id"], barcode),
-        ).fetchone()
+        if product_instance_id:
+            row = conn.execute(
+                """
+                SELECT 1 FROM station_completions
+                WHERE project_id = ? AND station_id = ?
+                  AND (product_instance_id = ?
+                       OR (product_instance_id IS NULL AND barcode = ?))
+                """,
+                (
+                    ids["project_id"],
+                    ids["station_id"],
+                    int(product_instance_id),
+                    barcode,
+                ),
+            ).fetchone()
+        else:
+            row = conn.execute(
+                """
+                SELECT 1 FROM station_completions
+                WHERE project_id = ? AND station_id = ? AND barcode = ?
+                """,
+                (ids["project_id"], ids["station_id"], barcode),
+            ).fetchone()
     return {"completed": row is not None}
 
 
 def add_station_completion(payload):
-    project = payload.get("project", "")
-    station = payload.get("station", "")
     barcode = payload.get("barcode", "")
     completed_at = payload.get("completed_at") or now_text()
-    if not project or not station or not barcode:
-        raise ValueError("项目、工位、条码不能为空")
+    if not barcode:
+        raise ValueError("条码不能为空")
     with get_conn() as conn:
-        ids = find_project_station(conn, project, station)
-        if not ids:
-            raise ValueError("项目或工位不存在")
+        project_id, station_id = resolve_project_station_ids(conn, payload)
+        product_instance_id = product_flow.ensure_product_for_completion(
+            conn, payload, project_id, barcode
+        )
         if conn.db_type == "postgresql":
             conn.execute(
                 """
                 INSERT INTO station_completions
-                (project_id, station_id, barcode, completed_at)
-                VALUES (?, ?, ?, ?)
+                (project_id, station_id, barcode, product_instance_id, barcode_used, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 ON CONFLICT (project_id, station_id, barcode) DO NOTHING
                 """,
-                (ids["project_id"], ids["station_id"], barcode, completed_at),
+                (
+                    project_id,
+                    station_id,
+                    barcode,
+                    product_instance_id,
+                    payload.get("barcode_used") or barcode,
+                    completed_at,
+                ),
             )
         else:
             conn.execute(
                 """
                 INSERT OR REPLACE INTO station_completions
-                (project_id, station_id, barcode, completed_at)
-                VALUES (?, ?, ?, ?)
+                (project_id, station_id, barcode, product_instance_id, barcode_used, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (ids["project_id"], ids["station_id"], barcode, completed_at),
+                (
+                    project_id,
+                    station_id,
+                    barcode,
+                    product_instance_id,
+                    payload.get("barcode_used") or barcode,
+                    completed_at,
+                ),
             )
         conn.execute(
             """
             INSERT INTO scan_records
-            (project_id, station_id, barcode, step, result, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (project_id, station_id, barcode, product_instance_id, barcode_used,
+             step, result, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (ids["project_id"], ids["station_id"], barcode, "工位完成", "完成", "桌面端上报", completed_at),
+            (
+                project_id,
+                station_id,
+                barcode,
+                product_instance_id,
+                payload.get("barcode_used") or barcode,
+                "工位完成",
+                "完成",
+                "桌面端上报",
+                completed_at,
+            ),
         )
-    return {"ok": True}
+    return {"ok": True, "product_instance_id": product_instance_id}
 
 
 def add_scan_record(payload):
@@ -752,17 +1028,25 @@ def add_scan_record(payload):
     if not barcode:
         raise ValueError("条码不能为空")
     with get_conn() as conn:
-        ids = find_project_station(conn, project, station) if project and station else None
+        ids = None
+        if payload.get("project_id") and payload.get("station_id"):
+            project_id, station_id = resolve_project_station_ids(conn, payload)
+            ids = {"project_id": project_id, "station_id": station_id}
+        elif project and station:
+            ids = find_project_station(conn, project, station)
         conn.execute(
             """
             INSERT INTO scan_records
-            (project_id, station_id, barcode, step, result, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            (project_id, station_id, barcode, product_instance_id, barcode_used,
+             step, result, note, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ids["project_id"] if ids else None,
                 ids["station_id"] if ids else None,
                 barcode,
+                int(payload.get("product_instance_id") or 0) or None,
+                payload.get("barcode_used") or barcode,
                 payload.get("step", ""),
                 payload.get("result", "记录"),
                 payload.get("note", ""),
@@ -847,6 +1131,8 @@ def list_production_records(query):
             "id",
             "project_id",
             "station_id",
+            "product_instance_id",
+            "barcode_used",
             "main_barcode",
             "product_name",
             "station_name",
@@ -873,14 +1159,17 @@ def add_production_record(payload):
         cursor = conn.execute(
             """
             INSERT INTO station_work_records
-            (project_id, station_id, main_barcode, product_name, station_name, start_time, end_time,
+            (project_id, station_id, product_instance_id, barcode_used,
+             main_barcode, product_name, station_name, start_time, end_time,
              work_duration_seconds, total_steps, completed_steps, screw_required_count, screw_ok_count,
              screw_ng_count, result, operator, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
                 station_id,
+                int(payload.get("product_instance_id") or 0) or None,
+                payload.get("barcode_used") or payload.get("main_barcode", ""),
                 payload.get("main_barcode", ""),
                 payload.get("product_name", ""),
                 payload.get("station_name", ""),
@@ -909,6 +1198,8 @@ def list_step_records(query):
             "station_work_id",
             "project_id",
             "station_id",
+            "product_instance_id",
+            "barcode_used",
             "main_barcode",
             "step_name",
             "step_type",
@@ -934,15 +1225,18 @@ def add_step_record(payload):
         cursor = conn.execute(
             """
             INSERT INTO step_work_records
-            (station_work_id, project_id, station_id, main_barcode, step_name, step_type, step_order,
+            (station_work_id, project_id, station_id, product_instance_id, barcode_used,
+             main_barcode, step_name, step_type, step_order,
              start_time, end_time, duration_seconds, barcode, scan_result, screw_required_count,
              screw_ok_count, screw_ng_count, result, note)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.get("station_work_id"),
                 project_id,
                 station_id,
+                int(payload.get("product_instance_id") or 0) or None,
+                payload.get("barcode_used") or payload.get("barcode") or payload.get("main_barcode", ""),
                 payload.get("main_barcode", ""),
                 payload.get("step_name", ""),
                 payload.get("step_type", ""),
@@ -972,6 +1266,8 @@ def list_screw_records(query):
             "step_work_id",
             "project_id",
             "station_id",
+            "product_instance_id",
+            "barcode_used",
             "main_barcode",
             "step_name",
             "screw_index",
@@ -993,15 +1289,18 @@ def add_screw_record(payload):
         cursor = conn.execute(
             """
             INSERT INTO screw_action_records
-            (station_work_id, step_work_id, project_id, station_id, main_barcode, step_name, screw_index,
+            (station_work_id, step_work_id, project_id, station_id,
+             product_instance_id, barcode_used, main_barcode, step_name, screw_index,
              required_count, status_value, trigger_value, direction_value, result, is_counted, ng_reason)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 payload.get("station_work_id"),
                 payload.get("step_work_id"),
                 project_id,
                 station_id,
+                int(payload.get("product_instance_id") or 0) or None,
+                payload.get("barcode_used") or payload.get("main_barcode", ""),
                 payload.get("main_barcode", ""),
                 payload.get("step_name", ""),
                 payload.get("screw_index"),
@@ -1087,6 +1386,11 @@ def db_status():
         "step_work_records",
         "screw_action_records",
         "station_sessions",
+        "product_instances",
+        "barcode_aliases",
+        "barcode_switch_records",
+        "material_bindings",
+        "station_dependencies",
         "maintenance_logs",
         "client_releases",
         "client_update_logs",

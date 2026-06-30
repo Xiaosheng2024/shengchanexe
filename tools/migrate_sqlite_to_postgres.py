@@ -10,7 +10,22 @@ sys.path.insert(0, str(ROOT_DIR))
 from web_admin_app import database
 
 
-TABLES = ["projects", "stations", "steps", "scan_records", "station_completions"]
+DEFAULT_TABLES = ["projects", "stations", "steps", "scan_records", "station_completions"]
+MIGRATABLE_TABLES = [
+    "projects",
+    "stations",
+    "steps",
+    "scan_records",
+    "station_completions",
+    "station_work_records",
+    "step_work_records",
+    "screw_action_records",
+    "station_sessions",
+    "station_session_logs",
+    "maintenance_logs",
+    "client_releases",
+    "client_update_logs",
+]
 
 
 def sqlite_rows(sqlite_path: Path, table: str):
@@ -19,12 +34,12 @@ def sqlite_rows(sqlite_path: Path, table: str):
         return [dict(row) for row in conn.execute(f"SELECT * FROM {table} ORDER BY id").fetchall()]
 
 
-def target_has_data(conn):
-    return any(conn.execute(f"SELECT COUNT(*) AS total FROM {table}").fetchone()["total"] for table in TABLES)
+def target_has_data(conn, tables):
+    return any(conn.execute(f"SELECT COUNT(*) AS total FROM {table}").fetchone()["total"] for table in tables)
 
 
-def clear_target(conn):
-    for table in reversed(TABLES):
+def clear_target(conn, tables):
+    for table in reversed(tables):
         conn.execute(f"DELETE FROM {table}")
 
 
@@ -40,8 +55,8 @@ def insert_rows(conn, table: str, rows):
     return len(rows)
 
 
-def reset_sequences(conn):
-    for table in TABLES:
+def reset_sequences(conn, tables):
+    for table in tables:
         conn.execute(
             "SELECT setval(pg_get_serial_sequence(?, 'id'), COALESCE((SELECT MAX(id) FROM " + table + "), 1), true)",
             (table,),
@@ -52,7 +67,18 @@ def main():
     parser = argparse.ArgumentParser(description="Migrate MES SQLite data to PostgreSQL.")
     parser.add_argument("--sqlite", default=str(database.DB_PATH), help="SQLite database path, default quality_control.db")
     parser.add_argument("--force", action="store_true", help="Allow migration when PostgreSQL already has data")
+    parser.add_argument(
+        "--tables",
+        default=",".join(DEFAULT_TABLES),
+        help="Comma-separated tables to migrate",
+    )
     args = parser.parse_args()
+    tables = [item.strip() for item in args.tables.split(",") if item.strip()]
+    invalid_tables = sorted(set(tables) - set(MIGRATABLE_TABLES))
+    if not tables:
+        raise SystemExit("至少指定一张迁移表")
+    if invalid_tables:
+        raise SystemExit(f"不支持迁移的表：{', '.join(invalid_tables)}")
 
     sqlite_path = Path(args.sqlite)
     if not sqlite_path.exists():
@@ -64,19 +90,19 @@ def main():
 
     with database.get_conn() as conn:
         database.create_postgresql_schema(conn)
-        if target_has_data(conn):
+        if target_has_data(conn, tables):
             if not args.force:
                 raise SystemExit("目标 PostgreSQL 已有数据。如确认继续，请增加 --force")
-            clear_target(conn)
+            clear_target(conn, tables)
 
         counts = {}
-        for table in TABLES:
+        for table in tables:
             rows = sqlite_rows(sqlite_path, table)
             counts[table] = insert_rows(conn, table, rows)
-        reset_sequences(conn)
+        reset_sequences(conn, tables)
 
     print("SQLite 到 PostgreSQL 迁移完成")
-    for table in TABLES:
+    for table in tables:
         print(f"{table}: {counts[table]}")
 
 

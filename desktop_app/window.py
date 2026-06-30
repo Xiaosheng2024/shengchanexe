@@ -5,6 +5,7 @@ import subprocess
 import json
 import logging
 import sys
+import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
@@ -13,8 +14,8 @@ from time import monotonic
 from pathlib import Path
 from typing import List, Optional
 
-from PyQt5.QtCore import QDateTime, QMetaObject, QThread, Qt, QTimer, pyqtSignal
-from PyQt5.QtGui import QColor
+from PyQt5.QtCore import QDateTime, QEvent, QMetaObject, QThread, Qt, QTimer, pyqtSignal
+from PyQt5.QtGui import QColor, QKeyEvent
 from PyQt5.QtWidgets import (
     QApplication,
     QAbstractItemView,
@@ -45,15 +46,37 @@ from PyQt5.QtWidgets import (
 
 from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
 from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
-from shared.models import ProcessStep, ProductConfig, ProjectConfig, StationConfig, PLC, SCAN, SCREW
+from shared.models import (
+    BARCODE_SWITCH,
+    MATERIAL_BIND,
+    PLC,
+    SCAN,
+    SCREW,
+    ProcessStep,
+    ProductConfig,
+    ProjectConfig,
+    StationConfig,
+)
 
 
-APP_VERSION = "v0.9.0"
+APP_VERSION = "v0.9.2"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
 DEFAULT_TOOL_COMMAND_DELAY_MS = 50
 DEFAULT_TOOL_POLL_INTERVAL_MS = 100
+
+
+def normalize_server_url(value: str) -> str:
+    value = (value or "").strip().rstrip("/")
+    if not value:
+        return ""
+    if "://" not in value:
+        value = "http://" + value
+    parsed = urllib.parse.urlparse(value)
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        raise ValueError("服务器地址格式不正确，例如：http://mes-server:8000")
+    return value
 
 
 def runtime_data_dir() -> Path:
@@ -81,6 +104,13 @@ def as_bool(value, default=False):
     return str(value).strip().lower() in ("1", "true", "yes", "是")
 
 
+def as_optional_int(value):
+    try:
+        return int(value) if str(value).strip() else None
+    except (TypeError, ValueError):
+        return None
+
+
 class QualityControlWindow(QMainWindow):
     tool_worker_write_requested = pyqtSignal(int, int)
 
@@ -99,9 +129,15 @@ class QualityControlWindow(QMainWindow):
         self.is_switching_station = False
         self.current_project_id = self.current_project.name
         self.current_station_id = self.current_station.name
+        self.saved_project_id = None
+        self.saved_station_id = None
         self.station_session_id = None
         self.station_config_loaded = True
         self.current_barcode = ""
+        self.current_product_instance_id = None
+        self.pending_switch_old_barcode = ""
+        self.pending_bind_parent_barcode = ""
+        self.bound_child_barcodes = set()
         self.production_enabled = True
         self.screw_blocks: List[QLabel] = []
         self.warning_dialogs: List[QMessageBox] = []
@@ -113,7 +149,24 @@ class QualityControlWindow(QMainWindow):
         self.history_dialog: Optional[QDialog] = None
         self.tool_settings_dialog: Optional[QDialog] = None
         self.local_device_dialog: Optional[QDialog] = None
+        self.server_settings_dialog: Optional[QDialog] = None
         self.app_config_path = Path(app_config_path) if app_config_path else runtime_data_dir() / "config.ini"
+        self.scanner_global_capture_enabled = True
+        self.scanner_min_length = 6
+        self.scanner_max_interval_ms = 80
+        self.scanner_timeout_ms = 300
+        self.scanner_duplicate_ignore_ms = 500
+        self.scanner_allow_chinese_chars = False
+        self.scan_buffer = ""
+        self.last_key_time = 0.0
+        self.scan_start_time = 0.0
+        self.scan_sequence_fast = True
+        self.scan_key_events = []
+        self.scan_event_target = None
+        self._replaying_scanner_keys = False
+        self.last_barcode = ""
+        self.last_barcode_time = 0.0
+        self._scanner_event_filter_installed = False
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
         self.tool_thread: Optional[QThread] = None
@@ -143,10 +196,19 @@ class QualityControlWindow(QMainWindow):
         self.tool_lock_state = None
 
         self.build_ui()
+        self.load_scanner_settings()
+        self.update_scanner_hint()
         self.load_tool_settings()
         self.load_local_device_settings()
         self.refresh_project_station_selectors()
         self.load_station(self.current_project.name, self.current_station.name)
+        if not self.api_base_input.text().strip():
+            QTimer.singleShot(0, self.notify_missing_server_url)
+        app = QApplication.instance()
+        if app is not None:
+            app.installEventFilter(self)
+            self._scanner_event_filter_installed = True
+        QTimer.singleShot(0, self.set_english_keyboard_layout)
         QTimer.singleShot(1500, self.check_for_client_update)
 
     def default_projects(self) -> List[ProjectConfig]:
@@ -184,6 +246,11 @@ class QualityControlWindow(QMainWindow):
         title.setStyleSheet("font-size: 26px; font-weight: 700; padding: 8px;")
         root_layout.addWidget(title)
 
+        system_menu = self.menuBar().addMenu("系统设置")
+        server_settings_action = QAction("服务器设置", self)
+        server_settings_action.triggered.connect(self.open_server_settings_dialog)
+        system_menu.addAction(server_settings_action)
+
         help_menu = self.menuBar().addMenu("帮助")
         check_update_action = QAction("检查更新", self)
         check_update_action.triggered.connect(lambda: self.check_for_client_update(manual=True))
@@ -194,8 +261,9 @@ class QualityControlWindow(QMainWindow):
         self.mode_combo = QComboBox()
         self.mode_combo.addItems(["离线模式", "在线模式"])
         self.mode_combo.currentTextChanged.connect(self.change_mode)
-        self.api_base_input = QLineEdit("http://127.0.0.1:8000")
-        self.api_base_input.setPlaceholderText("网页端接口地址")
+        self.api_base_input = QLineEdit()
+        self.api_base_input.setPlaceholderText("未配置服务器地址")
+        self.api_base_input.setReadOnly(True)
         self.project_combo = QComboBox()
         self.project_combo.currentTextChanged.connect(self.on_project_selected)
         self.station_combo = QComboBox()
@@ -279,6 +347,7 @@ class QualityControlWindow(QMainWindow):
         self.barcode_input.setPlaceholderText("输入或扫码条码，按回车提交")
         self.barcode_input.setFixedHeight(40)
         self.barcode_input.setStyleSheet("font-size: 15px; padding: 4px 8px;")
+        self.barcode_input.setAttribute(Qt.WA_InputMethodEnabled, False)
         self.barcode_input.returnPressed.connect(self.handle_scan)
         self.scan_btn = QPushButton("扫码确认")
         self.scan_btn.setFixedSize(92, 40)
@@ -287,6 +356,17 @@ class QualityControlWindow(QMainWindow):
         scanner_row.addWidget(self.barcode_input, 1)
         scanner_row.addWidget(self.scan_btn)
         right_layout.addLayout(scanner_row)
+        self.scanner_hint_label = QLabel()
+        self.scanner_hint_label.setStyleSheet(
+            "font-size: 12px; color: #047857; padding: 0 4px;"
+        )
+        right_layout.addWidget(self.scanner_hint_label)
+        self.flow_scan_status_label = QLabel("")
+        self.flow_scan_status_label.setStyleSheet(
+            "font-size: 13px; font-weight: 700; color: #1d4ed8; padding: 2px 4px;"
+        )
+        self.flow_scan_status_label.setWordWrap(True)
+        right_layout.addWidget(self.flow_scan_status_label)
 
         self.screw_box = QGroupBox("螺丝数量提示")
         self.screw_grid = QGridLayout(self.screw_box)
@@ -461,6 +541,7 @@ class QualityControlWindow(QMainWindow):
 
         self.build_settings_dialog()
         self.build_local_device_dialog()
+        self.build_server_settings_dialog()
 
         self.setStyleSheet(
             "QGroupBox { font-size: 16px; font-weight: 600; border: 1px solid #d1d5db;"
@@ -547,6 +628,8 @@ class QualityControlWindow(QMainWindow):
         self.recompute_production_enabled()
         self.message_label.setText("在线模式：请先下载配置并占用工位" if self.online_mode else "离线模式：使用本地配置")
         self.refresh_work_area()
+        if self.online_mode and not self.api_base_input.text().strip():
+            self.notify_missing_server_url()
 
     def change_degraded_mode(self):
         if self.degraded_mode_checkbox.isChecked():
@@ -705,7 +788,19 @@ class QualityControlWindow(QMainWindow):
         project_name = self.current_project.name
         station_name = self.current_station.name
         try:
-            data = self.api_get(f"/api/projects/{urllib.parse.quote(project_name)}/stations/{urllib.parse.quote(station_name)}/config")
+            project_id = getattr(self.current_project, "id", None)
+            station_id = getattr(self.current_station, "id", None)
+            if project_id is not None and station_id is not None:
+                query = urllib.parse.urlencode(
+                    {"project_id": project_id, "station_id": station_id}
+                )
+                response = self.api_get(f"/api/client/station-config?{query}")
+                if response.get("code") != 1 or not response.get("data"):
+                    raise ValueError(response.get("msg") or "下载工位配置失败")
+                data = response["data"]
+            else:
+                query = urllib.parse.urlencode({"project": project_name, "station": station_name})
+                data = self.api_get(f"/api/station-config?{query}")
             product = self.product_from_api(data)
         except Exception as exc:
             QMessageBox.warning(self, "下载配置失败", str(exc))
@@ -741,7 +836,12 @@ class QualityControlWindow(QMainWindow):
             projects = []
             for project_item in data.get("projects", []):
                 stations = []
-                for station_name in project_item.get("stations", []):
+                station_items = project_item.get("station_items") or [
+                    {"id": None, "name": station_name}
+                    for station_name in project_item.get("stations", [])
+                ]
+                for station_item in station_items:
+                    station_name = station_item.get("name", "")
                     stations.append(
                         StationConfig(
                             station_name,
@@ -749,10 +849,20 @@ class QualityControlWindow(QMainWindow):
                                 f"{project_item.get('name', '项目')} - {station_name}",
                                 [ProcessStep("扫码首件条码", SCAN, is_main_barcode=True)],
                             ),
+                            id=station_item.get("id"),
                         )
                     )
                 if stations:
-                    projects.append(ProjectConfig(project_item.get("name", "未命名项目"), stations))
+                    projects.append(
+                        ProjectConfig(
+                            project_item.get("name", "未命名项目"),
+                            stations,
+                            id=project_item.get("id"),
+                            material_code=project_item.get("material_code", ""),
+                            product_type=project_item.get("product_type", "")
+                            or project_item.get("name", ""),
+                        )
+                    )
         except Exception as exc:
             QMessageBox.warning(self, "同步失败", str(exc))
             return
@@ -760,8 +870,14 @@ class QualityControlWindow(QMainWindow):
             QMessageBox.warning(self, "同步失败", "接口未返回项目工位")
             return
         self.projects = projects
-        self.current_project = projects[0]
-        self.current_station = projects[0].stations[0]
+        self.current_project = next(
+            (item for item in projects if item.id == self.saved_project_id),
+            projects[0],
+        )
+        self.current_station = next(
+            (item for item in self.current_project.stations if item.id == self.saved_station_id),
+            self.current_project.stations[0],
+        )
         self.refresh_project_station_selectors()
         self.load_station(self.current_project.name, self.current_station.name)
         self.message_label.setText("项目工位已同步，请选择工位后下载配置")
@@ -796,6 +912,23 @@ class QualityControlWindow(QMainWindow):
                     plc_timeout_seconds=int(item.get("plc_timeout_seconds", 3)),
                     plc_poll_interval_ms=int(item.get("plc_poll_interval_ms", 500)),
                     plc_barcode_wait_ok_timeout_seconds=int(item.get("plc_barcode_wait_ok_timeout_seconds", 30)),
+                    step_id=as_optional_int(item.get("id")),
+                    switch_require_old=as_bool(item.get("switch_require_old", True), True),
+                    switch_require_new=as_bool(item.get("switch_require_new", True), True),
+                    switch_set_current=as_bool(item.get("switch_set_current", True), True),
+                    switch_disable_old=as_bool(item.get("switch_disable_old", True), True),
+                    bind_child_project_id=as_optional_int(item.get("bind_child_project_id")),
+                    bind_child_material_type=item.get("bind_child_material_type", ""),
+                    bind_required_count=int(item.get("bind_required_count", 1)),
+                    bind_required_station_ids=[
+                        int(value)
+                        for value in item.get("bind_required_station_ids", [])
+                    ],
+                    bind_require_parent_switch=as_bool(
+                        item.get("bind_require_parent_switch", True), True
+                    ),
+                    bind_allow_duplicate=as_bool(item.get("bind_allow_duplicate", False)),
+                    bind_allow_unbind=as_bool(item.get("bind_allow_unbind", False)),
                 )
             )
         if not steps:
@@ -805,14 +938,17 @@ class QualityControlWindow(QMainWindow):
         return product
 
     def api_url(self, path: str) -> str:
-        base = self.api_base_input.text().strip().rstrip("/")
+        base = normalize_server_url(self.api_base_input.text())
         if not base:
-            raise ValueError("网页端接口地址为空")
-        return base + path
+            raise ValueError("未配置服务器地址，请在系统设置中配置 MES 服务器地址")
+        return urllib.parse.urljoin(base + "/", path)
 
     def api_get(self, path: str) -> dict:
-        with urllib.request.urlopen(self.api_url(path), timeout=3) as response:
-            return json.loads(response.read().decode("utf-8"))
+        try:
+            with urllib.request.urlopen(self.api_url(path), timeout=3) as response:
+                return json.loads(response.read().decode("utf-8"))
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(self.http_error_message(exc)) from None
 
     def api_post(self, path: str, payload: dict) -> dict:
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
@@ -822,8 +958,20 @@ class QualityControlWindow(QMainWindow):
             headers={"Content-Type": "application/json"},
             method="POST",
         )
-        with urllib.request.urlopen(request, timeout=3) as response:
-            return json.loads(response.read().decode("utf-8") or "{}")
+        try:
+            with urllib.request.urlopen(request, timeout=3) as response:
+                return json.loads(response.read().decode("utf-8") or "{}")
+        except urllib.error.HTTPError as exc:
+            raise RuntimeError(self.http_error_message(exc)) from None
+
+    @staticmethod
+    def http_error_message(exc) -> str:
+        try:
+            payload = json.loads(exc.read().decode("utf-8"))
+            detail = payload.get("error") or payload.get("msg") or payload.get("message")
+        except Exception:
+            detail = ""
+        return f"服务端响应错误 HTTP {exc.code}" + (f"：{detail}" if detail else "")
 
     def load_local_version(self) -> str:
         version_file = runtime_data_dir() / "VERSION"
@@ -847,7 +995,13 @@ class QualityControlWindow(QMainWindow):
         if not self.api_base_input.text().strip():
             return
         try:
-            data = self.api_get(f"/api/client-update/latest?client_version={urllib.parse.quote(self.client_version)}&channel={self.update_channel()}")
+            query = urllib.parse.urlencode(
+                {
+                    "client_version": self.client_version,
+                    "channel": self.update_channel(),
+                }
+            )
+            data = self.api_get(f"/api/client-update/latest?{query}")
         except Exception as exc:
             if manual:
                 QMessageBox.warning(self, "检查更新失败", str(exc))
@@ -991,7 +1145,10 @@ class QualityControlWindow(QMainWindow):
         return client_id
 
     def recompute_production_enabled(self):
+        was_enabled = self.production_enabled
         self.production_enabled = (not self.online_mode) or (self.station_config_loaded and self.station_session_acquired)
+        if self.production_enabled and not was_enabled:
+            QTimer.singleShot(0, self.set_english_keyboard_layout)
         return self.production_enabled
 
     def production_disabled_message(self) -> str:
@@ -1018,6 +1175,201 @@ class QualityControlWindow(QMainWindow):
         self.screw_ok_btn.setEnabled(False)
         self.message_label.setText(message)
         self.show_auto_close_warning("禁止生产", message)
+
+    def load_scanner_settings(self):
+        config = configparser.ConfigParser()
+        config.read(self.app_config_path, encoding="utf-8")
+        section = config["SCANNER"] if "SCANNER" in config else {}
+
+        def read_int(key, default, minimum):
+            try:
+                return max(minimum, int(section.get(key, default)))
+            except (TypeError, ValueError):
+                logging.warning("扫码枪配置 %s 无效，使用默认值 %s", key, default)
+                return default
+
+        self.scanner_global_capture_enabled = as_bool(
+            section.get("global_capture_enabled", True), True
+        )
+        self.scanner_min_length = read_int(
+            "min_length", self.scanner_min_length, 1
+        )
+        self.scanner_max_interval_ms = read_int(
+            "max_interval_ms", self.scanner_max_interval_ms, 1
+        )
+        self.scanner_timeout_ms = max(
+            self.scanner_max_interval_ms,
+            read_int("scan_timeout_ms", self.scanner_timeout_ms, 1),
+        )
+        self.scanner_duplicate_ignore_ms = read_int(
+            "duplicate_ignore_ms", self.scanner_duplicate_ignore_ms, 0
+        )
+        self.scanner_allow_chinese_chars = as_bool(
+            section.get("allow_chinese_chars", False), False
+        )
+
+    def update_scanner_hint(self):
+        if not hasattr(self, "scanner_hint_label"):
+            return
+        if self.scanner_global_capture_enabled:
+            text = "Zebra扫码枪：全局监听已开启，无需点击输入框　输入法：建议英文状态"
+        else:
+            text = "Zebra扫码枪：全局监听未开启，请点击条码输入框扫码"
+        self.scanner_hint_label.setText(text)
+
+    @staticmethod
+    def scanner_now_ms() -> float:
+        return monotonic() * 1000
+
+    def reset_scan_buffer(self):
+        self.scan_buffer = ""
+        self.last_key_time = 0.0
+        self.scan_start_time = 0.0
+        self.scan_sequence_fast = True
+        self.scan_key_events = []
+        self.scan_event_target = None
+
+    @staticmethod
+    def copy_key_event(event):
+        return QKeyEvent(
+            event.type(),
+            event.key(),
+            event.modifiers(),
+            event.text(),
+            event.isAutoRepeat(),
+            event.count(),
+        )
+
+    def replay_scan_key_events(self, final_event=None) -> bool:
+        target = self.scan_event_target
+        events = list(self.scan_key_events)
+        if final_event is not None:
+            events.append(self.copy_key_event(final_event))
+        if not isinstance(target, QWidget) or not events:
+            return False
+        self._replaying_scanner_keys = True
+        try:
+            for replay_event in events:
+                QApplication.sendEvent(target, replay_event)
+        finally:
+            self._replaying_scanner_keys = False
+        return True
+
+    def scanner_capture_paused(self) -> bool:
+        app = QApplication.instance()
+        if app is None:
+            return True
+        if app.activeModalWidget() is not None:
+            return True
+        active_window = app.activeWindow()
+        return active_window is not None and active_window is not self
+
+    def _capture_scanner_key_event(self, event, target=None) -> bool:
+        if not self.scanner_global_capture_enabled or self.scanner_capture_paused():
+            self.reset_scan_buffer()
+            return False
+        if event.modifiers() & (Qt.ControlModifier | Qt.AltModifier | Qt.MetaModifier):
+            self.replay_scan_key_events()
+            self.reset_scan_buffer()
+            return False
+
+        now = self.scanner_now_ms()
+        key = event.key()
+        if key in (Qt.Key_Return, Qt.Key_Enter):
+            if not self.scan_sequence_fast:
+                self.reset_scan_buffer()
+                return False
+            final_interval = now - self.last_key_time if self.last_key_time else 0
+            barcode = self.scan_buffer
+            is_scanner_input = (
+                len(barcode) >= self.scanner_min_length
+                and self.scan_sequence_fast
+                and (
+                    not self.last_key_time
+                    or final_interval <= self.scanner_max_interval_ms
+                )
+            )
+            if not is_scanner_input:
+                replayed = self.replay_scan_key_events(event)
+                self.reset_scan_buffer()
+                return replayed
+            self.reset_scan_buffer()
+            self.handle_scanned_barcode(barcode, source="global")
+            event.accept()
+            return True
+
+        text = event.text()
+        if not text or not text.isprintable():
+            return False
+        if not self.scan_sequence_fast:
+            if self.last_key_time and now - self.last_key_time <= self.scanner_timeout_ms:
+                self.last_key_time = now
+                return False
+            self.reset_scan_buffer()
+        if self.last_key_time and now - self.last_key_time > self.scanner_timeout_ms:
+            self.replay_scan_key_events()
+            self.reset_scan_buffer()
+        if not self.scan_buffer:
+            self.scan_start_time = now
+            self.scan_sequence_fast = True
+            self.scan_event_target = target
+        elif now - self.last_key_time > self.scanner_max_interval_ms:
+            self.scan_sequence_fast = False
+        self.scan_buffer += text
+        self.scan_key_events.append(self.copy_key_event(event))
+        if len(self.scan_buffer) > 4096:
+            self.replay_scan_key_events()
+            self.reset_scan_buffer()
+            return True
+        self.last_key_time = now
+        if not self.scan_sequence_fast:
+            self.replay_scan_key_events()
+            self.scan_buffer = ""
+            self.scan_key_events = []
+        return True
+
+    def eventFilter(self, watched, event):
+        if self._replaying_scanner_keys:
+            return super().eventFilter(watched, event)
+        if watched is self.barcode_input and event.type() == QEvent.FocusIn:
+            QTimer.singleShot(0, self.set_english_keyboard_layout)
+        if (
+            event.type() == QEvent.KeyPress
+            and isinstance(watched, QWidget)
+            and watched.window() is self
+        ):
+            if self._capture_scanner_key_event(event, watched):
+                return True
+        return super().eventFilter(watched, event)
+
+    def keyPressEvent(self, event):
+        if not self._scanner_event_filter_installed:
+            if self._capture_scanner_key_event(event, self.focusWidget()):
+                return
+        super().keyPressEvent(event)
+
+    def changeEvent(self, event):
+        super().changeEvent(event)
+        if event.type() == QEvent.ActivationChange and self.isActiveWindow():
+            QTimer.singleShot(0, self.set_english_keyboard_layout)
+
+    def set_english_keyboard_layout(self) -> bool:
+        if sys.platform != "win32":
+            return True
+        try:
+            import ctypes
+
+            user32 = ctypes.windll.user32
+            layout = user32.LoadKeyboardLayoutW("00000409", 1)
+            if not layout:
+                raise OSError("LoadKeyboardLayoutW 返回空句柄")
+            user32.ActivateKeyboardLayout(layout, 0)
+            if self.winId():
+                user32.PostMessageW(int(self.winId()), 0x0050, 0, layout)
+            return True
+        except Exception as exc:
+            logging.warning("切换英文键盘布局失败：%s", exc)
+            return False
 
     def station_session_payload(self) -> dict:
         project_id = getattr(self.current_project, "id", None) or self.current_project.name
@@ -1440,6 +1792,97 @@ class QualityControlWindow(QMainWindow):
         button_row.addWidget(cancel_btn)
         layout.addLayout(button_row)
 
+    def build_server_settings_dialog(self):
+        self.server_settings_dialog = QDialog(self)
+        self.server_settings_dialog.setWindowTitle("服务器设置")
+        self.server_settings_dialog.resize(520, 190)
+        layout = QVBoxLayout(self.server_settings_dialog)
+        form = QFormLayout()
+        self.server_url_input = QLineEdit()
+        self.server_url_input.setPlaceholderText("例如：http://mes-server:8000")
+        form.addRow("MES服务器地址", self.server_url_input)
+        layout.addLayout(form)
+
+        note = QLabel("服务器搬迁后只需修改此地址；修改地址不会改变本机 client_id。")
+        note.setWordWrap(True)
+        layout.addWidget(note)
+
+        button_row = QHBoxLayout()
+        test_btn = QPushButton("测试连接")
+        save_btn = QPushButton("保存")
+        cancel_btn = QPushButton("取消")
+        test_btn.clicked.connect(self.test_server_connection)
+        save_btn.clicked.connect(self.save_server_settings_from_dialog)
+        cancel_btn.clicked.connect(self.server_settings_dialog.reject)
+        button_row.addStretch(1)
+        button_row.addWidget(test_btn)
+        button_row.addWidget(save_btn)
+        button_row.addWidget(cancel_btn)
+        layout.addLayout(button_row)
+
+    def notify_missing_server_url(self):
+        if self.api_base_input.text().strip():
+            return
+        self.message_label.setText("未配置服务器地址，请在系统设置中配置 MES 服务器地址")
+        QMessageBox.warning(self, "服务器未配置", "未配置服务器地址，请在系统设置中配置 MES 服务器地址。")
+
+    def open_server_settings_dialog(self):
+        self.server_url_input.setText(self.api_base_input.text().strip())
+        self.server_settings_dialog.show()
+        self.server_settings_dialog.raise_()
+        self.server_settings_dialog.activateWindow()
+
+    def persist_server_url(self, value: str) -> str:
+        server_url = normalize_server_url(value)
+        if not server_url:
+            raise ValueError("服务器地址不能为空")
+        config = configparser.ConfigParser()
+        if self.app_config_path.exists():
+            config.read(self.app_config_path, encoding="utf-8")
+        if "SERVER" not in config:
+            config["SERVER"] = {}
+        config["SERVER"]["url"] = server_url
+        if "LOCAL_DEVICE" in config:
+            config["LOCAL_DEVICE"].pop("mes_server", None)
+        self.app_config_path.parent.mkdir(parents=True, exist_ok=True)
+        with self.app_config_path.open("w", encoding="utf-8") as file:
+            config.write(file)
+        self.api_base_input.setText(server_url)
+        self.local_mes_server_label.setText(server_url)
+        return server_url
+
+    def save_server_settings_from_dialog(self):
+        if self.online_mode and self.station_session_acquired:
+            QMessageBox.warning(self, "暂不能修改", "当前工位已占用，请先切换到离线模式或释放工位。")
+            return
+        try:
+            server_url = self.persist_server_url(self.server_url_input.text())
+        except (OSError, ValueError) as exc:
+            QMessageBox.warning(self, "保存失败", str(exc))
+            return
+        self.message_label.setText(f"MES服务器地址已保存：{server_url}")
+        self.server_settings_dialog.accept()
+        self.test_server_connection(server_url)
+
+    def test_server_connection(self, server_url=None):
+        try:
+            base = normalize_server_url(
+                server_url if isinstance(server_url, str) else self.server_url_input.text()
+            )
+            if not base:
+                raise ValueError("服务器地址不能为空")
+            url = urllib.parse.urljoin(base + "/", "/api/projects")
+            with urllib.request.urlopen(url, timeout=3) as response:
+                if response.status != 200:
+                    raise RuntimeError(f"HTTP {response.status}")
+                json.loads(response.read().decode("utf-8"))
+        except Exception as exc:
+            QMessageBox.warning(self, "连接失败", f"无法连接 MES 服务器：{exc}")
+            return False
+        self.statusBar().showMessage("MES服务器连接成功", 5000)
+        QMessageBox.information(self, "连接成功", f"已连接 MES 服务器：{base}")
+        return True
+
     def open_local_device_dialog(self):
         self.local_mes_server_label.setText(self.api_base_input.text())
         self.local_project_station_label.setText(f"{self.current_project.name} / {self.current_station.name}")
@@ -1452,9 +1895,19 @@ class QualityControlWindow(QMainWindow):
             return
         config = configparser.ConfigParser()
         config.read(self.app_config_path, encoding="utf-8")
+        server_url = config.get("SERVER", "url", fallback="").strip()
+        if not server_url and "LOCAL_DEVICE" in config:
+            server_url = config["LOCAL_DEVICE"].get("mes_server", "").strip()
+        if server_url:
+            try:
+                self.api_base_input.setText(normalize_server_url(server_url))
+            except ValueError as exc:
+                logging.warning("忽略无效的 MES 服务器地址：%s", exc)
         if "LOCAL_DEVICE" not in config:
             return
         local = config["LOCAL_DEVICE"]
+        self.saved_project_id = as_optional_int(local.get("project_id", ""))
+        self.saved_station_id = as_optional_int(local.get("station_id", ""))
         self.local_auto_sync_checkbox.setChecked(local.getboolean("auto_sync_config", fallback=True))
         self.local_plc_override_checkbox.setChecked(local.getboolean("plc_override_enabled", fallback=False))
         self.local_plc_ip_input.setText(local.get("plc_ip", self.local_plc_ip_input.text()))
@@ -1467,12 +1920,19 @@ class QualityControlWindow(QMainWindow):
             config.read(self.app_config_path, encoding="utf-8")
         if "LOCAL_DEVICE" not in config:
             config["LOCAL_DEVICE"] = {}
+        if "SERVER" not in config:
+            config["SERVER"] = {}
+        server_url = normalize_server_url(self.api_base_input.text())
+        if server_url:
+            config["SERVER"]["url"] = server_url
+        config["LOCAL_DEVICE"].pop("mes_server", None)
         config["LOCAL_DEVICE"].update(
             {
-                "mes_server": self.api_base_input.text().strip(),
                 "client_id": self.station_session_client_id,
                 "project": self.current_project.name,
                 "station": self.current_station.name,
+                "project_id": str(getattr(self.current_project, "id", None) or ""),
+                "station_id": str(getattr(self.current_station, "id", None) or ""),
                 "auto_sync_config": str(self.local_auto_sync_checkbox.isChecked()).lower(),
                 "plc_override_enabled": str(self.local_plc_override_checkbox.isChecked()).lower(),
                 "plc_ip": self.local_plc_ip_input.text().strip(),
@@ -1543,6 +2003,10 @@ class QualityControlWindow(QMainWindow):
         self.step_started_at = datetime.now()
         self.last_voice_step_key = None
         self.current_barcode = ""
+        self.current_product_instance_id = None
+        self.pending_switch_old_barcode = ""
+        self.pending_bind_parent_barcode = ""
+        self.bound_child_barcodes = set()
         self.waiting_tool_trigger_reset = False
         self.tool_connection_rearming = self.is_tool_worker_running()
         self.tool_ng_locked = False
@@ -1551,6 +2015,7 @@ class QualityControlWindow(QMainWindow):
             self.tool_admin_unlock_btn.setEnabled(False)
         self.barcode_input.clear()
         self.message_label.setText("等待第1工序条码进入")
+        self.flow_scan_status_label.setText("")
         if update_table:
             self.populate_step_table()
         self.refresh_work_area()
@@ -1593,7 +2058,32 @@ class QualityControlWindow(QMainWindow):
         else:
             self.current_step_label.setText(f"当前工序：{current_step.name}")
             self.screw_ok_btn.setEnabled(self.production_enabled and current_step.step_type == SCREW)
-            self.barcode_input.setEnabled(self.production_enabled and current_step.step_type == SCAN)
+            self.barcode_input.setEnabled(
+                self.production_enabled
+                and current_step.step_type
+                in (SCAN, BARCODE_SWITCH, MATERIAL_BIND)
+            )
+            if current_step.step_type == BARCODE_SWITCH:
+                old_status = (
+                    f"已扫描：{self.pending_switch_old_barcode}"
+                    if self.pending_switch_old_barcode
+                    else "未扫描"
+                )
+                self.flow_scan_status_label.setText(
+                    f"旧主条码：{old_status}　新主条码：未扫描"
+                )
+            elif current_step.step_type == MATERIAL_BIND:
+                parent_status = (
+                    f"已扫描：{self.pending_bind_parent_barcode}"
+                    if self.pending_bind_parent_barcode
+                    else "未扫描"
+                )
+                self.flow_scan_status_label.setText(
+                    f"父件主条码：{parent_status}　"
+                    f"子件：{current_step.completed_count}/{current_step.bind_required_count}"
+                )
+            else:
+                self.flow_scan_status_label.setText("")
         self.render_screw_blocks(current_step)
 
     def render_screw_blocks(self, step: Optional[ProcessStep]):
@@ -1656,6 +2146,11 @@ class QualityControlWindow(QMainWindow):
         for step in self.current_product.steps:
             if step.step_type in (SCAN, PLC) and step.is_main_barcode:
                 return step
+        if any(
+            step.step_type in (BARCODE_SWITCH, MATERIAL_BIND)
+            for step in self.current_product.steps
+        ):
+            return None
         return next((step for step in self.current_product.steps if step.step_type in (SCAN, PLC)), None)
 
     def ensure_main_barcode(self, product: ProductConfig, notify: bool = False):
@@ -1664,6 +2159,11 @@ class QualityControlWindow(QMainWindow):
             return
         main_steps = [step for step in scan_steps if step.is_main_barcode]
         if len(main_steps) == 1:
+            return
+        if not main_steps and any(
+            step.step_type in (BARCODE_SWITCH, MATERIAL_BIND)
+            for step in product.steps
+        ):
             return
         first_scan = main_steps[0] if main_steps else scan_steps[0]
         for step in scan_steps:
@@ -1674,13 +2174,70 @@ class QualityControlWindow(QMainWindow):
             if hasattr(self, "warning_dialogs"):
                 self.show_auto_close_warning("主条码临时配置", message)
 
+    @staticmethod
+    def clean_scanned_barcode(barcode: str) -> str:
+        return "".join(
+            character
+            for character in str(barcode or "")
+            if character not in "\r\n\t" and character.isprintable()
+        ).strip()
+
+    @staticmethod
+    def barcode_contains_chinese(barcode: str) -> bool:
+        return any("\u4e00" <= character <= "\u9fff" for character in barcode)
+
+    def handle_scanned_barcode(self, barcode: str, source: str = "input") -> bool:
+        barcode = self.clean_scanned_barcode(barcode)
+        if not barcode:
+            self.message_label.setText("请先输入或扫描条码")
+            return False
+        if (
+            not self.scanner_allow_chinese_chars
+            and self.barcode_contains_chinese(barcode)
+        ):
+            message = "检测到扫码内容包含中文字符，请确认输入法为英文状态。"
+            self.message_label.setText(message)
+            self.show_auto_close_warning("扫码内容异常", message)
+            logging.warning("拒绝包含中文字符的扫码内容，来源=%s", source)
+            return False
+
+        now = self.scanner_now_ms()
+        if (
+            barcode == self.last_barcode
+            and now - self.last_barcode_time <= self.scanner_duplicate_ignore_ms
+        ):
+            logging.info(
+                "忽略重复扫码，来源=%s，间隔=%.0fms，条码=%s",
+                source,
+                now - self.last_barcode_time,
+                barcode,
+            )
+            self.barcode_input.clear()
+            return False
+        self.last_barcode = barcode
+        self.last_barcode_time = now
+        self.barcode_input.setText(barcode)
+        self._process_scanned_barcode()
+        return True
+
     def handle_scan(self):
+        return self.handle_scanned_barcode(
+            self.barcode_input.text(), source="input"
+        )
+
+    def _process_scanned_barcode(self):
         if not self.ensure_station_session_for_production():
             return
         step = self.current_step()
         if step is None:
             self.reset_current_product()
             step = self.current_step()
+        if step is not None and step.step_type == BARCODE_SWITCH:
+            self.handle_barcode_switch_scan()
+            return
+        if step is not None and step.step_type == MATERIAL_BIND:
+            self.handle_material_bind_scan()
+            return
         if step is None or step.step_type != SCAN:
             self.message_label.setText("当前工序不接受扫码")
             return
@@ -1709,9 +2266,13 @@ class QualityControlWindow(QMainWindow):
         main_barcode_step = self.get_main_barcode_step()
         is_main_barcode_step = step is main_barcode_step
         if is_main_barcode_step:
-            if self.should_check_previous_station() and not self.verify_previous_station_complete(barcode):
+            if self.online_mode and getattr(self.current_station, "id", None):
+                if not self.resolve_and_verify_main_barcode(barcode):
+                    return
+            elif self.should_check_previous_station() and not self.verify_previous_station_complete(barcode):
                 return
-            self.current_barcode = barcode
+            else:
+                self.current_barcode = barcode
 
         self.add_history_record(step, "完成", barcode, "扫码复核通过", completed=True)
         self.play_ok_sound()
@@ -1719,6 +2280,190 @@ class QualityControlWindow(QMainWindow):
         self.message_label.setText(f"{step.name} 已完成")
         self.barcode_input.clear()
         self.advance_step()
+
+    def resolve_and_verify_main_barcode(self, barcode: str) -> bool:
+        create_if_missing = self.previous_station() is None
+        try:
+            identity = self.api_post(
+                "/api/product-flow/resolve-barcode",
+                {
+                    "project_id": getattr(self.current_project, "id", None),
+                    "barcode": barcode,
+                    "material_code": self.current_project.material_code,
+                    "product_type": self.current_project.product_type
+                    or self.current_project.name,
+                    "create_if_missing": create_if_missing,
+                },
+            )
+        except Exception as exc:
+            self.show_flow_error(f"主条码解析失败：{exc}")
+            return False
+        if not identity.get("found") or not identity.get("allowed_production"):
+            self.show_flow_error(identity.get("message") or "主条码无效")
+            return False
+        if int(identity.get("project_id") or 0) != int(
+            getattr(self.current_project, "id", 0) or 0
+        ):
+            self.show_flow_error("该主条码不属于当前项目")
+            return False
+        if not self.verify_station_entry_allowed(identity["product_instance_id"]):
+            return False
+        self.current_product_instance_id = identity["product_instance_id"]
+        self.current_barcode = identity.get("current_barcode") or barcode
+        return True
+
+    def verify_station_entry_allowed(self, product_instance_id) -> bool:
+        if not self.should_check_previous_station():
+            return True
+        try:
+            verification = self.api_post(
+                "/api/product-flow/verify-entry",
+                {
+                    "product_instance_id": product_instance_id,
+                    "station_id": getattr(self.current_station, "id", None),
+                },
+            )
+        except Exception as exc:
+            self.show_flow_error(f"工位前置条件校验失败：{exc}")
+            return False
+        if verification.get("allowed"):
+            return True
+        self.show_flow_error(
+            verification.get("message") or "不满足工位前置条件"
+        )
+        return False
+
+    def show_flow_error(self, message: str):
+        self.message_label.setText(message)
+        self.show_auto_close_warning("工艺流转校验失败", message)
+
+    def handle_barcode_switch_scan(self):
+        step = self.current_step()
+        barcode = self.barcode_input.text().strip()
+        if not barcode:
+            self.message_label.setText("请先输入或扫描条码")
+            return
+        if not self.pending_switch_old_barcode:
+            if self.current_barcode and barcode != self.current_barcode:
+                self.show_flow_error("旧主条码必须是当前产品的主条码")
+                return
+            if not self.current_barcode:
+                if self.online_mode and not self.resolve_and_verify_main_barcode(barcode):
+                    return
+                if not self.online_mode:
+                    self.current_barcode = barcode
+            if barcode != self.current_barcode:
+                self.show_flow_error("旧主条码必须是当前产品的主条码")
+                return
+            self.pending_switch_old_barcode = barcode
+            self.barcode_input.clear()
+            self.message_label.setText("旧主条码已确认，请扫描新主条码")
+            self.refresh_work_area()
+            return
+        old_barcode = self.pending_switch_old_barcode
+        new_barcode = barcode
+        if new_barcode == old_barcode:
+            self.show_flow_error("新主条码不能与旧主条码相同")
+            return
+        if self.online_mode:
+            try:
+                result = self.api_post(
+                    "/api/product-flow/switch-barcode",
+                    {
+                        "project_id": getattr(self.current_project, "id", None),
+                        "station_id": getattr(self.current_station, "id", None),
+                        "step_id": step.step_id,
+                        "product_instance_id": self.current_product_instance_id,
+                        "old_barcode": old_barcode,
+                        "new_barcode": new_barcode,
+                        "set_current": step.switch_set_current,
+                        "disable_old": step.switch_disable_old,
+                    },
+                )
+            except Exception as exc:
+                self.show_flow_error(str(exc))
+                return
+            self.current_product_instance_id = result["product_instance_id"]
+        self.current_barcode = (
+            result.get("current_barcode", new_barcode)
+            if self.online_mode
+            else new_barcode
+        )
+        self.pending_switch_old_barcode = ""
+        step.done = True
+        self.barcode_input.clear()
+        message = f"主条码已从 {old_barcode} 切换为 {new_barcode}"
+        self.add_history_record(step, "完成", new_barcode, message, completed=True)
+        self.message_label.setText(message)
+        self.play_ok_sound()
+        self.advance_step()
+
+    def handle_material_bind_scan(self):
+        step = self.current_step()
+        barcode = self.barcode_input.text().strip()
+        if not barcode:
+            self.message_label.setText("请先输入或扫描条码")
+            return
+        if not self.pending_bind_parent_barcode:
+            if not self.current_barcode:
+                if self.online_mode and not self.resolve_and_verify_main_barcode(barcode):
+                    return
+                self.current_barcode = barcode
+            if barcode != self.current_barcode:
+                self.show_flow_error("父件条码必须是当前产品主条码")
+                return
+            self.pending_bind_parent_barcode = barcode
+            self.barcode_input.clear()
+            self.message_label.setText("父件主条码已确认，请扫描子物料主条码")
+            self.refresh_work_area()
+            return
+        if barcode in self.bound_child_barcodes:
+            self.show_flow_error("该子物料已在当前绑定工序扫描")
+            return
+        if self.online_mode:
+            try:
+                self.api_post(
+                    "/api/product-flow/bind-material",
+                    {
+                        "project_id": getattr(self.current_project, "id", None),
+                        "station_id": getattr(self.current_station, "id", None),
+                        "step_id": step.step_id,
+                        "parent_barcode": self.pending_bind_parent_barcode,
+                        "child_barcode": barcode,
+                        "child_project_id": step.bind_child_project_id,
+                        "child_material_type": step.bind_child_material_type,
+                        "required_station_ids": step.bind_required_station_ids,
+                        "require_parent_switch": step.bind_require_parent_switch,
+                        "allow_duplicate": step.bind_allow_duplicate,
+                    },
+                )
+            except Exception as exc:
+                self.show_flow_error(str(exc))
+                return
+        self.bound_child_barcodes.add(barcode)
+        step.completed_count += 1
+        self.barcode_input.clear()
+        self.add_history_record(
+            step,
+            "完成",
+            barcode,
+            f"子物料 {barcode} 已绑定到 {self.current_barcode}",
+            completed=step.completed_count >= step.bind_required_count,
+        )
+        if step.completed_count >= step.bind_required_count:
+            step.done = True
+            self.pending_bind_parent_barcode = ""
+            self.message_label.setText(
+                f"B物料 {barcode} 已绑定到 A物料 {self.current_barcode}"
+            )
+            self.play_ok_sound()
+            self.advance_step()
+        else:
+            self.message_label.setText(
+                f"子物料绑定成功：{step.completed_count}/{step.bind_required_count}，"
+                "请继续扫描子物料"
+            )
+            self.refresh_work_area()
 
     def handle_screw_ok(self):
         if not self.ensure_station_session_for_production():
@@ -2009,7 +2754,21 @@ class QualityControlWindow(QMainWindow):
 
     def complete_plc_step(self, step: ProcessStep, main_barcode: str, main_barcode_hex: str, parts_ok_before: int, parts_ok_after: int):
         if step.is_main_barcode:
-            if self.should_check_previous_station() and not self.verify_previous_station_complete(main_barcode):
+            if (
+                self.online_mode
+                and getattr(self.current_station, "id", None)
+                and not self.resolve_and_verify_main_barcode(main_barcode)
+            ):
+                self.add_history_record(step, "异常", main_barcode, "PLC主条码不满足工位前置条件", completed=False)
+                self.plc_pending_main_barcode = ""
+                self.plc_waiting_parts_ok = False
+                self.plc_last_main_barcode = ""
+                return
+            if (
+                not getattr(self.current_station, "id", None)
+                and self.should_check_previous_station()
+                and not self.verify_previous_station_complete(main_barcode)
+            ):
                 self.add_history_record(step, "异常", main_barcode, "上一工位未完成，PLC主条码不能进入当前工位", completed=False)
                 self.plc_pending_main_barcode = ""
                 self.plc_waiting_parts_ok = False
@@ -2050,6 +2809,10 @@ class QualityControlWindow(QMainWindow):
             return
         flow_barcode = self.current_barcode or main_barcode
         payload = {
+            "project_id": getattr(self.current_project, "id", None),
+            "station_id": getattr(self.current_station, "id", None),
+            "product_instance_id": self.current_product_instance_id,
+            "barcode_used": main_barcode,
             "project": self.current_project.name,
             "station": self.current_station.name,
             "main_barcode": flow_barcode,
@@ -2460,6 +3223,10 @@ class QualityControlWindow(QMainWindow):
             self.current_product.reset()
             self.current_step_index = 0
             self.current_barcode = ""
+            self.current_product_instance_id = None
+            self.pending_switch_old_barcode = ""
+            self.pending_bind_parent_barcode = ""
+            self.bound_child_barcodes = set()
             self.waiting_tool_trigger_reset = False
             self.tool_ng_locked = False
             self.tool_ng_dialog_open = False
@@ -2478,20 +3245,61 @@ class QualityControlWindow(QMainWindow):
         return int(digits) if digits else 1
 
     def previous_station_name(self) -> str:
-        number = self.station_number(self.current_station.name)
-        return f"工位{max(number - 1, 1)}"
+        station = self.previous_station()
+        return station.name if station else ""
+
+    def previous_station(self):
+        stations = self.current_project.stations
+        current_id = getattr(self.current_station, "id", None)
+        for index, station in enumerate(stations):
+            same_station = station is self.current_station
+            if current_id is not None:
+                same_station = getattr(station, "id", None) == current_id
+            elif not same_station:
+                same_station = station.name == self.current_station.name
+            if same_station:
+                if index > 0:
+                    return stations[index - 1]
+                break
+        # Compatibility for old local configurations that only identify stations
+        # by names such as "工位2" and do not carry server IDs.
+        station_number = self.station_number(self.current_station.name)
+        if current_id is None and station_number > 1:
+            previous_number = station_number - 1
+            return next(
+                (
+                    station
+                    for station in stations
+                    if station is not self.current_station
+                    and self.station_number(station.name) == previous_number
+                ),
+                StationConfig(f"工位{previous_number}", self.current_station.product),
+            )
+        return None
 
     def verify_previous_station_complete(self, barcode: str) -> bool:
-        if self.station_number(self.current_station.name) <= 1:
+        previous_station = self.previous_station()
+        if previous_station is None:
             return True
         try:
-            query = urllib.parse.urlencode(
-                {
-                    "project": self.current_project.name,
-                    "barcode": barcode,
-                    "previous_station": self.previous_station_name(),
-                }
-            )
+            query_params = {"barcode": barcode}
+            project_id = getattr(self.current_project, "id", None)
+            previous_station_id = getattr(previous_station, "id", None)
+            if project_id is not None and previous_station_id is not None:
+                query_params.update(
+                    {
+                        "project_id": project_id,
+                        "previous_station_id": previous_station_id,
+                    }
+                )
+            else:
+                query_params.update(
+                    {
+                        "project": self.current_project.name,
+                        "previous_station": previous_station.name,
+                    }
+                )
+            query = urllib.parse.urlencode(query_params)
             data = self.api_get(f"/api/station-completions/check?{query}")
         except Exception as exc:
             message = f"前工位完成状态查询失败：{exc}"
@@ -2519,18 +3327,29 @@ class QualityControlWindow(QMainWindow):
             self.show_auto_close_warning("主条码缺失", message)
             return False
         payload = {
+            "project_id": getattr(self.current_project, "id", None),
+            "station_id": getattr(self.current_station, "id", None),
+            "product_instance_id": self.current_product_instance_id,
+            "barcode_used": self.current_barcode,
             "project": self.current_project.name,
             "station": self.current_station.name,
             "barcode": self.current_barcode,
             "completed_at": datetime.now().isoformat(timespec="seconds"),
         }
         try:
-            self.api_post("/api/station-completions", payload)
+            result = self.api_post("/api/station-completions", payload)
+            if not self.current_product_instance_id:
+                self.current_product_instance_id = result.get("product_instance_id")
         except Exception as exc:
             self.message_label.setText(f"工位完成上报失败：{exc}")
+            return False
         return True
 
     def closeEvent(self, event):
+        app = QApplication.instance()
+        if app is not None and self._scanner_event_filter_installed:
+            app.removeEventFilter(self)
+            self._scanner_event_filter_installed = False
         self.stop_tool_worker()
         self.stop_plc_worker()
         self.release_station_session()
@@ -2539,6 +3358,7 @@ class QualityControlWindow(QMainWindow):
     def prompt_current_step_start(self):
         if not self.ensure_production_enabled():
             return
+        self.set_english_keyboard_layout()
         step = self.current_step()
         if step is None:
             return
@@ -2556,6 +3376,16 @@ class QualityControlWindow(QMainWindow):
                 self.start_plc_worker(step)
             else:
                 self.message_label.setText("PLC接收工序需要在线模式和服务端工位占用")
+        elif step.step_type == BARCODE_SWITCH:
+            self.stop_plc_worker()
+            self.lock_tool()
+            self.message_label.setText("主条码切换：请扫描旧主条码")
+            self.speak("请扫描旧主条码")
+        elif step.step_type == MATERIAL_BIND:
+            self.stop_plc_worker()
+            self.lock_tool()
+            self.message_label.setText("子物料绑定：请扫描父件主条码")
+            self.speak("请扫描父件主条码")
         else:
             self.stop_plc_worker()
             self.lock_tool()
@@ -2601,7 +3431,11 @@ class QualityControlWindow(QMainWindow):
     def add_history_record(self, step: ProcessStep, result: str, source: str, note: str, completed: bool):
         now = datetime.now()
         duration = (now - self.step_started_at).total_seconds()
-        barcode = source if step.step_type == SCAN else self.current_barcode
+        barcode = (
+            source
+            if step.step_type in (SCAN, BARCODE_SWITCH, MATERIAL_BIND)
+            else self.current_barcode
+        )
         self.history_records.append(
             {
                 "time": now,
@@ -2629,6 +3463,10 @@ class QualityControlWindow(QMainWindow):
         if not self.production_enabled:
             return
         payload = {
+            "project_id": getattr(self.current_project, "id", None),
+            "station_id": getattr(self.current_station, "id", None),
+            "product_instance_id": self.current_product_instance_id,
+            "barcode_used": barcode,
             "project": self.current_project.name,
             "station": self.current_station.name,
             "barcode": barcode,

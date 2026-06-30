@@ -1,11 +1,16 @@
-import json
 import cgi
+import configparser
+import json
+import logging
+from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
 
 
+from web_admin_app import auth, product_flow
 from web_admin_app.admin_page import HTML
-from web_admin_app.database import get_database_type, init_db, load_database_config
+from web_admin_app.database import CONFIG_PATH, get_database_type, init_db, load_database_config
+from web_admin_app.login_page import render_login_page
 from web_admin_app.services import (
     add_project,
     add_production_record,
@@ -31,6 +36,7 @@ from web_admin_app.services import (
     maintenance_logs,
     release_station_session,
     get_station_config,
+    get_station_config_by_ids,
     latest_client_release,
     get_trace,
     list_projects,
@@ -55,13 +61,15 @@ from web_admin_app.services import (
 
 
 
-def json_response(handler, payload, status=200):
+def json_response(handler, payload, status=200, extra_headers=None):
     data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status)
     handler.send_header("Content-Type", "application/json; charset=utf-8")
     handler.send_header("Access-Control-Allow-Origin", "*")
     handler.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
     handler.send_header("Access-Control-Allow-Headers", "Content-Type")
+    for key, value in (extra_headers or {}).items():
+        handler.send_header(key, value)
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
@@ -74,6 +82,87 @@ def html_response(handler):
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def login_html_response(handler, error="", status=200):
+    data = render_login_page(error).encode("utf-8")
+    handler.send_response(status)
+    handler.send_header("Content-Type", "text/html; charset=utf-8")
+    handler.send_header("Content-Length", str(len(data)))
+    handler.end_headers()
+    handler.wfile.write(data)
+
+
+def redirect_response(handler, location, cookie=None):
+    handler.send_response(302)
+    handler.send_header("Location", location)
+    if cookie:
+        handler.send_header("Set-Cookie", cookie)
+    handler.send_header("Content-Length", "0")
+    handler.end_headers()
+
+
+def read_urlencoded(handler):
+    length = int(handler.headers.get("Content-Length", "0"))
+    data = handler.rfile.read(length).decode("utf-8") if length else ""
+    return {key: values[0] for key, values in parse_qs(data).items()}
+
+
+def client_ip(handler):
+    forwarded = handler.headers.get("X-Forwarded-For", "").split(",", 1)[0].strip()
+    return forwarded or handler.client_address[0]
+
+
+def session_user(handler):
+    cookie = SimpleCookie()
+    try:
+        cookie.load(handler.headers.get("Cookie", ""))
+    except Exception:
+        return None
+    morsel = cookie.get(auth.SESSION_COOKIE_NAME)
+    return auth.parse_session_token(morsel.value) if morsel else None
+
+
+def is_public_client_api(method, path):
+    if method == "GET":
+        return (
+            path == "/api/projects"
+            or (path.startswith("/api/projects/") and path.endswith("/config"))
+            or path == "/api/station-config"
+            or path == "/api/client/station-config"
+            or path == "/api/station-completions/check"
+            or path == "/api/client-update/latest"
+            or path.startswith("/api/client-update/download/")
+        )
+    if method == "POST":
+        return path in {
+            "/api/station-completions",
+            "/api/scan-records",
+            "/api/production-records",
+            "/api/step-records",
+            "/api/screw-records",
+            "/api/station-session/acquire",
+            "/api/station-session/force-acquire",
+            "/api/station-session/heartbeat",
+            "/api/station-session/release",
+            "/api/client-update/report",
+            "/api/product-flow/resolve-barcode",
+            "/api/product-flow/verify-entry",
+            "/api/product-flow/switch-barcode",
+            "/api/product-flow/bind-material",
+        }
+    return False
+
+
+def require_api_auth(handler, method, path):
+    if not path.startswith("/api/") or is_public_client_api(method, path):
+        handler.current_user = session_user(handler)
+        return True
+    handler.current_user = session_user(handler)
+    if handler.current_user:
+        return True
+    json_response(handler, {"code": 401, "msg": "未登录或登录已过期"}, 401)
+    return False
 
 
 def read_json(handler):
@@ -107,13 +196,75 @@ class AdminHandler(BaseHTTPRequestHandler):
     def do_OPTIONS(self):
         json_response(self, {})
 
+    def do_HEAD(self):
+        path = urlparse(self.path).path
+        if path == "/login":
+            self.send_response(200)
+            self.send_header("Content-Type", "text/html; charset=utf-8")
+            self.end_headers()
+            return
+        if path != "/":
+            self.send_response(404)
+            self.end_headers()
+            return
+        if not session_user(self):
+            redirect_response(self, "/login")
+            return
+        data = HTML.encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+
     def do_GET(self):
+        path = urlparse(self.path).path
+        if path == "/login":
+            if session_user(self):
+                redirect_response(self, "/")
+            else:
+                login_html_response(self)
+            return
+        if path == "/logout":
+            user = session_user(self)
+            if user:
+                auth.log_auth_event(
+                    user["username"],
+                    user["role"],
+                    client_ip(self),
+                    self.headers.get("User-Agent", ""),
+                    True,
+                    "退出登录",
+                )
+            redirect_response(self, "/login", auth.expired_session_cookie())
+            return
+        if path == "/" and not session_user(self):
+            redirect_response(self, "/login")
+            return
+        if not require_api_auth(self, "GET", path):
+            return
         try:
             self.route_get()
         except Exception as exc:
+            logging.exception("GET %s 处理失败", self.path)
             json_response(self, {"error": str(exc)}, 500)
 
     def do_POST(self):
+        path = urlparse(self.path).path
+        if path == "/login":
+            payload = read_urlencoded(self)
+            user, error = auth.authenticate(
+                payload.get("username", ""),
+                payload.get("password", ""),
+                client_ip(self),
+                self.headers.get("User-Agent", ""),
+            )
+            if not user:
+                login_html_response(self, error, 401)
+                return
+            redirect_response(self, "/", auth.session_cookie(auth.create_session_token(user)))
+            return
+        if not require_api_auth(self, "POST", path):
+            return
         try:
             self.route_post()
         except ValueError as exc:
@@ -122,6 +273,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, {"error": str(exc)}, 500)
 
     def do_PUT(self):
+        path = urlparse(self.path).path
+        if not require_api_auth(self, "PUT", path):
+            return
         try:
             self.route_put()
         except ValueError as exc:
@@ -130,6 +284,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, {"error": str(exc)}, 500)
 
     def do_DELETE(self):
+        path = urlparse(self.path).path
+        if not require_api_auth(self, "DELETE", path):
+            return
         try:
             self.route_delete()
         except ValueError as exc:
@@ -143,15 +300,73 @@ class AdminHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         if path == "/":
             html_response(self)
+        elif path == "/api/auth/me":
+            json_response(self, {"user": self.current_user})
+        elif path == "/api/admin/users":
+            json_response(self, {"users": auth.list_users()})
+        elif path == "/api/admin/login-logs":
+            json_response(self, {"records": auth.list_login_logs(query.get("limit", ["100"])[0])})
         elif path == "/api/projects":
             json_response(self, {"projects": list_projects()})
         elif path == "/api/projects/full":
             json_response(self, {"projects": list_projects_full()})
         elif path.startswith("/api/projects/") and path.endswith("/config"):
             json_response(self, get_station_config(path))
+        elif path == "/api/station-config":
+            project_name = query.get("project", [""])[0]
+            station_name = query.get("station", [""])[0]
+            if not project_name or not station_name:
+                raise ValueError("项目和工位不能为空")
+            json_response(self, get_station_config(project_name, station_name))
+        elif path == "/api/client/station-config":
+            project_id = query.get("project_id", [""])[0]
+            station_id = query.get("station_id", [""])[0]
+            if not project_id or not station_id:
+                json_response(
+                    self,
+                    {"code": -1, "msg": "缺少 project_id 或 station_id", "data": None},
+                    400,
+                )
+                return
+            try:
+                data = get_station_config_by_ids(int(project_id), int(station_id))
+            except (TypeError, ValueError):
+                json_response(
+                    self,
+                    {"code": -1, "msg": "project_id 或 station_id 格式不正确", "data": None},
+                    400,
+                )
+                return
+            except Exception:
+                logging.exception("按 ID 下载工位配置失败")
+                json_response(
+                    self,
+                    {"code": -1, "msg": "下载工位配置失败，请查看服务端日志", "data": None},
+                    500,
+                )
+                return
+            if data is None:
+                json_response(
+                    self,
+                    {"code": -1, "msg": "未找到指定工位配置", "data": None},
+                    404,
+                )
+                return
+            json_response(self, {"code": 1, "msg": "ok", "data": data})
         elif path.startswith("/api/stations/") and path.endswith("/steps"):
             station_id = int(path.split("/")[3])
             json_response(self, {"steps": list_steps(station_id)})
+        elif path.startswith("/api/stations/") and path.endswith("/dependencies"):
+            station_id = int(path.split("/")[3])
+            json_response(
+                self,
+                {"dependency": product_flow.get_station_dependency(station_id)},
+            )
+        elif path == "/api/product-flow/trace":
+            json_response(
+                self,
+                product_flow.trace_by_barcode(query.get("barcode", [""])[0]),
+            )
         elif path == "/api/station-completions/check":
             json_response(self, check_station_completion(query))
         elif path == "/api/station-sessions":
@@ -201,7 +416,39 @@ class AdminHandler(BaseHTTPRequestHandler):
             payload, files = read_form(self)
         else:
             payload, files = read_json(self), None
-        if path == "/api/projects":
+        if path == "/api/auth/change-password":
+            try:
+                auth.change_own_password(
+                    self.current_user["id"],
+                    payload.get("old_password", ""),
+                    payload.get("new_password", ""),
+                )
+            except ValueError as exc:
+                auth.log_auth_event(
+                    self.current_user["username"],
+                    self.current_user["role"],
+                    client_ip(self),
+                    self.headers.get("User-Agent", ""),
+                    False,
+                    f"修改密码失败：{exc}",
+                )
+                raise
+            auth.log_auth_event(
+                self.current_user["username"],
+                self.current_user["role"],
+                client_ip(self),
+                self.headers.get("User-Agent", ""),
+                True,
+                "修改密码成功",
+            )
+            json_response(
+                self,
+                {"ok": True, "message": "密码修改成功，请重新登录"},
+                extra_headers={"Set-Cookie": auth.expired_session_cookie()},
+            )
+        elif path == "/api/admin/users":
+            json_response(self, auth.create_admin_user(payload))
+        elif path == "/api/projects":
             json_response(self, add_project(payload))
         elif path == "/api/stations":
             json_response(self, add_station(payload))
@@ -217,6 +464,14 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, add_step_record(payload))
         elif path == "/api/screw-records":
             json_response(self, add_screw_record(payload))
+        elif path == "/api/product-flow/resolve-barcode":
+            json_response(self, product_flow.resolve_barcode(payload))
+        elif path == "/api/product-flow/verify-entry":
+            json_response(self, product_flow.verify_station_entry(payload))
+        elif path == "/api/product-flow/switch-barcode":
+            json_response(self, product_flow.switch_main_barcode(payload))
+        elif path == "/api/product-flow/bind-material":
+            json_response(self, product_flow.bind_child_material(payload))
         elif path == "/api/station-session/acquire":
             json_response(self, acquire_station_session(payload))
         elif path == "/api/station-session/force-acquire":
@@ -246,12 +501,41 @@ class AdminHandler(BaseHTTPRequestHandler):
         path = urlparse(self.path).path
         payload = read_json(self)
         parts = path.strip("/").split("/")
-        if len(parts) == 3 and parts[0] == "api" and parts[1] == "projects":
+        if len(parts) == 4 and parts[:3] == ["api", "admin", "users"]:
+            user_id = int(parts[3])
+            try:
+                json_response(self, auth.update_admin_user(user_id, payload))
+            except ValueError as exc:
+                if str(exc) == auth.PROTECTED_MESSAGE:
+                    auth.log_auth_event(
+                        self.current_user["username"],
+                        self.current_user["role"],
+                        client_ip(self),
+                        self.headers.get("User-Agent", ""),
+                        False,
+                        "尝试修改超级管理员被拒绝",
+                    )
+                raise
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "projects":
             json_response(self, update_project(int(parts[2]), payload))
         elif len(parts) == 3 and parts[0] == "api" and parts[1] == "stations":
             json_response(self, update_station(int(parts[2]), payload))
         elif len(parts) == 3 and parts[0] == "api" and parts[1] == "steps":
             json_response(self, update_step(int(parts[2]), payload))
+        elif (
+            len(parts) == 4
+            and parts[0] == "api"
+            and parts[1] == "stations"
+            and parts[3] == "dependencies"
+        ):
+            json_response(
+                self,
+                {
+                    "dependency": product_flow.save_station_dependency(
+                        int(parts[2]), payload
+                    )
+                },
+            )
         elif len(parts) == 3 and parts[0] == "api" and parts[1] == "scan-records":
             json_response(self, update_scan_record(int(parts[2]), payload))
         else:
@@ -260,7 +544,23 @@ class AdminHandler(BaseHTTPRequestHandler):
     def route_delete(self):
         path = urlparse(self.path).path
         parts = path.strip("/").split("/")
-        if len(parts) == 3 and parts[0] == "api" and parts[1] == "projects":
+        if len(parts) == 4 and parts[:3] == ["api", "admin", "users"]:
+            user_id = int(parts[3])
+            try:
+                auth.delete_admin_user(user_id, self.current_user["id"])
+            except ValueError as exc:
+                if str(exc) == auth.PROTECTED_MESSAGE:
+                    auth.log_auth_event(
+                        self.current_user["username"],
+                        self.current_user["role"],
+                        client_ip(self),
+                        self.headers.get("User-Agent", ""),
+                        False,
+                        "尝试删除超级管理员被拒绝",
+                    )
+                raise
+            json_response(self, {"ok": True})
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "projects":
             delete_project(int(parts[2]))
             json_response(self, {"ok": True})
         elif len(parts) == 3 and parts[0] == "api" and parts[1] == "stations":
@@ -272,6 +572,11 @@ class AdminHandler(BaseHTTPRequestHandler):
         elif len(parts) == 3 and parts[0] == "api" and parts[1] == "scan-records":
             delete_scan_record(int(parts[2]))
             json_response(self, {"ok": True})
+        elif len(parts) == 3 and parts[0] == "api" and parts[1] == "material-bindings":
+            json_response(
+                self,
+                product_flow.unbind_material(int(parts[2]), read_json(self)),
+            )
         elif len(parts) == 3 and parts[0] == "api" and parts[1] == "client-releases":
             delete_client_release(parts[2])
             json_response(self, {"ok": True})
@@ -283,10 +588,26 @@ class AdminHandler(BaseHTTPRequestHandler):
 
 
 
-def run(host="0.0.0.0", port=8000):
+def load_server_config(config_path=CONFIG_PATH):
+    config = configparser.ConfigParser()
+    if config_path.exists():
+        config.read(config_path, encoding="utf-8")
+    host = config.get("SERVER", "host", fallback="0.0.0.0").strip() or "0.0.0.0"
+    port = config.getint("SERVER", "port", fallback=8000)
+    if not 1 <= port <= 65535:
+        raise ValueError("SERVER.port 必须在 1-65535 之间")
+    return {"host": host, "port": port}
+
+
+def run(host=None, port=None):
+    server_config = load_server_config()
+    host = server_config["host"] if host is None else host
+    port = server_config["port"] if port is None else port
     init_db()
+    auth.ensure_session_secret()
+    auth.validate_builtin_accounts()
     server = ThreadingHTTPServer((host, port), AdminHandler)
-    print(f"管理后台已启动：http://127.0.0.1:{port}")
+    print(f"管理后台监听地址：http://{host}:{port}")
     db_config = load_database_config()
     if get_database_type() == "sqlite":
         print(f"数据库：SQLite {db_config['path']}")

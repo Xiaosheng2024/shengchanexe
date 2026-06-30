@@ -5,6 +5,8 @@ from typing import List, Optional
 SCAN = "扫码"
 SCREW = "螺丝"
 PLC = "PLC接收"
+BARCODE_SWITCH = "主条码切换"
+MATERIAL_BIND = "子物料绑定"
 
 
 @dataclass
@@ -39,6 +41,18 @@ class ProcessStep:
     plc_timeout_seconds: int = 3
     plc_poll_interval_ms: int = 500
     plc_barcode_wait_ok_timeout_seconds: int = 30
+    step_id: Optional[int] = None
+    switch_require_old: bool = True
+    switch_require_new: bool = True
+    switch_set_current: bool = True
+    switch_disable_old: bool = True
+    bind_child_project_id: Optional[int] = None
+    bind_child_material_type: str = ""
+    bind_required_count: int = 1
+    bind_required_station_ids: List[int] = field(default_factory=list)
+    bind_require_parent_switch: bool = True
+    bind_allow_duplicate: bool = False
+    bind_allow_unbind: bool = False
     completed_count: int = 0
     done: bool = False
 
@@ -82,9 +96,13 @@ class ProductConfig:
 class StationConfig:
     name: str
     product: ProductConfig
+    id: Optional[int] = None
 
 
 @dataclass
 class ProjectConfig:
     name: str
     stations: List[StationConfig] = field(default_factory=list)
+    id: Optional[int] = None
+    material_code: str = ""
+    product_type: str = ""

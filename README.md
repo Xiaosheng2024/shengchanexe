@@ -14,9 +14,18 @@ PyQt5 单机界面原型，包含：
 
 ## 运行
 
+桌面端本地运行：
+
 ```bash
-pip3 install PyQt5
+pip3 install -r requirements-client.txt
 python3 main.py
+```
+
+网页服务本地运行：
+
+```bash
+pip3 install -r requirements-server.txt
+python3 web_admin.py
 ```
 
 ## 模块结构
@@ -64,6 +73,34 @@ http://127.0.0.1:8000
 - 螺丝数量 / 条码扫描规则维护
 - 扫描记录查询：支持条码、开始时间、结束时间筛选，并支持记录修改、删除
 
+### Web 管理后台账号
+
+生产服务器首次部署时执行：
+
+```bash
+sudo /opt/mes/scripts/security/init_web_admin_accounts.sh
+```
+
+初始 `admin` 和 `super_admin` 密码保存在服务器本地：
+
+```text
+/root/server-secrets/web_admin_accounts.txt
+```
+
+该文件权限为 `600 root:root`，不能提交到 Git。客户管理员可以在后台修改自己的密码；超级管理员密码只能在服务器执行：
+
+```bash
+sudo /opt/mes/scripts/security/reset_super_admin_password.sh
+```
+
+客户管理员忘记密码时执行：
+
+```bash
+sudo /opt/mes/scripts/security/reset_admin_password.sh
+```
+
+网页管理 API 需要登录 Cookie。桌面客户端使用的配置下载、工位占用/心跳、生产记录上传、工位完成校验和版本下载接口保持独立，不要求网页登录。
+
 服务端生产默认使用 PostgreSQL。Windows MES 客户端仍然只通过 HTTP 访问 `http://服务器IP:8000`，不直接连接 PostgreSQL；所有数据库操作都由 `web_admin.py` 服务端完成。
 
 `config.ini` 数据库配置示例：
@@ -76,6 +113,10 @@ port = 5432
 database = mes_db
 user = mes_user
 password = change_me_random_password
+
+[SERVER]
+host = 0.0.0.0
+port = 8000
 ```
 
 Git 中只提交 `config.example.ini`。生产真实配置建议放在 `/opt/mes/config.ini`，权限设置为 `600`，不要把真实数据库密码提交到 Git。
@@ -90,11 +131,15 @@ path = quality_control.db
 
 首次启动会自动创建项目、工位、工序、扫码记录、工位完成记录和生产追溯表。
 
-桌面端在线模式的接口地址默认可填：
+桌面端从本机 `config.ini` 读取 MES 服务器地址：
 
-```text
-http://127.0.0.1:8000
+```ini
+[SERVER]
+url = http://mes-server:8000
 ```
+
+也可以在桌面端通过“系统设置 -> 服务器设置”修改并测试连接。修改服务器地址不会重新生成 `client_id`。
+服务器迁移步骤见 [deploy/README_服务器迁移到公司内网.md](deploy/README_服务器迁移到公司内网.md)。
 
 ## 离线部署
 
@@ -199,6 +244,12 @@ dist\QualityControlSystem.exe
 ```
 
 如果代码推送到 GitHub，仓库里的 GitHub Actions 会自动在 Windows 环境打包，并生成 `QualityControlSystem-windows` 下载附件。
+
+### 依赖文件说明
+
+- `requirements-client.txt`：桌面端和 PLC 测试工具依赖
+- `requirements-server.txt`：Rocky Linux 服务端依赖，不包含 Qt / GUI 包
+- `requirements-dev.txt`：开发与打包依赖
 
 ## 当前默认流程
 

@@ -6,11 +6,21 @@ from pathlib import Path
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt5.QtCore import QEvent, Qt
+from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import QApplication, QLabel
 
 import desktop_app.window as window_module
 from desktop_app.window import APP_VERSION, QualityControlWindow
-from shared.models import PLC, ProcessStep, ProductConfig, SCAN, SCREW
+from shared.models import (
+    BARCODE_SWITCH,
+    MATERIAL_BIND,
+    PLC,
+    SCAN,
+    SCREW,
+    ProcessStep,
+    ProductConfig,
+)
 
 
 class DesktopMainBarcodeTest(unittest.TestCase):
@@ -27,6 +37,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.play_ok_sound = lambda: None
         window.show_auto_close_warning = lambda title, message: None
         window.disable_tool_auto_listen_checkbox.setChecked(True)
+        self.addCleanup(window.close)
         return window
 
     def set_current_step_to_screw(self, window):
@@ -71,6 +82,119 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.main_barcode_label.text(), "当前主条码：未扫描")
         self.assertEqual(window.current_step_index, 0)
 
+    def test_global_scanner_capture_handles_fast_barcode_once(self):
+        window = self.make_window()
+        captured = []
+        window.scanner_capture_paused = lambda: False
+        window.handle_scanned_barcode = (
+            lambda barcode, source="input": captured.append((barcode, source))
+        )
+        times = iter([1000, 1010, 1020, 1030, 1040, 1050, 1060, 1070])
+        window.scanner_now_ms = lambda: next(times)
+
+        for character in "ABC1234":
+            handled = window._capture_scanner_key_event(
+                QKeyEvent(QEvent.KeyPress, ord(character), Qt.NoModifier, character)
+            )
+            self.assertTrue(handled)
+        handled = window._capture_scanner_key_event(
+            QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier, "\r")
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(captured, [("ABC1234", "global")])
+        self.assertEqual(window.scan_buffer, "")
+
+    def test_slow_manual_typing_is_not_misclassified_as_scanner(self):
+        window = self.make_window()
+        captured = []
+        window.scanner_capture_paused = lambda: False
+        window.handle_scanned_barcode = (
+            lambda barcode, source="input": captured.append((barcode, source))
+        )
+        times = iter([1000, 1100, 1200, 1300, 1400, 1500, 1600, 1700])
+        window.scanner_now_ms = lambda: next(times)
+
+        for character in "ABC1234":
+            window._capture_scanner_key_event(
+                QKeyEvent(QEvent.KeyPress, ord(character), Qt.NoModifier, character)
+            )
+        handled = window._capture_scanner_key_event(
+            QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier, "\r")
+        )
+
+        self.assertFalse(handled)
+        self.assertEqual(captured, [])
+
+    def test_slow_manual_input_is_replayed_to_barcode_field(self):
+        window = self.make_window()
+        captured = []
+        window.scanner_capture_paused = lambda: False
+        window.handle_scanned_barcode = (
+            lambda barcode, source="input": captured.append((barcode, source))
+        )
+        window.barcode_input.setEnabled(True)
+        times = iter([1000, 1100, 1200, 1300] + [1400] * 10)
+        window.scanner_now_ms = lambda: next(times)
+
+        for character in "ABCD":
+            QApplication.sendEvent(
+                window.barcode_input,
+                QKeyEvent(
+                    QEvent.KeyPress,
+                    ord(character),
+                    Qt.NoModifier,
+                    character,
+                ),
+            )
+        self.assertEqual(window.barcode_input.text(), "ABCD")
+        window.handle_scan()
+
+        self.assertEqual(captured, [("ABCD", "input")])
+
+    def test_duplicate_barcode_is_ignored_across_scan_sources(self):
+        window = self.make_window()
+        processed = []
+        window._process_scanned_barcode = (
+            lambda: processed.append(window.barcode_input.text())
+        )
+        times = iter([1000, 1200])
+        window.scanner_now_ms = lambda: next(times)
+
+        self.assertTrue(window.handle_scanned_barcode("ABC123", source="global"))
+        self.assertFalse(window.handle_scanned_barcode("ABC123", source="input"))
+
+        self.assertEqual(processed, ["ABC123"])
+
+    def test_chinese_barcode_is_rejected_before_business_processing(self):
+        window = self.make_window()
+        processed = []
+        window._process_scanned_barcode = lambda: processed.append(True)
+
+        self.assertFalse(window.handle_scanned_barcode("ABC中文123"))
+
+        self.assertEqual(processed, [])
+        self.assertIn("包含中文字符", window.message_label.text())
+
+    def test_scanner_capture_pauses_while_dialog_guard_is_active(self):
+        window = self.make_window()
+        captured = []
+        window.scanner_capture_paused = lambda: True
+        window.handle_scanned_barcode = (
+            lambda barcode, source="input": captured.append((barcode, source))
+        )
+        event = QKeyEvent(QEvent.KeyPress, ord("A"), Qt.NoModifier, "A")
+
+        self.assertFalse(window._capture_scanner_key_event(event))
+        self.assertEqual(captured, [])
+        self.assertEqual(window.scan_buffer, "")
+
+    def test_scan_input_disables_input_method(self):
+        window = self.make_window()
+        self.assertFalse(
+            window.barcode_input.testAttribute(Qt.WA_InputMethodEnabled)
+        )
+
     def test_online_station_two_blocks_when_previous_station_is_not_complete(self):
         window = self.make_window()
         window.current_station.name = "工位2"
@@ -92,6 +216,50 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.current_step_index, 0)
         self.assertEqual(window.message_label.text(), "上一工位未完成，不能进行当前工位")
 
+    def test_online_requests_use_ids_while_preserving_special_character_names(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.current_project.id = 81
+        window.current_project.name = "项目/A&B"
+        previous_station = window.current_project.stations[0]
+        current_station = window.current_project.stations[1]
+        previous_station.id = 91
+        previous_station.name = "中饰板预装-中出风口/磁吸"
+        current_station.id = 92
+        current_station.name = "工位?测试"
+        window.current_station = current_station
+        window.current_product = current_station.product
+        calls = []
+
+        def api_get(path):
+            calls.append(path)
+            if path.startswith("/api/client/station-config?"):
+                return {
+                    "code": 1,
+                    "msg": "ok",
+                    "data": {
+                        "project_id": 81,
+                        "station_id": 92,
+                        "product_name": "测试产品",
+                        "steps": [{"name": "主条码", "type": "扫码", "is_main_barcode": True}],
+                    },
+                }
+            return {"completed": True}
+
+        window.api_get = api_get
+        self.assertTrue(window.download_config_for_current_station())
+        self.assertTrue(window.verify_previous_station_complete("MAIN/?#"))
+        self.assertIn(
+            "/api/client/station-config?project_id=81&station_id=92",
+            calls,
+        )
+        completion_path = next(
+            path for path in calls if path.startswith("/api/station-completions/check?")
+        )
+        self.assertIn("project_id=81", completion_path)
+        self.assertIn("previous_station_id=91", completion_path)
+        self.assertNotIn("中饰板", completion_path)
+
     def test_old_config_without_main_barcode_temporarily_uses_first_scan(self):
         window = self.make_window()
         product = ProductConfig(
@@ -104,6 +272,127 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.ensure_main_barcode(product, notify=True)
         self.assertTrue(product.steps[0].is_main_barcode)
         self.assertFalse(product.steps[1].is_main_barcode)
+
+    def test_barcode_switch_updates_current_barcode_without_changing_instance(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.current_project.id = 1
+        window.current_station.id = 3
+        window.current_barcode = "AOLD001"
+        window.current_product_instance_id = 88
+        switch_step = ProcessStep(
+            "切换主条码",
+            BARCODE_SWITCH,
+            step_id=301,
+        )
+        window.current_product = ProductConfig(
+            "A产品",
+            [
+                switch_step,
+                ProcessStep("扫码后续件", SCAN),
+                ProcessStep("后续螺丝", SCREW, required_count=1),
+            ],
+        )
+        window.current_station.product = window.current_product
+        calls = []
+
+        def api_post(path, payload):
+            calls.append((path, payload))
+            if path == "/api/product-flow/switch-barcode":
+                return {
+                    "ok": True,
+                    "product_instance_id": 88,
+                    "current_barcode": "ANEW001",
+                }
+            return {"ok": True, "product_instance_id": 88}
+
+        window.api_post = api_post
+        window.barcode_input.setText("AOLD001")
+        window.handle_scan()
+        self.assertEqual(window.pending_switch_old_barcode, "AOLD001")
+        window.barcode_input.setText("ANEW001")
+        window.handle_scan()
+        self.assertEqual(window.current_barcode, "ANEW001")
+        self.assertEqual(window.current_product_instance_id, 88)
+        self.assertTrue(switch_step.done)
+        self.assertEqual(window.current_step_index, 1)
+        self.assertTrue(
+            any(path == "/api/product-flow/switch-barcode" for path, _ in calls)
+        )
+        window.barcode_input.setText("PART-001")
+        window.handle_scan()
+        self.assertEqual(window.current_barcode, "ANEW001")
+
+    def test_material_binding_scans_parent_then_child(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.current_project.id = 1
+        window.current_station.id = 4
+        window.current_barcode = "ANEW001"
+        window.current_product_instance_id = 88
+        bind_step = ProcessStep(
+            "绑定B物料",
+            MATERIAL_BIND,
+            step_id=401,
+            bind_child_project_id=2,
+            bind_child_material_type="B",
+            bind_required_count=1,
+            bind_required_station_ids=[21, 22],
+        )
+        window.current_product = ProductConfig(
+            "A产品",
+            [bind_step, ProcessStep("扫码后续件", SCAN)],
+        )
+        window.current_station.product = window.current_product
+        calls = []
+        window.api_post = lambda path, payload: (
+            calls.append((path, payload))
+            or {"ok": True, "binding_id": 1}
+        )
+        window.barcode_input.setText("ANEW001")
+        window.handle_scan()
+        self.assertEqual(window.pending_bind_parent_barcode, "ANEW001")
+        window.barcode_input.setText("B001")
+        window.handle_scan()
+        self.assertTrue(bind_step.done)
+        self.assertEqual(window.current_step_index, 1)
+        bind_payload = next(
+            payload
+            for path, payload in calls
+            if path == "/api/product-flow/bind-material"
+        )
+        self.assertEqual(bind_payload["required_station_ids"], [21, 22])
+        self.assertEqual(bind_payload["child_barcode"], "B001")
+
+    def test_old_main_barcode_is_rejected_before_station_entry_check(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.current_project.id = 1
+        window.current_station.id = 4
+        window.current_product = ProductConfig(
+            "A产品",
+            [ProcessStep("扫码主条码", SCAN, is_main_barcode=True)],
+        )
+        window.current_station.product = window.current_product
+        calls = []
+
+        def api_post(path, payload):
+            calls.append(path)
+            return {
+                "ok": True,
+                "found": True,
+                "allowed_production": False,
+                "current_barcode": "ANEW001",
+                "message": "该条码已切换为新主条码 ANEW001，请扫描当前主条码",
+            }
+
+        window.api_post = api_post
+        window.barcode_input.setText("AOLD001")
+        window.handle_scan()
+        self.assertEqual(window.current_barcode, "")
+        self.assertEqual(window.current_step_index, 0)
+        self.assertIn("ANEW001", window.message_label.text())
+        self.assertNotIn("/api/product-flow/verify-entry", calls)
 
     def test_settings_product_selection_syncs_main_station_selector(self):
         window = self.make_window()
@@ -132,6 +421,34 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             second.app_config_path = config_path
             second_id = second.load_station_session_client_id()
             self.assertEqual(first_id, second_id)
+
+    def test_server_url_moves_to_server_section_without_changing_client_id(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.ini"
+            config_path.write_text(
+                "[LOCAL_DEVICE]\n"
+                "client_id = fixed-client-id\n"
+                "mes_server = http://old-mes:8000\n",
+                encoding="utf-8",
+            )
+            window = QualityControlWindow(config_path)
+            self.assertEqual(window.api_base_input.text(), "http://old-mes:8000")
+
+            window.persist_server_url("mes.company.local:8000")
+
+            saved = configparser.ConfigParser()
+            saved.read(config_path, encoding="utf-8")
+            self.assertEqual(saved.get("SERVER", "url"), "http://mes.company.local:8000")
+            self.assertEqual(saved.get("LOCAL_DEVICE", "client_id"), "fixed-client-id")
+            self.assertFalse(saved.has_option("LOCAL_DEVICE", "mes_server"))
+            self.assertEqual(
+                window.api_url("/api/client-update/download/v0.8.5/release"),
+                "http://mes.company.local:8000/api/client-update/download/v0.8.5/release",
+            )
+
+    def test_missing_server_url_does_not_fall_back_to_hardcoded_ip(self):
+        window = self.make_window()
+        self.assertEqual(window.api_base_input.text(), "")
 
     def test_online_config_download_without_station_session_disables_production(self):
         window = self.make_window()

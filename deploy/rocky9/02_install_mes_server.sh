@@ -40,6 +40,10 @@ port = 5432
 database = ${MES_DB_NAME}
 user = ${MES_DB_USER}
 password = ${MES_DB_PASSWORD}
+
+[SERVER]
+host = 0.0.0.0
+port = 8000
 EOF
 chmod 600 "${MES_DIR}/config.ini"
 
@@ -48,6 +52,13 @@ firewall-cmd --permanent --add-service=ssh
 firewall-cmd --permanent --add-port=8000/tcp
 firewall-cmd --reload
 
+if [ -f "${MES_DIR}/requirements-server.txt" ]; then
+  python3 -m pip install --upgrade pip
+  python3 -m pip install -r "${MES_DIR}/requirements-server.txt"
+fi
+
 echo "PostgreSQL 16 已安装，MES 数据库 ${MES_DB_NAME} 已创建。"
 echo "请将项目文件部署到 ${MES_DIR}，并使用 ${MES_DIR}/config.ini 启动 MES 服务。"
 echo "数据库密码已随机生成并写入 ${MES_DIR}/config.ini，请妥善保存。"
+SERVER_IP="$(hostname -I | awk '{print $1}')"
+echo "当前 Web 访问地址：http://${SERVER_IP}:8000"

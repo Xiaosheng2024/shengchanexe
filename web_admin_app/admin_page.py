@@ -7,8 +7,10 @@ HTML = r"""<!doctype html>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; color: #111827; background: #f3f4f6; }
-    header { height: 64px; display: flex; align-items: center; padding: 0 24px; background: #111827; color: white; }
+    header { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 24px; background: #111827; color: white; }
     header h1 { font-size: 22px; margin: 0; font-weight: 700; }
+    .account-summary { display: flex; align-items: center; gap: 14px; font-size: 14px; }
+    .account-summary a { color: white; }
     .layout { display: grid; grid-template-columns: 220px 1fr; min-height: calc(100vh - 64px); }
     nav { background: white; border-right: 1px solid #d1d5db; padding: 16px; }
     nav button { width: 100%; display: block; text-align: left; padding: 14px 16px; border: 0; border-radius: 6px; background: transparent; font-size: 17px; cursor: pointer; }
@@ -33,6 +35,7 @@ HTML = r"""<!doctype html>
     label { font-weight: 700; }
     input, select { height: 38px; padding: 6px 10px; border: 1px solid #cbd5e1; border-radius: 6px; font-size: 15px; min-width: 160px; }
     input[type="checkbox"] { width: 18px; height: 18px; min-width: 18px; padding: 0; }
+    select[multiple] { height: 110px; min-width: 240px; }
     .checkbox-label { display: inline-flex; align-items: center; gap: 8px; height: 38px; }
     button.primary { height: 38px; padding: 0 18px; border: 0; border-radius: 6px; background: #2563eb; color: white; font-size: 15px; font-weight: 700; cursor: pointer; }
     button.secondary { height: 38px; padding: 0 18px; border: 1px solid #cbd5e1; border-radius: 6px; background: white; font-size: 15px; cursor: pointer; }
@@ -45,7 +48,14 @@ HTML = r"""<!doctype html>
   </style>
 </head>
 <body>
-  <header><h1>生产工艺过程质量控制系统 - 管理后台</h1></header>
+  <header>
+    <h1>生产工艺过程质量控制系统 - 管理后台</h1>
+    <div class="account-summary">
+      <span>当前用户：<strong id="currentUsername">-</strong></span>
+      <span>角色：<strong id="currentRole">-</strong></span>
+      <a href="/logout">退出登录</a>
+    </div>
+  </header>
   <div class="layout">
     <nav>
       <button class="tab active" data-page="projectPage">项目管理</button>
@@ -53,6 +63,7 @@ HTML = r"""<!doctype html>
       <button class="tab" data-page="stepPage">工序规则管理</button>
       <button class="tab" data-page="recordPage">扫描记录查询</button>
       <button class="tab" data-page="maintenancePage">系统维护</button>
+      <button class="tab" data-page="accountPage">账号与安全</button>
       <div class="tree-title">项目 / 工位 / 规则</div>
       <div id="menuTree"></div>
     </nav>
@@ -66,6 +77,10 @@ HTML = r"""<!doctype html>
             <input id="projectId" type="hidden">
             <label>项目名称</label>
             <input id="projectName" placeholder="例如：X04C中控面板">
+            <label>物料编码</label>
+            <input id="projectMaterialCode" placeholder="例如：A / B">
+            <label>产品类型</label>
+            <input id="projectProductType" placeholder="例如：A物料">
             <button class="primary" onclick="addProject()">添加项目</button>
             <button class="primary" onclick="updateProject()">保存修改</button>
             <button class="secondary" onclick="resetProjectForm()">取消编辑</button>
@@ -75,7 +90,7 @@ HTML = r"""<!doctype html>
         <div class="panel">
           <h2>项目列表 <span class="hint" id="selectedProjectText"></span></h2>
           <table>
-            <thead><tr><th>ID</th><th>项目名称</th><th>工位数量</th><th>创建时间</th><th>操作</th></tr></thead>
+            <thead><tr><th>ID</th><th>项目名称</th><th>物料编码</th><th>产品类型</th><th>工位数量</th><th>创建时间</th><th>操作</th></tr></thead>
             <tbody id="projectRows"></tbody>
           </table>
         </div>
@@ -103,6 +118,28 @@ HTML = r"""<!doctype html>
             <tbody id="stationRows"></tbody>
           </table>
         </div>
+        <div class="panel">
+          <h2>工位进入前置条件</h2>
+          <div class="toolbar">
+            <label class="checkbox-label"><input id="depPrevious" type="checkbox" checked> 必须完成上一工位</label>
+            <label class="checkbox-label"><input id="depSwitch" type="checkbox"> 必须完成主条码切换</label>
+            <label>必须完成的指定工位</label>
+            <select id="depStationIds" multiple></select>
+          </div>
+          <div class="toolbar">
+            <label>子物料项目</label>
+            <select id="depChildProject" onchange="refreshDependencyStationOptions()"><option value="">不限制</option></select>
+            <label>子物料类型</label>
+            <input id="depChildType" placeholder="例如：B">
+            <label>数量</label>
+            <input id="depChildCount" type="number" min="0" value="0">
+            <label>子物料必完工位</label>
+            <select id="depChildStationIds" multiple></select>
+            <button class="primary" onclick="saveStationDependency()">保存前置条件</button>
+            <button class="secondary" onclick="loadStationDependency()">重新加载</button>
+          </div>
+          <p class="hint">后续工位统一按这里校验上一工位、指定工位、主条码切换和跨产线子物料完成状态。</p>
+        </div>
       </section>
 
       <section id="stepPage" class="page">
@@ -123,6 +160,8 @@ HTML = r"""<!doctype html>
               <option value="扫码">条码扫描</option>
               <option value="螺丝">螺丝数量</option>
               <option value="PLC接收">PLC接收</option>
+              <option value="主条码切换">主条码切换</option>
+              <option value="子物料绑定">子物料绑定</option>
             </select>
             <label>顺序</label>
             <input id="stepOrder" type="number" min="1" value="1">
@@ -169,6 +208,27 @@ HTML = r"""<!doctype html>
               <label>等待OK秒</label><input id="plcBarcodeWaitOkTimeoutSeconds" type="number" value="30">
             </div>
           </div>
+          <div id="switchFields" style="display:none">
+            <div class="toolbar">
+              <label class="checkbox-label"><input id="switchRequireOld" type="checkbox" checked> 必须扫描旧码</label>
+              <label class="checkbox-label"><input id="switchRequireNew" type="checkbox" checked> 必须扫描新码</label>
+              <label class="checkbox-label"><input id="switchSetCurrent" type="checkbox" checked> 新码设为当前主条码</label>
+              <label class="checkbox-label"><input id="switchDisableOld" type="checkbox" checked> 禁止旧码继续生产</label>
+            </div>
+          </div>
+          <div id="bindFields" style="display:none">
+            <div class="toolbar">
+              <label>子物料项目</label><select id="bindChildProject" onchange="refreshBindingStationOptions()"><option value="">请选择</option></select>
+              <label>子物料类型</label><input id="bindChildType" placeholder="例如：B">
+              <label>子物料数量</label><input id="bindRequiredCount" type="number" min="1" value="1">
+              <label>子物料必完工位</label><select id="bindRequiredStationIds" multiple></select>
+            </div>
+            <div class="toolbar">
+              <label class="checkbox-label"><input id="bindRequireSwitch" type="checkbox" checked> 父件必须已切换主条码</label>
+              <label class="checkbox-label"><input id="bindAllowDuplicate" type="checkbox"> 允许重复绑定</label>
+              <label class="checkbox-label"><input id="bindAllowUnbind" type="checkbox"> 允许管理员解绑</label>
+            </div>
+          </div>
           <button class="primary" onclick="addStep()">添加工序规则</button>
           <button class="primary" onclick="updateStep()">保存修改</button>
           <button class="secondary" onclick="resetStepForm()">取消编辑</button>
@@ -185,6 +245,15 @@ HTML = r"""<!doctype html>
       </section>
 
       <section id="recordPage" class="page">
+        <div class="panel">
+          <h2>产品实体追溯</h2>
+          <div class="toolbar">
+            <label>任意条码</label>
+            <input id="traceBarcode" placeholder="旧A码 / 新A码 / B码">
+            <button class="primary" onclick="loadProductTrace()">查询完整追溯</button>
+          </div>
+          <pre id="traceResult" style="white-space:pre-wrap;background:#f9fafb;border:1px solid #e5e7eb;padding:12px;border-radius:6px;"></pre>
+        </div>
         <div class="panel">
           <h2>扫描记录查询</h2>
           <div class="toolbar">
@@ -280,6 +349,44 @@ HTML = r"""<!doctype html>
           </table>
         </div>
       </section>
+
+      <section id="accountPage" class="page">
+        <div class="panel">
+          <h2>修改自己的密码</h2>
+          <div id="changePasswordArea">
+            <div class="toolbar">
+              <label>旧密码</label><input id="oldPassword" type="password" autocomplete="current-password">
+              <label>新密码</label><input id="newPassword" type="password" autocomplete="new-password">
+              <label>确认新密码</label><input id="confirmPassword" type="password" autocomplete="new-password">
+              <button class="primary" onclick="changeOwnPassword()">修改密码</button>
+            </div>
+            <p class="hint">新密码至少8位，不能使用常见弱密码；修改成功后需要重新登录。</p>
+          </div>
+          <p id="superPasswordHint" class="hint" style="display:none">超级管理员密码只能通过服务器维护脚本重置。</p>
+        </div>
+        <div class="panel">
+          <h2>后台用户管理</h2>
+          <div class="toolbar">
+            <label>用户名</label><input id="newAdminUsername">
+            <label>显示名称</label><input id="newAdminDisplayName">
+            <label>初始密码</label><input id="newAdminPassword" type="password">
+            <button class="primary" onclick="createAdminUser()">新增管理员</button>
+            <button class="secondary" onclick="loadAdminUsers()">刷新</button>
+          </div>
+          <table>
+            <thead><tr><th>用户名</th><th>显示名称</th><th>角色</th><th>启用</th><th>内置</th><th>最后登录</th><th>操作</th></tr></thead>
+            <tbody id="adminUserRows"></tbody>
+          </table>
+        </div>
+        <div class="panel">
+          <h2>登录安全日志</h2>
+          <button class="secondary" onclick="loadLoginLogs()">刷新日志</button>
+          <table>
+            <thead><tr><th>时间</th><th>账号</th><th>角色</th><th>IP</th><th>结果</th><th>消息</th></tr></thead>
+            <tbody id="loginLogRows"></tbody>
+          </table>
+        </div>
+      </section>
     </main>
   </div>
 
@@ -287,6 +394,7 @@ HTML = r"""<!doctype html>
     let fullData = {projects: []};
     let selectedProjectId = null;
     let selectedStationId = null;
+    let currentUser = null;
     const expandedProjects = new Set();
     const expandedStations = new Set();
 
@@ -298,7 +406,11 @@ HTML = r"""<!doctype html>
     async function api(path, options = {}) {
       const res = await fetch(path, options);
       const data = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(data.error || "请求失败");
+      if (res.status === 401) {
+        window.location.href = "/login";
+        throw new Error("登录已过期");
+      }
+      if (!res.ok) throw new Error(data.error || data.msg || data.message || "请求失败");
       return data;
     }
 
@@ -330,6 +442,7 @@ HTML = r"""<!doctype html>
       refreshProjectOptions();
       refreshStationOptions();
       loadSteps();
+      await loadStationDependency();
     }
 
     function keepValidSelection() {
@@ -395,6 +508,7 @@ HTML = r"""<!doctype html>
       renderStations();
       refreshProjectOptions();
       refreshStationOptions();
+      loadStationDependency();
       setActivePage("stationPage");
     }
 
@@ -452,9 +566,9 @@ HTML = r"""<!doctype html>
 
     function renderProjects() {
       const rows = fullData.projects.map(project =>
-        `<tr><td>${project.id}</td><td>${htmlEscape(project.name)}</td><td>${project.stations.length}</td><td>${project.created_at}</td><td><button class="secondary" onclick="selectProject(${project.id})">选择</button> <button class="secondary" onclick="editProject(${project.id})">编辑</button> <button class="danger" onclick="deleteProject(${project.id})">删除</button></td></tr>`
+        `<tr><td>${project.id}</td><td>${htmlEscape(project.name)}</td><td>${htmlEscape(project.material_code || "")}</td><td>${htmlEscape(project.product_type || "")}</td><td>${project.stations.length}</td><td>${project.created_at}</td><td><button class="secondary" onclick="selectProject(${project.id})">选择</button> <button class="secondary" onclick="editProject(${project.id})">编辑</button> <button class="danger" onclick="deleteProject(${project.id})">删除</button></td></tr>`
       ).join("");
-      document.getElementById("projectRows").innerHTML = rows || `<tr><td colspan="5">暂无项目</td></tr>`;
+      document.getElementById("projectRows").innerHTML = rows || `<tr><td colspan="7">暂无项目</td></tr>`;
     }
 
     function renderStations() {
@@ -468,16 +582,26 @@ HTML = r"""<!doctype html>
     function refreshProjectOptions() {
       ["stationProject", "stepProject"].forEach(id => {
         const select = document.getElementById(id);
-        select.innerHTML = fullData.projects.map(project => `<option value="${project.id}">${project.name}</option>`).join("");
+        select.innerHTML = fullData.projects.map(project => `<option value="${project.id}">${htmlEscape(project.name)}</option>`).join("");
         if (selectedProjectId) select.value = selectedProjectId;
       });
+      ["depChildProject", "bindChildProject"].forEach(id => {
+        const select = document.getElementById(id);
+        const current = select.value;
+        select.innerHTML = `<option value="">不限制</option>` + fullData.projects.map(
+          project => `<option value="${project.id}">${htmlEscape(project.name)}</option>`
+        ).join("");
+        if (current) select.value = current;
+      });
+      refreshDependencyStationOptions();
+      refreshBindingStationOptions();
     }
 
     function refreshStationOptions() {
       const projectId = Number(document.getElementById("stepProject").value || selectedProjectId);
       const project = fullData.projects.find(item => item.id === projectId) || fullData.projects[0];
       const select = document.getElementById("stepStation");
-      select.innerHTML = project ? project.stations.map(station => `<option value="${station.id}">${station.name}</option>`).join("") : "";
+      select.innerHTML = project ? project.stations.map(station => `<option value="${station.id}">${htmlEscape(station.name)}</option>`).join("") : "";
       if (selectedStationId) select.value = selectedStationId;
       loadSteps();
     }
@@ -501,12 +625,16 @@ HTML = r"""<!doctype html>
     async function addProject() {
       const name = document.getElementById("projectName").value.trim();
       if (!name) return showStatus("项目名称不能为空");
+      const material_code = document.getElementById("projectMaterialCode").value.trim();
+      const product_type = document.getElementById("projectProductType").value.trim();
       await api("/api/projects", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({name})
+        body: JSON.stringify({name, material_code, product_type})
       });
       document.getElementById("projectName").value = "";
+      document.getElementById("projectMaterialCode").value = "";
+      document.getElementById("projectProductType").value = "";
       showStatus("项目已添加");
       await refreshAll();
       const project = fullData.projects.find(item => item.name === name);
@@ -523,6 +651,8 @@ HTML = r"""<!doctype html>
       selectedStationId = project.stations[0] ? project.stations[0].id : null;
       document.getElementById("projectId").value = project.id;
       document.getElementById("projectName").value = project.name;
+      document.getElementById("projectMaterialCode").value = project.material_code || "";
+      document.getElementById("projectProductType").value = project.product_type || "";
       renderMenuTree();
       renderStations();
       refreshProjectOptions();
@@ -533,17 +663,21 @@ HTML = r"""<!doctype html>
     function resetProjectForm() {
       document.getElementById("projectId").value = "";
       document.getElementById("projectName").value = "";
+      document.getElementById("projectMaterialCode").value = "";
+      document.getElementById("projectProductType").value = "";
     }
 
     async function updateProject() {
       const id = document.getElementById("projectId").value;
       const name = document.getElementById("projectName").value.trim();
+      const material_code = document.getElementById("projectMaterialCode").value.trim();
+      const product_type = document.getElementById("projectProductType").value.trim();
       if (!id) return showStatus("请先在项目列表点击编辑");
       if (!name) return showStatus("项目名称不能为空");
       await api(`/api/projects/${id}`, {
         method: "PUT",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({name})
+        body: JSON.stringify({name, material_code, product_type})
       });
       resetProjectForm();
       showStatus("项目已修改");
@@ -617,12 +751,17 @@ HTML = r"""<!doctype html>
       const type = document.getElementById("stepType").value;
       const isScrew = type === "螺丝";
       const isPlc = type === "PLC接收";
-      document.getElementById("barcodeFields").style.display = (!isScrew && !isPlc) ? "flex" : "none";
+      const isScan = type === "扫码";
+      const isSwitch = type === "主条码切换";
+      const isBind = type === "子物料绑定";
+      document.getElementById("barcodeFields").style.display = isScan ? "flex" : "none";
       document.getElementById("screwFields").style.display = isScrew ? "flex" : "none";
       document.getElementById("plcFields").style.display = isPlc ? "block" : "none";
+      document.getElementById("switchFields").style.display = isSwitch ? "block" : "none";
+      document.getElementById("bindFields").style.display = isBind ? "block" : "none";
       const mainBarcode = document.getElementById("isMainBarcode");
-      mainBarcode.disabled = isScrew;
-      if (isScrew) mainBarcode.checked = false;
+      mainBarcode.disabled = !isScan;
+      if (!isScan) mainBarcode.checked = false;
     }
 
     async function addStep() {
@@ -678,7 +817,18 @@ HTML = r"""<!doctype html>
         plc_barcode_strip_space: true,
         plc_timeout_seconds: Number(document.getElementById("plcTimeoutSeconds").value || 3),
         plc_poll_interval_ms: Number(document.getElementById("plcPollIntervalMs").value || 500),
-        plc_barcode_wait_ok_timeout_seconds: Number(document.getElementById("plcBarcodeWaitOkTimeoutSeconds").value || 30)
+        plc_barcode_wait_ok_timeout_seconds: Number(document.getElementById("plcBarcodeWaitOkTimeoutSeconds").value || 30),
+        switch_require_old: document.getElementById("switchRequireOld").checked,
+        switch_require_new: document.getElementById("switchRequireNew").checked,
+        switch_set_current: document.getElementById("switchSetCurrent").checked,
+        switch_disable_old: document.getElementById("switchDisableOld").checked,
+        bind_child_project_id: Number(document.getElementById("bindChildProject").value || 0) || null,
+        bind_child_material_type: document.getElementById("bindChildType").value.trim(),
+        bind_required_count: Number(document.getElementById("bindRequiredCount").value || 1),
+        bind_required_station_ids: selectedIds("bindRequiredStationIds"),
+        bind_require_parent_switch: document.getElementById("bindRequireSwitch").checked,
+        bind_allow_duplicate: document.getElementById("bindAllowDuplicate").checked,
+        bind_allow_unbind: document.getElementById("bindAllowUnbind").checked
       };
     }
 
@@ -711,6 +861,18 @@ HTML = r"""<!doctype html>
       document.getElementById("plcPollIntervalMs").value = step.plc_poll_interval_ms ?? 500;
       document.getElementById("plcTimeoutSeconds").value = step.plc_timeout_seconds ?? 3;
       document.getElementById("plcBarcodeWaitOkTimeoutSeconds").value = step.plc_barcode_wait_ok_timeout_seconds ?? 30;
+      document.getElementById("switchRequireOld").checked = step.switch_require_old ?? true;
+      document.getElementById("switchRequireNew").checked = step.switch_require_new ?? true;
+      document.getElementById("switchSetCurrent").checked = step.switch_set_current ?? true;
+      document.getElementById("switchDisableOld").checked = step.switch_disable_old ?? true;
+      document.getElementById("bindChildProject").value = step.bind_child_project_id || "";
+      document.getElementById("bindChildType").value = step.bind_child_material_type || "";
+      document.getElementById("bindRequiredCount").value = step.bind_required_count ?? 1;
+      refreshBindingStationOptions();
+      setSelectedIds("bindRequiredStationIds", step.bind_required_station_ids || []);
+      document.getElementById("bindRequireSwitch").checked = step.bind_require_parent_switch ?? true;
+      document.getElementById("bindAllowDuplicate").checked = !!step.bind_allow_duplicate;
+      document.getElementById("bindAllowUnbind").checked = !!step.bind_allow_unbind;
       toggleStepFields();
     }
 
@@ -771,6 +933,93 @@ HTML = r"""<!doctype html>
       document.getElementById("recordRows").innerHTML = data.records.map(record =>
         `<tr><td>${record.created_at}</td><td>${htmlEscape(record.project)}</td><td>${htmlEscape(record.station)}</td><td>${htmlEscape(record.barcode)}</td><td>${htmlEscape(record.step || "")}</td><td>${htmlEscape(record.result)}</td><td>${htmlEscape(record.note || "")}</td><td><button class="secondary" onclick="editRecord(${record.id})">编辑</button> <button class="danger" onclick="deleteRecord(${record.id})">删除</button></td></tr>`
       ).join("") || `<tr><td colspan="8">暂无记录</td></tr>`;
+    }
+
+    function parseIdList(value) {
+      return String(value || "").split(",").map(item => Number(item.trim())).filter(Boolean);
+    }
+
+    function selectedIds(id) {
+      return Array.from(document.getElementById(id).selectedOptions).map(option => Number(option.value)).filter(Boolean);
+    }
+
+    function setSelectedIds(id, ids) {
+      const selected = new Set((ids || []).map(Number));
+      Array.from(document.getElementById(id).options).forEach(option => {
+        option.selected = selected.has(Number(option.value));
+      });
+    }
+
+    function stationOptions(projectId = null, excludeStationId = null) {
+      const projects = projectId
+        ? fullData.projects.filter(project => project.id === Number(projectId))
+        : fullData.projects;
+      return projects.flatMap(project => project.stations
+        .filter(station => station.id !== excludeStationId)
+        .map(station => `<option value="${station.id}">${htmlEscape(project.name)} / ${htmlEscape(station.name)}</option>`)
+      ).join("");
+    }
+
+    function refreshDependencyStationOptions() {
+      const required = document.getElementById("depStationIds");
+      const requiredSelected = selectedIds("depStationIds");
+      required.innerHTML = stationOptions(null, selectedStationId);
+      setSelectedIds("depStationIds", requiredSelected);
+      const child = document.getElementById("depChildStationIds");
+      const childSelected = selectedIds("depChildStationIds");
+      child.innerHTML = stationOptions(document.getElementById("depChildProject").value || null);
+      setSelectedIds("depChildStationIds", childSelected);
+    }
+
+    function refreshBindingStationOptions() {
+      const select = document.getElementById("bindRequiredStationIds");
+      const selected = selectedIds("bindRequiredStationIds");
+      select.innerHTML = stationOptions(document.getElementById("bindChildProject").value || null);
+      setSelectedIds("bindRequiredStationIds", selected);
+    }
+
+    async function loadStationDependency() {
+      if (!selectedStationId) return;
+      const data = await api(`/api/stations/${selectedStationId}/dependencies`);
+      const dep = data.dependency || {};
+      refreshDependencyStationOptions();
+      document.getElementById("depPrevious").checked = dep.require_previous_station ?? true;
+      document.getElementById("depSwitch").checked = !!dep.require_barcode_switch;
+      setSelectedIds("depStationIds", dep.required_station_ids || []);
+      document.getElementById("depChildProject").value = dep.required_child_project_id || "";
+      refreshDependencyStationOptions();
+      document.getElementById("depChildType").value = dep.required_child_material_type || "";
+      document.getElementById("depChildCount").value = dep.required_child_count || 0;
+      setSelectedIds("depChildStationIds", dep.required_child_station_ids || []);
+    }
+
+    async function saveStationDependency() {
+      if (!selectedStationId) return showStatus("请先选择工位");
+      await api(`/api/stations/${selectedStationId}/dependencies`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          require_previous_station: document.getElementById("depPrevious").checked,
+          require_barcode_switch: document.getElementById("depSwitch").checked,
+          required_station_ids: selectedIds("depStationIds"),
+          required_child_project_id: Number(document.getElementById("depChildProject").value || 0) || null,
+          required_child_material_type: document.getElementById("depChildType").value.trim(),
+          required_child_count: Number(document.getElementById("depChildCount").value || 0),
+          required_child_station_ids: selectedIds("depChildStationIds")
+        })
+      });
+      showStatus("工位前置条件已保存");
+      await loadStationDependency();
+    }
+
+    async function loadProductTrace() {
+      const barcode = document.getElementById("traceBarcode").value.trim();
+      if (!barcode) return showStatus("请输入要追溯的条码");
+      const params = new URLSearchParams({barcode});
+      const data = await api(`/api/product-flow/trace?${params.toString()}`);
+      document.getElementById("traceResult").textContent = data.found
+        ? JSON.stringify(data, null, 2)
+        : "未找到该条码对应的产品实体";
     }
 
     async function deleteProject(id) {
@@ -945,6 +1194,10 @@ HTML = r"""<!doctype html>
       if (s7ToolFile) form.append("s7_tool_file", s7ToolFile);
       const res = await fetch("/api/client-releases", {method:"POST", body: form});
       const data = await res.json().catch(() => ({}));
+      if (res.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
       if (!res.ok) throw new Error(data.error || "保存失败");
       showStatus("版本已保存");
       await refreshClientReleases();
@@ -981,9 +1234,109 @@ HTML = r"""<!doctype html>
       await loadStationSessions();
     }
 
-    refreshAll().catch(err => showStatus(err.message));
-    refreshClientReleases().catch(() => {});
-    refreshClientUpdateLogs().catch(() => {});
+    async function loadCurrentUser() {
+      const data = await api("/api/auth/me");
+      currentUser = data.user;
+      document.getElementById("currentUsername").textContent = currentUser.username;
+      document.getElementById("currentRole").textContent =
+        currentUser.role === "super_admin" ? "超级管理员" : "管理员";
+      const isSuper = currentUser.role === "super_admin";
+      document.getElementById("changePasswordArea").style.display = isSuper ? "none" : "block";
+      document.getElementById("superPasswordHint").style.display = isSuper ? "block" : "none";
+    }
+
+    async function changeOwnPassword() {
+      const old_password = document.getElementById("oldPassword").value;
+      const new_password = document.getElementById("newPassword").value;
+      const confirmPassword = document.getElementById("confirmPassword").value;
+      if (!old_password || !new_password) return showStatus("请完整填写密码");
+      if (new_password !== confirmPassword) return showStatus("两次输入的新密码不一致");
+      const data = await api("/api/auth/change-password", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({old_password, new_password})
+      });
+      alert(data.message || "密码修改成功，请重新登录");
+      window.location.href = "/login";
+    }
+
+    async function loadAdminUsers() {
+      const data = await api("/api/admin/users");
+      document.getElementById("adminUserRows").innerHTML = data.users.map(user => {
+        const role = user.role === "super_admin" ? "超级管理员" : "管理员";
+        const actions = user.protected
+          ? `<span class="hint">受保护账号</span>`
+          : `<button class="secondary" onclick="editAdminUser(${user.id})">修改</button>
+             <button class="danger" onclick="deleteAdminUser(${user.id})">删除</button>`;
+        return `<tr><td>${htmlEscape(user.username)}</td><td>${htmlEscape(user.display_name || "")}</td>
+          <td>${role}</td><td>${user.is_active ? "是" : "否"}</td><td>${user.is_builtin ? "是" : "否"}</td>
+          <td>${htmlEscape(user.last_login_at || "")}</td><td>${actions}</td></tr>`;
+      }).join("") || `<tr><td colspan="7">暂无用户</td></tr>`;
+    }
+
+    async function createAdminUser() {
+      const username = document.getElementById("newAdminUsername").value.trim();
+      const display_name = document.getElementById("newAdminDisplayName").value.trim();
+      const password = document.getElementById("newAdminPassword").value;
+      if (!username || !password) return showStatus("用户名和初始密码不能为空");
+      await api("/api/admin/users", {
+        method: "POST",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({username, display_name, password})
+      });
+      document.getElementById("newAdminUsername").value = "";
+      document.getElementById("newAdminDisplayName").value = "";
+      document.getElementById("newAdminPassword").value = "";
+      showStatus("管理员已创建");
+      await loadAdminUsers();
+    }
+
+    async function editAdminUser(userId) {
+      const data = await api("/api/admin/users");
+      const user = data.users.find(item => item.id === userId);
+      if (!user || user.protected) return showStatus("超级管理员账号受保护");
+      const username = prompt("用户名", user.username);
+      if (!username) return;
+      const display_name = prompt("显示名称", user.display_name || "");
+      if (display_name === null) return;
+      const is_active = confirm("点击“确定”保持启用；点击“取消”将禁用该账号");
+      await api(`/api/admin/users/${userId}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({username, display_name, is_active})
+      });
+      showStatus("用户已更新");
+      await loadAdminUsers();
+    }
+
+    async function deleteAdminUser(userId) {
+      if (!confirm("确定删除这个普通管理员账号吗？")) return;
+      await api(`/api/admin/users/${userId}`, {method: "DELETE"});
+      showStatus("用户已删除");
+      await loadAdminUsers();
+    }
+
+    async function loadLoginLogs() {
+      const data = await api("/api/admin/login-logs?limit=100");
+      document.getElementById("loginLogRows").innerHTML = data.records.map(row =>
+        `<tr><td>${htmlEscape(row.created_at || "")}</td><td>${htmlEscape(row.username || "")}</td>
+          <td>${htmlEscape(row.role || "")}</td><td>${htmlEscape(row.ip_address || "")}</td>
+          <td>${row.success ? "成功" : "失败"}</td><td>${htmlEscape(row.message || "")}</td></tr>`
+      ).join("") || `<tr><td colspan="6">暂无日志</td></tr>`;
+    }
+
+    async function startAdminPage() {
+      await loadCurrentUser();
+      await refreshAll();
+      await Promise.all([
+        refreshClientReleases().catch(() => {}),
+        refreshClientUpdateLogs().catch(() => {}),
+        loadAdminUsers().catch(() => {}),
+        loadLoginLogs().catch(() => {})
+      ]);
+    }
+
+    startAdminPage().catch(err => showStatus(err.message));
   </script>
 </body>
 </html>

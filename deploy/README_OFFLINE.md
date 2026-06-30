@@ -30,8 +30,8 @@ web_admin.py
 desktop_app\
 web_admin_app\
 shared\
-requirements.txt
-requirements-build.txt
+requirements-client.txt
+requirements-dev.txt
 offline_wheels\
 deploy\
 ```
@@ -93,4 +93,3 @@ QualityControlSystem.exe
 ```bat
 deploy\start_all.bat
 ```
-

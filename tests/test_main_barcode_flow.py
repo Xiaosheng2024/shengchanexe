@@ -5,10 +5,24 @@ import unittest
 from datetime import datetime, timedelta
 from http.server import ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError
 from urllib.request import urlopen
 
 from web_admin_app import database, services
-from web_admin_app.server import AdminHandler
+from web_admin_app.server import AdminHandler, load_server_config
+
+
+class ServerConfigTest(unittest.TestCase):
+    def test_server_config_defaults_to_all_interfaces(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "missing.ini"
+            self.assertEqual(load_server_config(config_path), {"host": "0.0.0.0", "port": 8000})
+
+    def test_server_config_reads_host_and_port(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            config_path = Path(temp_dir) / "config.ini"
+            config_path.write_text("[SERVER]\nhost = 0.0.0.0\nport = 8123\n", encoding="utf-8")
+            self.assertEqual(load_server_config(config_path), {"host": "0.0.0.0", "port": 8123})
 
 
 class MainBarcodeFlowTest(unittest.TestCase):
@@ -321,9 +335,9 @@ class MainBarcodeFlowTest(unittest.TestCase):
         thread.start()
         try:
             port = server.server_address[1]
-            with urlopen(f"http://127.0.0.1:{port}/api/station-sessions?status=online", timeout=3) as response:
-                body = response.read().decode("utf-8")
-            self.assertIn('"sessions": []', body)
+            with self.assertRaises(HTTPError) as raised:
+                urlopen(f"http://127.0.0.1:{port}/api/station-sessions?status=online", timeout=3)
+            self.assertEqual(raised.exception.code, 401)
         finally:
             server.shutdown()
             server.server_close()
@@ -428,10 +442,30 @@ class OldDatabaseMigrationTest(unittest.TestCase):
                 self.assertIn("plc_barcode_db", columns)
                 self.assertIn("plc_barcode_offset", columns)
                 self.assertIn("plc_barcode_length", columns)
+                self.assertIn("switch_disable_old", columns)
+                self.assertIn("bind_required_station_ids", columns)
                 main_count = conn.execute(
                     "SELECT COUNT(*) AS total FROM steps WHERE station_id = 1 AND is_main_barcode = 1"
                 ).fetchone()["total"]
                 self.assertEqual(main_count, 1)
+                flow_tables = {
+                    row["name"]
+                    for row in conn.execute(
+                        """
+                        SELECT name FROM sqlite_master
+                        WHERE type = 'table'
+                        """
+                    ).fetchall()
+                }
+                self.assertTrue(
+                    {
+                        "product_instances",
+                        "barcode_aliases",
+                        "barcode_switch_records",
+                        "material_bindings",
+                        "station_dependencies",
+                    }.issubset(flow_tables)
+                )
             database.DB_PATH = old_db_path
             database.CONFIG_PATH = old_config_path
 

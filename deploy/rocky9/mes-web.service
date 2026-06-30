@@ -1,0 +1,17 @@
+[Unit]
+Description=MES Web Admin Service
+Requires=postgresql-16.service
+After=network-online.target postgresql-16.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dell
+WorkingDirectory=/opt/mes
+ExecStart=/opt/mes/.venv/bin/python /opt/mes/web_admin.py
+Restart=always
+RestartSec=3
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

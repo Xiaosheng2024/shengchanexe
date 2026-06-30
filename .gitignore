@@ -1,8 +1,15 @@
 __pycache__/
 .DS_Store
+.venv/
 *.pyc
+*.exe
+*.zip
+config.ini
+config_*.ini
 quality_control.db
 dist/
 build/
 *.spec
 offline_wheels/
+logs/
+s7_plc_test_tool/logs/
