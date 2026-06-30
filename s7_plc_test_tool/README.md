@@ -7,13 +7,15 @@
 ## 安装依赖
 
 ```bash
-pip install -r requirements.txt
+pip install -r ../requirements-client.txt
 ```
 
 ## 运行
 
+在项目根目录运行：
+
 ```bash
-python main.py
+python s7_plc_test_tool/main.py
 ```
 
 程序启动后不会自动连接 PLC，需要手动点击“连接PLC”，再点击“开始监听”。
@@ -26,11 +28,16 @@ Windows 下双击或运行：
 build_exe.bat
 ```
 
+`build_exe.bat` 会安装本工具所需的 `python-snap7`、`PyQt5` 和打包依赖。
+
 打包完成后 EXE 位置：
 
 ```text
-dist\S7_PLC_Test_Tool.exe
+s7_plc_test_tool\dist\S7_PLC_Test_Tool.exe
 ```
+
+打包命令从项目根目录执行，并显式收集 `shared` 与
+`shared.s7_plc_client`。测试工具的默认 `config.ini` 会嵌入单文件 EXE。
 
 ## 修改配置
 

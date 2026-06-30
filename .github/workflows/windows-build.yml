@@ -25,8 +25,7 @@ jobs:
       - name: Install dependencies
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt pyinstaller
-          python -m pip install -r s7_plc_test_tool/requirements.txt
+          python -m pip install -r requirements-client.txt -r requirements-dev.txt
 
       - name: Build quality control exe
         run: |
@@ -37,9 +36,26 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --console --name QualityControlSystem_Debug main.py
 
       - name: Build S7 PLC test tool exe
-        working-directory: s7_plc_test_tool
         run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name S7_PLC_Test_Tool main.py
+          pyinstaller --noconfirm --clean --onefile --windowed --name S7_PLC_Test_Tool --paths . --hidden-import shared --hidden-import shared.s7_plc_client --add-data "s7_plc_test_tool/config.ini;." --distpath s7_plc_test_tool/dist --workpath s7_plc_test_tool/build --specpath s7_plc_test_tool s7_plc_test_tool/main.py
+
+      - name: Smoke test S7 PLC test tool
+        shell: pwsh
+        run: |
+          $exe = Resolve-Path "s7_plc_test_tool/dist/S7_PLC_Test_Tool.exe"
+          $process = Start-Process -FilePath $exe -PassThru
+          try {
+            Start-Sleep -Seconds 8
+            if ($process.HasExited) {
+              throw "S7_PLC_Test_Tool.exe exited during startup with code $($process.ExitCode)"
+            }
+            Write-Host "S7_PLC_Test_Tool.exe startup smoke test passed"
+          }
+          finally {
+            if (-not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force
+            }
+          }
 
       - name: Upload quality control artifact
         uses: actions/upload-artifact@v4

@@ -1,16 +1,19 @@
 import configparser
 import csv
 import logging
+import os
 import sys
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Optional, Tuple
 
-BASE_DIR = Path(__file__).resolve().parent
-ROOT_DIR = BASE_DIR.parent
-if str(ROOT_DIR) not in sys.path:
-    sys.path.insert(0, str(ROOT_DIR))
+CURRENT_DIR = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = os.path.dirname(CURRENT_DIR)
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+BASE_DIR = Path(CURRENT_DIR)
 
 from PyQt5.QtCore import QTimer, Qt
 from PyQt5.QtWidgets import (
