@@ -17,9 +17,17 @@ cd "${PROJECT_DIR}"
 
 echo "== Git 状态 =="
 git status
-if [ -n "$(git status --porcelain)" ]; then
+DIRTY_SOURCE_FILES="$(
+  git status --porcelain \
+    | awk '$2 != "s7_plc_test_tool/config.ini" {print}'
+)"
+if [ -n "${DIRTY_SOURCE_FILES}" ]; then
   echo "错误：工作区存在未提交修改，请先提交或清理后再准备更新包。" >&2
+  printf '%s\n' "${DIRTY_SOURCE_FILES}" >&2
   exit 1
+fi
+if ! git diff --quiet -- s7_plc_test_tool/config.ini; then
+  echo "提示：保留本机 S7 测试工具配置变化；该 config.ini 不会进入服务器更新包。"
 fi
 
 echo "== 更新 main 分支 =="
