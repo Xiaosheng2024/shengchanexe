@@ -60,6 +60,7 @@ from shared.models import (
 
 
 APP_VERSION = "v0.9.2"
+DEFAULT_MES_SERVER_URL = "http://10.162.70.53:8000"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
@@ -1134,6 +1135,24 @@ class QualityControlWindow(QMainWindow):
                 changed = True
         if "LOCAL_DEVICE" not in config:
             config["LOCAL_DEVICE"] = {}
+            changed = True
+        if "SERVER" not in config:
+            config["SERVER"] = {}
+            changed = True
+        if not config["SERVER"].get("url", "").strip():
+            legacy_server_url = config["LOCAL_DEVICE"].get("mes_server", "").strip()
+            try:
+                config["SERVER"]["url"] = (
+                    normalize_server_url(legacy_server_url)
+                    if legacy_server_url
+                    else DEFAULT_MES_SERVER_URL
+                )
+            except ValueError:
+                logging.warning(
+                    "旧版 MES 服务器地址无效，使用内置地址：%s",
+                    DEFAULT_MES_SERVER_URL,
+                )
+                config["SERVER"]["url"] = DEFAULT_MES_SERVER_URL
             changed = True
         client_id = config["LOCAL_DEVICE"].get("client_id", "").strip()
         if not client_id:

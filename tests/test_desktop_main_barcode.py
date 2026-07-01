@@ -11,7 +11,11 @@ from PyQt5.QtGui import QKeyEvent
 from PyQt5.QtWidgets import QApplication, QLabel
 
 import desktop_app.window as window_module
-from desktop_app.window import APP_VERSION, QualityControlWindow
+from desktop_app.window import (
+    APP_VERSION,
+    DEFAULT_MES_SERVER_URL,
+    QualityControlWindow,
+)
 from shared.models import (
     BARCODE_SWITCH,
     MATERIAL_BIND,
@@ -479,9 +483,37 @@ class DesktopMainBarcodeTest(unittest.TestCase):
                 "http://mes.company.local:8000/api/client-update/download/v0.8.5/release",
             )
 
-    def test_missing_server_url_does_not_fall_back_to_hardcoded_ip(self):
+    def test_missing_server_url_uses_packaged_default_and_persists_it(self):
         window = self.make_window()
-        self.assertEqual(window.api_base_input.text(), "")
+        self.assertEqual(window.api_base_input.text(), DEFAULT_MES_SERVER_URL)
+        saved = configparser.ConfigParser()
+        saved.read(window.app_config_path, encoding="utf-8")
+        self.assertEqual(saved.get("SERVER", "url"), DEFAULT_MES_SERVER_URL)
+        self.assertTrue(saved.get("LOCAL_DEVICE", "client_id"))
+
+    def test_existing_server_url_is_not_overwritten_by_packaged_default(self):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            config_path = Path(tmp_dir) / "config.ini"
+            config_path.write_text(
+                "[SERVER]\n"
+                "url = http://mes.company.local:8000\n"
+                "[LOCAL_DEVICE]\n"
+                "client_id = fixed-client-id\n",
+                encoding="utf-8",
+            )
+            window = QualityControlWindow(config_path)
+            self.addCleanup(window.close)
+            self.assertEqual(
+                window.api_base_input.text(), "http://mes.company.local:8000"
+            )
+            saved = configparser.ConfigParser()
+            saved.read(config_path, encoding="utf-8")
+            self.assertEqual(
+                saved.get("SERVER", "url"), "http://mes.company.local:8000"
+            )
+            self.assertEqual(
+                saved.get("LOCAL_DEVICE", "client_id"), "fixed-client-id"
+            )
 
     def test_online_config_download_without_station_session_disables_production(self):
         window = self.make_window()
