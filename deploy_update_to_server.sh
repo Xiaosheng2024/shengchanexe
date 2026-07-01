@@ -155,7 +155,10 @@ sudo systemctl is-active --quiet "${MES_SERVICE}"
 sudo systemctl status "${MES_SERVICE}" --no-pager
 sudo systemctl status postgresql-16 --no-pager
 ss -lntp | grep -E ':8000|:5432'
-if ss -lnt | grep -E '(^|[[:space:]])(0\.0\.0\.0|\*):5432' >/dev/null; then
+PG_LISTEN_ADDRS="$(ss -lnt | awk '$4 ~ /:5432$/ {print $4}')"
+echo "PostgreSQL listen addresses:"
+echo "${PG_LISTEN_ADDRS}"
+if echo "${PG_LISTEN_ADDRS}" | grep -Eq '^(0\.0\.0\.0|\*|\[::\]):5432$'; then
   echo "错误：PostgreSQL 5432 正在对外监听。" >&2
   exit 1
 fi

@@ -850,7 +850,7 @@ class QualityControlWindow(QMainWindow):
                                 [ProcessStep("扫码首件条码", SCAN, is_main_barcode=True)],
                             ),
                             id=station_item.get("id"),
-                            route_name=station_item.get("route_name", "其他"),
+                            route_name=station_item.get("route_name", "A主线"),
                             route_order=int(station_item.get("route_order") or 0),
                             station_role=station_item.get("station_role", "普通工位"),
                             material_type=station_item.get("material_type", ""),
@@ -2288,10 +2288,10 @@ class QualityControlWindow(QMainWindow):
 
     def resolve_and_verify_main_barcode(self, barcode: str) -> bool:
         create_if_missing = (
-            self.current_station.station_role == "起点工位"
+            self.current_station.station_role
+            in {"起点工位", "PLC起点", "B起点工位"}
             or (
                 self.current_station.station_role == "普通工位"
-                and self.current_station.route_name == "其他"
                 and self.previous_station() is None
             )
         )

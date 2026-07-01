@@ -1,3 +1,4 @@
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -117,6 +118,7 @@ class RouteConfigurationTest(unittest.TestCase):
         self.assertEqual(route_names, {"A主线", "B子线"})
         a1 = self.station("A主线1")
         self.assertEqual(a1["material_type"], "A物料")
+        self.assertEqual(a1["station_role"], "PLC起点")
         self.assertEqual(a1["steps"][0]["type"], "PLC接收")
         self.assertTrue(a1["steps"][0]["is_main_barcode"])
         self.assertFalse(a1["dependency"]["require_previous_station"])
@@ -124,6 +126,12 @@ class RouteConfigurationTest(unittest.TestCase):
             self.stations["B子线-预装1"]["dependency"][
                 "require_previous_station"
             ]
+        )
+        self.assertEqual(
+            self.stations["B子线-预装1"]["station_role"], "B起点工位"
+        )
+        self.assertEqual(
+            self.stations["B子线-预装2"]["station_role"], "B完成工位"
         )
 
     def test_route_migration_is_idempotent(self):
@@ -262,6 +270,155 @@ class RouteConfigurationTest(unittest.TestCase):
         self.assertIn('data-station-id="${item.id}"', HTML)
         self.assertIn("selectedStationId = Number(stationId)", HTML)
         self.assertIn("station.id === selectedStationId", HTML)
+
+    def test_station_management_adds_edits_and_lists_route_fields(self):
+        created = services.add_station(
+            {
+                "project_id": self.project["id"],
+                "name": "返修检查",
+                "route_name": "返修线",
+                "route_order": 2,
+                "station_role": "普通工位",
+            }
+        )
+        services.update_station(
+            created["id"],
+            {
+                "project_id": self.project["id"],
+                "name": "返修完成",
+                "route_name": "B子线",
+                "route_order": 3,
+                "station_role": "B完成工位",
+            },
+        )
+        refreshed = services.list_projects_full()
+        station = next(
+            item
+            for project in refreshed
+            if project["id"] == self.project["id"]
+            for item in project["stations"]
+            if item["id"] == created["id"]
+        )
+        self.assertEqual(station["name"], "返修完成")
+        self.assertEqual(station["route_name"], "B子线")
+        self.assertEqual(station["route_order"], 3)
+        self.assertEqual(station["station_role"], "B完成工位")
+
+    def test_station_management_and_tree_expose_route_controls(self):
+        for element_id in (
+            "stationRoute",
+            "stationRouteOrder",
+            "stationRole",
+            "routeStationRole",
+        ):
+            self.assertIn(f'id="{element_id}"', HTML)
+        self.assertIn("<th>路线</th><th>顺序</th>", HTML)
+        self.assertIn('class="tree-node tree-route"', HTML)
+        self.assertIn('const route = station.route_name || "A主线"', HTML)
+        self.assertIn("routeSortValue(left.route_name)", HTML)
+
+    def test_station_route_order_is_project_route_then_order(self):
+        services.add_station(
+            {
+                "project_id": self.project["id"],
+                "name": "A最前",
+                "route_name": "A主线",
+                "route_order": 0,
+                "station_role": "起点工位",
+            }
+        )
+        project = next(
+            item
+            for item in services.list_projects_full()
+            if item["id"] == self.project["id"]
+        )
+        route_order_pairs = [
+            (station["route_name"], station["route_order"])
+            for station in project["stations"]
+        ]
+        route_rank = {"A主线": 1, "B子线": 2, "返修线": 3, "其他": 4}
+        self.assertEqual(
+            route_order_pairs,
+            sorted(
+                route_order_pairs,
+                key=lambda item: (route_rank[item[0]], item[1]),
+            ),
+        )
+
+    def test_station_route_values_reject_unknown_choices(self):
+        with self.assertRaisesRegex(ValueError, "所属路线不正确"):
+            services.add_station(
+                {
+                    "project_id": self.project["id"],
+                    "name": "无效路线",
+                    "route_name": "临时路线",
+                }
+            )
+        with self.assertRaisesRegex(ValueError, "工位作用不正确"):
+            services.add_station(
+                {
+                    "project_id": self.project["id"],
+                    "name": "无效作用",
+                    "station_role": "临时作用",
+                }
+            )
+
+
+class LegacyStationRouteMigrationTest(unittest.TestCase):
+    def setUp(self):
+        self.old_db_path = database.DB_PATH
+        self.old_config_path = database.CONFIG_PATH
+        self.temp_dir = tempfile.TemporaryDirectory()
+        database.DB_PATH = Path(self.temp_dir.name) / "legacy.db"
+        database.CONFIG_PATH = Path(self.temp_dir.name) / "config.ini"
+        database.CONFIG_PATH.write_text(
+            f"[DATABASE]\ntype = sqlite\npath = {database.DB_PATH}\n",
+            encoding="utf-8",
+        )
+        with sqlite3.connect(database.DB_PATH) as conn:
+            conn.executescript(
+                """
+                CREATE TABLE projects (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    name TEXT NOT NULL UNIQUE,
+                    created_at TEXT NOT NULL
+                );
+                CREATE TABLE stations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    project_id INTEGER NOT NULL,
+                    name TEXT NOT NULL,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(project_id, name)
+                );
+                INSERT INTO projects(id, name, created_at)
+                VALUES (1, 'X04C旧项目', '2026-01-01 00:00:00');
+                INSERT INTO stations(id, project_id, name, created_at)
+                VALUES
+                    (3, 1, '旧工位3', '2026-01-01 00:00:00'),
+                    (7, 1, '旧工位7', '2026-01-01 00:00:00');
+                """
+            )
+
+    def tearDown(self):
+        database.DB_PATH = self.old_db_path
+        database.CONFIG_PATH = self.old_config_path
+        self.temp_dir.cleanup()
+
+    def test_old_station_rows_are_preserved_and_migration_is_repeatable(self):
+        database.init_db()
+        database.init_db()
+        with database.get_conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT id, name, route_name, route_order, station_role
+                FROM stations ORDER BY id
+                """
+            ).fetchall()
+        self.assertEqual([row["id"] for row in rows], [3, 7])
+        self.assertEqual([row["name"] for row in rows], ["旧工位3", "旧工位7"])
+        self.assertTrue(all(row["route_name"] == "A主线" for row in rows))
+        self.assertEqual([row["route_order"] for row in rows], [3, 7])
+        self.assertTrue(all(row["station_role"] == "普通工位" for row in rows))
 
 
 if __name__ == "__main__":

@@ -23,8 +23,10 @@ HTML = r"""<!doctype html>
     .tree-spacer { width: 18px; flex: 0 0 18px; }
     .tree-label { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
     .tree-project { margin-top: 6px; }
-    .tree-station { margin-left: 14px; }
-    .tree-step { margin-left: 28px; color: #4b5563; }
+    .tree-route { margin-left: 14px; color: #1d4ed8; font-weight: 700; cursor: default; }
+    .tree-route:hover { background: transparent; }
+    .tree-station { margin-left: 28px; }
+    .tree-step { margin-left: 42px; color: #4b5563; }
     .tree-step.active { color: white; }
     main { padding: 18px; }
     .page { display: none; }
@@ -115,6 +117,20 @@ HTML = r"""<!doctype html>
             <select id="stationProject"></select>
             <label>工位名称</label>
             <input id="stationName" placeholder="例如：工位1">
+            <label>所属路线</label>
+            <select id="stationRoute">
+              <option>A主线</option><option>B子线</option>
+              <option>返修线</option><option>其他</option>
+            </select>
+            <label>路线顺序</label>
+            <input id="stationRouteOrder" type="number" min="0" value="0">
+            <label>工位作用</label>
+            <select id="stationRole">
+              <option>普通工位</option><option>起点工位</option>
+              <option>PLC起点</option><option>主条码切换工位</option>
+              <option>合并绑定工位</option><option>后续工位</option>
+              <option>B起点工位</option><option>B完成工位</option>
+            </select>
             <button class="primary" onclick="addStation()">添加工位</button>
             <button class="primary" onclick="updateStation()">保存修改</button>
             <button class="secondary" onclick="resetStationForm()">取消编辑</button>
@@ -124,7 +140,7 @@ HTML = r"""<!doctype html>
         <div class="panel">
           <h2>工位列表 <span class="hint" id="selectedStationProjectText"></span></h2>
           <table>
-            <thead><tr><th>项目</th><th>工位</th><th>创建时间</th><th>操作</th></tr></thead>
+            <thead><tr><th>项目</th><th>路线</th><th>顺序</th><th>工位</th><th>工位作用</th><th>创建时间</th><th>操作</th></tr></thead>
             <tbody id="stationRows"></tbody>
           </table>
         </div>
@@ -299,8 +315,9 @@ HTML = r"""<!doctype html>
                 <label>工位作用</label>
                 <select id="routeStationRole">
                   <option>普通工位</option><option>起点工位</option>
-                  <option>主条码切换工位</option><option>合并工位</option>
-                  <option>后续工位</option>
+                  <option>PLC起点</option><option>主条码切换工位</option>
+                  <option>合并绑定工位</option><option>后续工位</option>
+                  <option>B起点工位</option><option>B完成工位</option>
                 </select>
                 <label>物料类型</label><input id="routeMaterialType" placeholder="A物料 / B物料">
                 <button class="primary" onclick="saveRouteStation()">保存工位编排</button>
@@ -596,11 +613,11 @@ HTML = r"""<!doctype html>
       const station = currentStation();
       const groups = {};
       (project ? project.stations : []).forEach(item => {
-        const route = item.route_name || "其他";
+        const route = item.route_name || "A主线";
         (groups[route] ||= []).push(item);
       });
       document.getElementById("routeTree").innerHTML = Object.entries(groups)
-        .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
+        .sort(([left], [right]) => routeSortValue(left) - routeSortValue(right) || left.localeCompare(right, "zh-CN"))
         .map(([route, stations]) => {
           const rows = stations
             .sort((left, right) => (left.route_order || 0) - (right.route_order || 0) || left.id - right.id)
@@ -611,7 +628,7 @@ HTML = r"""<!doctype html>
 
       document.getElementById("routeStationIdText").textContent = station ? `station_id=${station.id}` : "";
       document.getElementById("routeStationName").value = station ? station.name : "";
-      document.getElementById("routeName").value = station ? (station.route_name || "其他") : "其他";
+      document.getElementById("routeName").value = station ? (station.route_name || "A主线") : "A主线";
       document.getElementById("routeOrder").value = station ? (station.route_order || 0) : 0;
       document.getElementById("routeStationRole").value = station ? (station.station_role || "普通工位") : "普通工位";
       document.getElementById("routeMaterialType").value = station ? (station.material_type || "") : "";
@@ -631,7 +648,7 @@ HTML = r"""<!doctype html>
           return `station_id=${id}`;
         });
         return `<div><strong>${htmlEscape(step.name)}</strong><br>
-          父件路线：${htmlEscape(station.route_name || "其他")}；父件物料：${htmlEscape(station.material_type || "")}；父件条码：当前有效主条码<br>
+          父件路线：${htmlEscape(station.route_name || "A主线")}；父件物料：${htmlEscape(station.material_type || "")}；父件条码：当前有效主条码<br>
           子件路线：${htmlEscape(step.bind_child_route || "未设置")}；子件物料：${htmlEscape(step.bind_child_material_type || "")}；数量：${step.bind_required_count || 1}<br>
           子件必须完成：${htmlEscape(stationNames.join("、") || "未设置")}；
           ${step.bind_require_parent_switch ? "父件必须完成主条码切换；" : ""}
@@ -643,7 +660,7 @@ HTML = r"""<!doctype html>
       const dependency = station ? (station.dependency || {}) : {};
       const stationOptionsHtml = (project ? project.stations : [])
         .filter(item => !station || item.id !== station.id)
-        .map(item => `<option value="${item.id}">${htmlEscape(item.route_name || "其他")} / ${htmlEscape(item.name)}</option>`)
+        .map(item => `<option value="${item.id}">${htmlEscape(item.route_name || "A主线")} / ${htmlEscape(item.name)}</option>`)
         .join("");
       document.getElementById("routeDepStationIds").innerHTML = stationOptionsHtml;
       document.getElementById("routeDepChildStationIds").innerHTML = (project ? project.stations : [])
@@ -803,16 +820,28 @@ HTML = r"""<!doctype html>
         const projectActive = project.id === selectedProjectId;
         const projectExpanded = expandedProjects.has(project.id);
         const projectSign = projectExpanded ? "-" : "+";
-        const stationHtml = project.stations.map(station => {
-          const stationActive = station.id === selectedStationId;
-          const stationExpanded = expandedStations.has(station.id);
-          const stationSign = stationExpanded ? "-" : "+";
-          const steps = station.steps || [];
-          const stepHtml = steps.map(step =>
-            `<div class="tree-node tree-step" onclick="selectStep(${project.id}, ${station.id}, ${step.id})"><span class="tree-spacer"></span><span class="tree-label">规则：${htmlEscape(step.name)}</span></div>`
-          ).join("");
-          return `<div class="tree-node tree-station ${stationActive ? "active" : ""}" onclick="selectStation(${project.id}, ${station.id})"><span class="tree-toggle" onclick="toggleStation(event, ${project.id}, ${station.id})">${stationSign}</span><span class="tree-label">工位：${htmlEscape(station.name)}</span></div>${stationExpanded ? stepHtml : ""}`;
-        }).join("");
+        const routeGroups = {};
+        project.stations.forEach(station => {
+          const route = station.route_name || "A主线";
+          (routeGroups[route] ||= []).push(station);
+        });
+        const stationHtml = Object.entries(routeGroups)
+          .sort(([left], [right]) => routeSortValue(left) - routeSortValue(right) || left.localeCompare(right, "zh-CN"))
+          .map(([route, stations]) => {
+            const rows = stations
+              .sort((left, right) => Number(left.route_order || 0) - Number(right.route_order || 0) || left.id - right.id)
+              .map(station => {
+                const stationActive = station.id === selectedStationId;
+                const stationExpanded = expandedStations.has(station.id);
+                const stationSign = stationExpanded ? "-" : "+";
+                const steps = station.steps || [];
+                const stepHtml = steps.map(step =>
+                  `<div class="tree-node tree-step" onclick="selectStep(${project.id}, ${station.id}, ${step.id})"><span class="tree-spacer"></span><span class="tree-label">规则：${htmlEscape(step.name)}</span></div>`
+                ).join("");
+                return `<div class="tree-node tree-station ${stationActive ? "active" : ""}" onclick="selectStation(${project.id}, ${station.id})"><span class="tree-toggle" onclick="toggleStation(event, ${project.id}, ${station.id})">${stationSign}</span><span class="tree-label">${station.route_order || 0}. ${htmlEscape(station.name)}</span></div>${stationExpanded ? stepHtml : ""}`;
+              }).join("");
+            return `<div class="tree-node tree-route"><span class="tree-spacer"></span><span class="tree-label">${htmlEscape(route)}</span></div>${rows}`;
+          }).join("");
         return `<div class="tree-node tree-project ${projectActive ? "active" : ""}" onclick="selectProject(${project.id})"><span class="tree-toggle" onclick="toggleProject(event, ${project.id})">${projectSign}</span><span class="tree-label">项目：${htmlEscape(project.name)}</span></div>${projectExpanded ? stationHtml : ""}`;
       }).join("");
       document.getElementById("menuTree").innerHTML = tree || `<div class="hint">暂无项目</div>`;
@@ -832,10 +861,20 @@ HTML = r"""<!doctype html>
 
     function renderStations() {
       const project = currentProject();
-      const rows = (project ? project.stations : []).map(station =>
-        `<tr><td>${htmlEscape(project.name)}</td><td>${htmlEscape(station.name)}</td><td>${station.created_at}</td><td><button class="secondary" onclick="selectStation(${project.id}, ${station.id})">选择</button> <button class="secondary" onclick="editStation(${station.id})">编辑</button> <button class="danger" onclick="deleteStation(${station.id})">删除</button></td></tr>`
+      const stations = project ? [...project.stations].sort(
+        (left, right) => routeSortValue(left.route_name) - routeSortValue(right.route_name)
+          || String(left.route_name || "").localeCompare(String(right.route_name || ""), "zh-CN")
+          || Number(left.route_order || 0) - Number(right.route_order || 0)
+          || left.id - right.id
+      ) : [];
+      const rows = stations.map(station =>
+        `<tr><td>${htmlEscape(project.name)}</td><td>${htmlEscape(station.route_name || "A主线")}</td><td>${station.route_order || 0}</td><td>${htmlEscape(station.name)}</td><td>${htmlEscape(station.station_role || "普通工位")}</td><td>${station.created_at}</td><td><button class="secondary" onclick="selectStation(${project.id}, ${station.id})">选择</button> <button class="secondary" onclick="editStation(${station.id})">编辑</button> <button class="danger" onclick="deleteStation(${station.id})">删除</button></td></tr>`
       ).join("");
-      document.getElementById("stationRows").innerHTML = rows || `<tr><td colspan="4">暂无工位</td></tr>`;
+      document.getElementById("stationRows").innerHTML = rows || `<tr><td colspan="7">暂无工位</td></tr>`;
+    }
+
+    function routeSortValue(routeName) {
+      return {"A主线": 1, "B子线": 2, "返修线": 3, "其他": 4}[routeName || "A主线"] || 99;
     }
 
     function refreshProjectOptions() {
@@ -950,9 +989,15 @@ HTML = r"""<!doctype html>
       await api("/api/stations", {
         method: "POST",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({project_id, name})
+        body: JSON.stringify({
+          project_id,
+          name,
+          route_name: document.getElementById("stationRoute").value,
+          route_order: Number(document.getElementById("stationRouteOrder").value || 0),
+          station_role: document.getElementById("stationRole").value
+        })
       });
-      document.getElementById("stationName").value = "";
+      resetStationForm();
       showStatus("工位已添加");
       await refreshAll();
       const project = fullData.projects.find(item => item.id === project_id);
@@ -980,6 +1025,9 @@ HTML = r"""<!doctype html>
       document.getElementById("stationId").value = station.id;
       document.getElementById("stationProject").value = project.id;
       document.getElementById("stationName").value = station.name;
+      document.getElementById("stationRoute").value = station.route_name || "A主线";
+      document.getElementById("stationRouteOrder").value = station.route_order || 0;
+      document.getElementById("stationRole").value = station.station_role || "普通工位";
       renderMenuTree();
       renderStations();
       showStatus("正在编辑工位");
@@ -988,6 +1036,9 @@ HTML = r"""<!doctype html>
     function resetStationForm() {
       document.getElementById("stationId").value = "";
       document.getElementById("stationName").value = "";
+      document.getElementById("stationRoute").value = "A主线";
+      document.getElementById("stationRouteOrder").value = 0;
+      document.getElementById("stationRole").value = "普通工位";
     }
 
     async function updateStation() {
@@ -999,7 +1050,13 @@ HTML = r"""<!doctype html>
       await api(`/api/stations/${id}`, {
         method: "PUT",
         headers: {"Content-Type": "application/json"},
-        body: JSON.stringify({project_id, name})
+        body: JSON.stringify({
+          project_id,
+          name,
+          route_name: document.getElementById("stationRoute").value,
+          route_order: Number(document.getElementById("stationRouteOrder").value || 0),
+          station_role: document.getElementById("stationRole").value
+        })
       });
       resetStationForm();
       showStatus("工位已修改");

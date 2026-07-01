@@ -98,7 +98,7 @@ class StationConfig:
     name: str
     product: ProductConfig
     id: Optional[int] = None
-    route_name: str = "其他"
+    route_name: str = "A主线"
     route_order: int = 0
     station_role: str = "普通工位"
     material_type: str = ""

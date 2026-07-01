@@ -56,7 +56,7 @@ FLOW_STEP_COLUMNS = {
     "bind_allow_unbind": "INTEGER NOT NULL DEFAULT 0",
 }
 STATION_ROUTE_COLUMNS = {
-    "route_name": "TEXT NOT NULL DEFAULT '其他'",
+    "route_name": "TEXT NOT NULL DEFAULT 'A主线'",
     "route_order": "INTEGER NOT NULL DEFAULT 0",
     "station_role": "TEXT NOT NULL DEFAULT '普通工位'",
     "material_type": "TEXT NOT NULL DEFAULT ''",
@@ -345,7 +345,7 @@ def create_sqlite_schema(conn):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id INTEGER NOT NULL,
             name TEXT NOT NULL,
-            route_name TEXT NOT NULL DEFAULT '其他',
+            route_name TEXT NOT NULL DEFAULT 'A主线',
             route_order INTEGER NOT NULL DEFAULT 0,
             station_role TEXT NOT NULL DEFAULT '普通工位',
             material_type TEXT NOT NULL DEFAULT '',
@@ -426,7 +426,7 @@ def create_postgresql_schema(conn):
             id SERIAL PRIMARY KEY,
             project_id INTEGER NOT NULL REFERENCES projects(id),
             name TEXT NOT NULL,
-            route_name TEXT NOT NULL DEFAULT '其他',
+            route_name TEXT NOT NULL DEFAULT 'A主线',
             route_order INTEGER NOT NULL DEFAULT 0,
             station_role TEXT NOT NULL DEFAULT '普通工位',
             material_type TEXT NOT NULL DEFAULT '',
@@ -776,9 +776,14 @@ def migrate_sqlite_db(conn):
     station_columns = {
         row["name"] for row in conn.execute("PRAGMA table_info(stations)").fetchall()
     }
+    route_order_added = "route_order" not in station_columns
     for column, definition in STATION_ROUTE_COLUMNS.items():
         if column not in station_columns:
             conn.execute(f"ALTER TABLE stations ADD COLUMN {column} {definition}")
+    if route_order_added:
+        conn.execute(
+            "UPDATE stations SET route_order = id WHERE route_order = 0"
+        )
     columns = [row["name"] for row in conn.execute("PRAGMA table_info(steps)").fetchall()]
     if "is_main_barcode" not in columns:
         conn.execute("ALTER TABLE steps ADD COLUMN is_main_barcode INTEGER NOT NULL DEFAULT 0")
@@ -875,9 +880,17 @@ def migrate_postgresql_db(conn):
         """
     ).fetchall()
     station_columns = {row["column_name"] for row in station_rows}
+    route_order_added = "route_order" not in station_columns
     for column, definition in STATION_ROUTE_COLUMNS.items():
         if column not in station_columns:
             conn.execute(f"ALTER TABLE stations ADD COLUMN {column} {definition}")
+    if route_order_added:
+        conn.execute(
+            "UPDATE stations SET route_order = id WHERE route_order = 0"
+        )
+    conn.execute(
+        "ALTER TABLE stations ALTER COLUMN route_name SET DEFAULT 'A主线'"
+    )
     rows = conn.execute(
         """
         SELECT column_name

@@ -34,10 +34,15 @@ MATERIAL_BIND_TYPE = "子物料绑定"
 STATION_ROLES = {
     "普通工位",
     "起点工位",
+    "PLC起点",
     "主条码切换工位",
     "合并工位",
+    "合并绑定工位",
     "后续工位",
+    "B起点工位",
+    "B完成工位",
 }
+ROUTE_NAMES = {"A主线", "B子线", "返修线", "其他"}
 STEP_TYPES = (
     SCAN_TYPE,
     SCREW_TYPE,
@@ -312,7 +317,12 @@ def list_projects():
                 SELECT id, name, route_name, route_order, station_role, material_type
                 FROM stations
                 WHERE project_id = ?
-                ORDER BY route_name, route_order, id
+                ORDER BY
+                  CASE route_name
+                    WHEN 'A主线' THEN 1 WHEN 'B子线' THEN 2
+                    WHEN '返修线' THEN 3 ELSE 4
+                  END,
+                  route_order, id
                 """,
                 (project["id"],),
             ).fetchall()
@@ -340,7 +350,12 @@ def list_projects_full():
                 """
                 SELECT * FROM stations
                 WHERE project_id = ?
-                ORDER BY route_name, route_order, id
+                ORDER BY
+                  CASE route_name
+                    WHEN 'A主线' THEN 1 WHEN 'B子线' THEN 2
+                    WHEN '返修线' THEN 3 ELSE 4
+                  END,
+                  route_order, id
                 """,
                 (project["id"],),
             ).fetchall()
@@ -468,7 +483,9 @@ def update_station(station_id, payload):
 
 
 def station_route_values(payload):
-    route_name = str(payload.get("route_name") or "其他").strip() or "其他"
+    route_name = str(payload.get("route_name") or "A主线").strip() or "A主线"
+    if route_name not in ROUTE_NAMES:
+        raise ValueError("所属路线不正确")
     route_order = max(int(payload.get("route_order") or 0), 0)
     station_role = str(payload.get("station_role") or "普通工位").strip()
     if station_role not in STATION_ROLES:
@@ -492,7 +509,7 @@ def get_route_config(project_id):
     return {
         "project": project,
         "route_names": sorted(
-            {station["route_name"] or "其他" for station in project["stations"]}
+            {station["route_name"] or "A主线" for station in project["stations"]}
         ),
         "templates": [
             "普通串行路线",
@@ -663,7 +680,7 @@ def route_template_specs(project_name, template_name):
         return [
             {
                 "key": "a1", "name": f"{prefix}-A主线1",
-                "route": "A主线", "order": 1, "role": "起点工位",
+                "route": "A主线", "order": 1, "role": "PLC起点",
                 "material": "A物料", "steps": [plc("PLC接收A主条码")],
                 "dependency": {},
             },
@@ -683,7 +700,7 @@ def route_template_specs(project_name, template_name):
             },
             {
                 "key": "a_merge", "name": f"{prefix}-A合并B工位",
-                "route": "A主线", "order": 4, "role": "合并工位",
+                "route": "A主线", "order": 4, "role": "合并绑定工位",
                 "material": "A物料", "steps": [bind],
                 "dependency": {
                     "required": ["a_switch"],
@@ -705,13 +722,13 @@ def route_template_specs(project_name, template_name):
             },
             {
                 "key": "b_pre1", "name": "B子线-预装1",
-                "route": "B子线", "order": 1, "role": "起点工位",
+                "route": "B子线", "order": 1, "role": "B起点工位",
                 "material": "B物料", "steps": [scan("扫码B主条码")],
                 "dependency": {},
             },
             {
                 "key": "b_pre2", "name": "B子线-预装2",
-                "route": "B子线", "order": 2, "role": "普通工位",
+                "route": "B子线", "order": 2, "role": "B完成工位",
                 "material": "B物料",
                 "steps": [scan("扫码B主条码"), scan("B完成确认", 2, False)],
                 "dependency": {"required": ["b_pre1"]},
@@ -721,13 +738,13 @@ def route_template_specs(project_name, template_name):
         return [
             {
                 "key": "b_pre1", "name": "B子线-预装1",
-                "route": "B子线", "order": 1, "role": "起点工位",
+                "route": "B子线", "order": 1, "role": "B起点工位",
                 "material": "B物料", "steps": [scan("扫码B主条码")],
                 "dependency": {},
             },
             {
                 "key": "b_pre2", "name": "B子线-预装2",
-                "route": "B子线", "order": 2, "role": "普通工位",
+                "route": "B子线", "order": 2, "role": "B完成工位",
                 "material": "B物料", "steps": [scan("扫码B主条码")],
                 "dependency": {"required": ["b_pre1"]},
             },
@@ -753,7 +770,12 @@ def route_template_specs(project_name, template_name):
         return [
             {
                 "key": "start", "name": f"{prefix}-工位1",
-                "route": "A主线", "order": 1, "role": "起点工位",
+                "route": "A主线", "order": 1,
+                "role": (
+                    "PLC起点"
+                    if template_name == "PLC首工位路线"
+                    else "起点工位"
+                ),
                 "material": "A物料", "steps": [first_step],
                 "dependency": {},
             },
