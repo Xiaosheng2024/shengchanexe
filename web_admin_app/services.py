@@ -164,6 +164,52 @@ def release_stale_station_sessions(conn):
             log_station_session(conn, row["project_id"], row["station_id"], row_to_dict(row), "timeout-release", "心跳超过120秒，自动释放工位")
 
 
+def validate_station_session(payload):
+    client_id = str(payload.get("client_id") or "").strip()
+    if not client_id:
+        raise ValueError("缺少 client_id，当前工位未占用成功，请重新下载配置")
+    if payload.get("project_id") in (None, ""):
+        raise ValueError("缺少 project_id，当前工位未占用成功，请重新下载配置")
+    if payload.get("station_id") in (None, ""):
+        raise ValueError("缺少 station_id，当前工位未占用成功，请重新下载配置")
+    session_id = payload.get("station_session_id")
+    if session_id in (None, ""):
+        raise ValueError("当前工位未占用成功，请重新下载配置")
+    try:
+        project_id = int(payload["project_id"])
+        station_id = int(payload["station_id"])
+        session_id = int(session_id)
+    except (TypeError, ValueError):
+        raise ValueError("工位占用信息格式错误，请重新下载配置") from None
+
+    with get_conn() as conn:
+        release_stale_station_sessions(conn)
+        row = conn.execute(
+            "SELECT * FROM station_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row or row["status"] != "online":
+            raise ValueError("工位占用已失效，请重新下载配置")
+        if (
+            int(row["project_id"]) != project_id
+            or int(row["station_id"]) != station_id
+        ):
+            raise ValueError("当前工位占用信息不匹配，请重新下载配置")
+        if str(row["client_id"]) != client_id:
+            raise ValueError("当前客户端与工位占用信息不匹配，请重新下载配置")
+        last_heartbeat = parse_time(row["last_heartbeat_at"])
+        threshold = datetime.now() - timedelta(
+            seconds=STATION_SESSION_TIMEOUT_SECONDS
+        )
+        if not last_heartbeat or last_heartbeat < threshold:
+            conn.execute(
+                "UPDATE station_sessions SET status = 'offline', note = ? WHERE id = ?",
+                ("心跳超时自动释放", session_id),
+            )
+            raise ValueError("工位占用已失效，请重新下载配置")
+        return row_to_dict(row)
+
+
 def acquire_station_session(payload, force=False):
     payload = normalize_session_payload(payload)
     with get_conn() as conn:
@@ -231,29 +277,43 @@ def acquire_station_session(payload, force=False):
 
 
 def heartbeat_station_session(payload):
-    payload = normalize_session_payload(payload)
-    client_id = payload["client_id"]
+    session = validate_station_session(payload)
     with get_conn() as conn:
-        project_id, station_id = resolve_project_station_ids(conn, payload)
-        release_stale_station_sessions(conn)
-        row = conn.execute(
-            "SELECT * FROM station_sessions WHERE project_id = ? AND station_id = ? AND status = 'online'",
-            (project_id, station_id),
-        ).fetchone()
-        if not row or row["client_id"] != client_id:
-            return {"ok": False, "message": "工位占用已失效或被接管", "session": row_to_dict(row)}
-        conn.execute("UPDATE station_sessions SET last_heartbeat_at = ? WHERE id = ?", (now_text(), row["id"]))
-    return {"ok": True}
+        conn.execute(
+            "UPDATE station_sessions SET last_heartbeat_at = ?, note = ? WHERE id = ?",
+            (now_text(), "心跳更新", session["id"]),
+        )
+    return {"ok": True, "session_id": session["id"]}
 
 
 def release_station_session(payload):
-    payload = normalize_session_payload(payload)
-    client_id = payload["client_id"]
+    client_id = str(payload.get("client_id") or "").strip()
+    if not client_id:
+        raise ValueError("缺少 client_id，当前工位未占用成功，请重新下载配置")
+    if payload.get("station_session_id") in (None, ""):
+        raise ValueError("当前工位未占用成功，请重新下载配置")
     with get_conn() as conn:
         project_id, station_id = resolve_project_station_ids(conn, payload)
+        try:
+            session_id = int(payload["station_session_id"])
+        except (TypeError, ValueError):
+            raise ValueError("station_session_id格式错误") from None
+        row = conn.execute(
+            "SELECT * FROM station_sessions WHERE id = ?",
+            (session_id,),
+        ).fetchone()
+        if not row:
+            raise ValueError("工位占用已失效，请重新下载配置")
+        if (
+            int(row["project_id"]) != project_id
+            or int(row["station_id"]) != station_id
+            or str(row["client_id"]) != client_id
+        ):
+            raise ValueError("当前工位占用信息不匹配，请重新下载配置")
         conn.execute(
-            "UPDATE station_sessions SET status = 'offline', note = ? WHERE project_id = ? AND station_id = ? AND client_id = ? AND status = 'online'",
-            ("客户端释放", project_id, station_id, client_id),
+            "UPDATE station_sessions SET status = 'offline', note = ? "
+            "WHERE id = ? AND status = 'online'",
+            ("客户端释放", session_id),
         )
         log_station_session(conn, project_id, station_id, dict(payload, client_id=client_id), "release", "客户端释放工位")
     return {"ok": True}

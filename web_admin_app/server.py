@@ -59,11 +59,34 @@ from web_admin_app.services import (
     upsert_client_release,
     report_client_update,
     report_degrade_mode,
+    validate_station_session,
     validate_barcode_use,
     download_client_release,
     vacuum_or_analyze,
 )
 
+
+CLIENT_SESSION_ENDPOINTS = {
+    "/api/station-completions",
+    "/api/scan-records",
+    "/api/production-records",
+    "/api/step-records",
+    "/api/screw-records",
+    "/api/product-flow/resolve-barcode",
+    "/api/product-flow/verify-entry",
+    "/api/product-flow/switch-barcode",
+    "/api/product-flow/bind-material",
+    "/api/client/barcode/validate",
+    "/api/client/barcode/cancel",
+    "/api/client/tool/degrade-mode/report",
+}
+
+STATION_SESSION_LIFECYCLE_ENDPOINTS = {
+    "/api/station-session/acquire",
+    "/api/station-session/force-acquire",
+    "/api/station-session/heartbeat",
+    "/api/station-session/release",
+}
 
 
 def json_response(handler, payload, status=200, extra_headers=None):
@@ -131,35 +154,39 @@ def session_user(handler):
 def is_public_client_api(method, path):
     if method == "GET":
         return (
-            path == "/api/projects"
-            or (path.startswith("/api/projects/") and path.endswith("/config"))
-            or path == "/api/station-config"
+            path == "/api/client/projects"
             or path == "/api/client/station-config"
             or path == "/api/station-completions/check"
             or path == "/api/client-update/latest"
             or path.startswith("/api/client-update/download/")
         )
     if method == "POST":
+        if (
+            path.startswith("/api/client/")
+            or path.startswith("/api/production/")
+            or path in CLIENT_SESSION_ENDPOINTS
+            or path in STATION_SESSION_LIFECYCLE_ENDPOINTS
+        ):
+            return True
         return path in {
-            "/api/station-completions",
-            "/api/scan-records",
-            "/api/production-records",
-            "/api/step-records",
-            "/api/screw-records",
-            "/api/station-session/acquire",
-            "/api/station-session/force-acquire",
-            "/api/station-session/heartbeat",
-            "/api/station-session/release",
             "/api/client-update/report",
-            "/api/product-flow/resolve-barcode",
-            "/api/product-flow/verify-entry",
-            "/api/product-flow/switch-barcode",
-            "/api/product-flow/bind-material",
-            "/api/client/barcode/validate",
-            "/api/client/barcode/cancel",
-            "/api/client/tool/degrade-mode/report",
         }
     return False
+
+
+def requires_station_session(method, path):
+    if method == "GET":
+        return path == "/api/station-completions/check"
+    if method != "POST":
+        return False
+    return (
+        path in CLIENT_SESSION_ENDPOINTS
+        or path.startswith("/api/production/")
+        or (
+            path.startswith("/api/client/")
+            and path != "/api/client-update/report"
+        )
+    )
 
 
 def require_api_auth(handler, method, path):
@@ -251,6 +278,11 @@ class AdminHandler(BaseHTTPRequestHandler):
         if not require_api_auth(self, "GET", path):
             return
         try:
+            if requires_station_session("GET", path):
+                query = parse_qs(urlparse(self.path).query)
+                validate_station_session(
+                    {key: values[0] for key, values in query.items()}
+                )
             self.route_get()
         except Exception as exc:
             logging.exception("GET %s 处理失败", self.path)
@@ -315,6 +347,8 @@ class AdminHandler(BaseHTTPRequestHandler):
         elif path == "/api/admin/login-logs":
             json_response(self, {"records": auth.list_login_logs(query.get("limit", ["100"])[0])})
         elif path == "/api/projects":
+            json_response(self, {"projects": list_projects()})
+        elif path == "/api/client/projects":
             json_response(self, {"projects": list_projects()})
         elif path == "/api/projects/full":
             json_response(self, {"projects": list_projects_full()})
@@ -427,6 +461,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             payload, files = read_form(self)
         else:
             payload, files = read_json(self), None
+        if requires_station_session("POST", path):
+            validate_station_session(payload)
         if path == "/api/auth/change-password":
             try:
                 auth.change_own_password(

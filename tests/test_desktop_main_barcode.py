@@ -42,6 +42,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.play_ok_sound = lambda: None
         window.show_auto_close_warning = lambda title, message: None
         window.disable_tool_auto_listen_checkbox.setChecked(True)
+        window.station_session_id = 1
         self.addCleanup(window.close)
         return window
 
@@ -521,6 +522,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.online_mode = True
         window.station_config_loaded = True
         window.station_session_acquired = False
+        window.station_session_id = None
         window.recompute_production_enabled()
         window.current_product = ProductConfig(
             "测试产品",
@@ -539,7 +541,41 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.current_barcode, "")
         self.assertFalse(window.current_product.steps[0].done)
         self.assertEqual(posts, [])
-        self.assertEqual(window.message_label.text(), "当前工位未占用成功，禁止生产")
+        self.assertEqual(
+            window.message_label.text(),
+            "当前工位未占用成功，请重新下载配置",
+        )
+
+    def test_barcode_request_payload_contains_station_session_context(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.current_project.id = 12
+        window.current_station.id = 34
+        window.station_session_client_id = "fixed-client"
+        window.station_session_id = 56
+
+        payload = window.with_station_session(
+            {
+                "barcode": "MAIN-SESSION-001",
+                "step_id": 78,
+                "is_main_barcode": True,
+            }
+        )
+
+        self.assertEqual(payload["client_id"], "fixed-client")
+        self.assertEqual(payload["project_id"], 12)
+        self.assertEqual(payload["station_id"], 34)
+        self.assertEqual(payload["station_session_id"], 56)
+
+    def test_barcode_request_without_station_session_is_not_sent(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.station_session_id = None
+
+        with self.assertRaisesRegex(
+            RuntimeError, "当前工位未占用成功，请重新下载配置"
+        ):
+            window.with_station_session({"barcode": "MAIN-001"})
 
     def test_switch_station_downloads_config_and_acquires_without_reentry(self):
         window = self.make_window()

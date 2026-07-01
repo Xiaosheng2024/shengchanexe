@@ -284,8 +284,11 @@ class MainBarcodeFlowTest(unittest.TestCase):
             "computer_name": "PC-A",
             "ip_address": "10.0.0.1",
         }
-        self.assertTrue(services.release_station_session(payload)["ok"])
-        self.assertTrue(services.acquire_station_session(payload)["ok"])
+        with self.assertRaisesRegex(ValueError, "当前工位未占用成功"):
+            services.release_station_session(payload)
+        acquired = services.acquire_station_session(payload)
+        self.assertTrue(acquired["ok"])
+        payload["station_session_id"] = acquired["session_id"]
         self.assertTrue(services.release_station_session(payload)["ok"])
         self.assertTrue(services.release_station_session(payload)["ok"])
         self.assertEqual(services.list_station_sessions()["sessions"], [])

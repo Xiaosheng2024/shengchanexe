@@ -67,6 +67,23 @@ DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
 DEFAULT_TOOL_COMMAND_DELAY_MS = 50
 DEFAULT_TOOL_POLL_INTERVAL_MS = 100
+CLIENT_SESSION_API_PATHS = {
+    "/api/station-completions",
+    "/api/scan-records",
+    "/api/production-records",
+    "/api/step-records",
+    "/api/screw-records",
+    "/api/product-flow/resolve-barcode",
+    "/api/product-flow/verify-entry",
+    "/api/product-flow/switch-barcode",
+    "/api/product-flow/bind-material",
+    "/api/client/barcode/validate",
+    "/api/client/barcode/cancel",
+    "/api/client/tool/degrade-mode/report",
+}
+CLIENT_SESSION_GET_PATHS = {
+    "/api/station-completions/check",
+}
 
 
 def normalize_server_url(value: str) -> str:
@@ -886,7 +903,10 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText("当前是离线模式，不需要同步项目工位")
             return
         try:
-            data = self.api_get("/api/projects")
+            try:
+                data = self.api_get("/api/client/projects")
+            except Exception:
+                data = self.api_get("/api/projects")
             projects = []
             for project_item in data.get("projects", []):
                 stations = []
@@ -1003,6 +1023,11 @@ class QualityControlWindow(QMainWindow):
         return urllib.parse.urljoin(base + "/", path)
 
     def api_get(self, path: str) -> dict:
+        parsed = urllib.parse.urlparse(path)
+        if self.online_mode and parsed.path in CLIENT_SESSION_GET_PATHS:
+            query = dict(urllib.parse.parse_qsl(parsed.query))
+            query.update(self.station_session_context())
+            path = f"{parsed.path}?{urllib.parse.urlencode(query)}"
         try:
             with urllib.request.urlopen(self.api_url(path), timeout=3) as response:
                 return json.loads(response.read().decode("utf-8"))
@@ -1010,6 +1035,8 @@ class QualityControlWindow(QMainWindow):
             raise RuntimeError(self.http_error_message(exc)) from None
 
     def api_post(self, path: str, payload: dict) -> dict:
+        if self.online_mode and path in CLIENT_SESSION_API_PATHS:
+            payload = self.with_station_session(payload)
         data = json.dumps(payload, ensure_ascii=False).encode("utf-8")
         request = urllib.request.Request(
             self.api_url(path),
@@ -1022,6 +1049,25 @@ class QualityControlWindow(QMainWindow):
                 return json.loads(response.read().decode("utf-8") or "{}")
         except urllib.error.HTTPError as exc:
             raise RuntimeError(self.http_error_message(exc)) from None
+
+    def with_station_session(self, payload: dict) -> dict:
+        result = dict(payload)
+        result.update(self.station_session_context())
+        return result
+
+    def station_session_context(self) -> dict:
+        if not self.station_session_id:
+            raise RuntimeError("当前工位未占用成功，请重新下载配置")
+        project_id = getattr(self.current_project, "id", None)
+        station_id = getattr(self.current_station, "id", None)
+        if not project_id or not station_id:
+            raise RuntimeError("当前工位占用信息不完整，请重新下载配置")
+        return {
+            "client_id": self.station_session_client_id,
+            "project_id": project_id,
+            "station_id": station_id,
+            "station_session_id": self.station_session_id,
+        }
 
     @staticmethod
     def http_error_message(exc) -> str:
@@ -1238,7 +1284,11 @@ class QualityControlWindow(QMainWindow):
 
     def recompute_production_enabled(self):
         was_enabled = self.production_enabled
-        self.production_enabled = (not self.online_mode) or (self.station_config_loaded and self.station_session_acquired)
+        self.production_enabled = (not self.online_mode) or (
+            self.station_config_loaded
+            and self.station_session_acquired
+            and bool(self.station_session_id)
+        )
         if self.production_enabled and not was_enabled:
             QTimer.singleShot(0, self.set_english_keyboard_layout)
         return self.production_enabled
@@ -1246,6 +1296,8 @@ class QualityControlWindow(QMainWindow):
     def production_disabled_message(self) -> str:
         if self.online_mode and not self.station_config_loaded:
             return "当前工位未下载在线配置，禁止生产"
+        if self.online_mode and not self.station_session_id:
+            return "当前工位未占用成功，请重新下载配置"
         return "当前工位未占用成功，禁止生产"
 
     def ensure_production_enabled(self) -> bool:
@@ -1485,6 +1537,7 @@ class QualityControlWindow(QMainWindow):
             "project": self.current_project.name,
             "station": self.current_station.name,
             "client_id": self.station_session_client_id,
+            "station_session_id": self.station_session_id,
             "computer_name": socket.gethostname(),
             "ip_address": ip_address,
         }
@@ -1501,18 +1554,23 @@ class QualityControlWindow(QMainWindow):
             self.recompute_production_enabled()
             self.message_label.setText(f"工位占用申请失败：{exc}")
             return False
-        self.station_session_acquired = bool(data.get("ok"))
+        self.station_session_id = data.get("session_id")
+        self.station_session_acquired = bool(
+            data.get("ok") and self.station_session_id
+        )
         if not self.station_session_acquired:
             conflict = data.get("conflict") or {}
-            message = (
-                f"工位已被占用：项目 {self.current_project.name}，工位 {self.current_station.name}，"
-                f"client_id {conflict.get('client_id', '')}，电脑 {conflict.get('computer_name', '')}，IP {conflict.get('ip_address', '')}，"
-                f"最后心跳 {conflict.get('last_heartbeat_at', '')}"
-            )
+            if data.get("ok") and not self.station_session_id:
+                message = "服务器未返回 station_session_id，当前工位未占用成功，请重新下载配置"
+            else:
+                message = (
+                    f"工位已被占用：项目 {self.current_project.name}，工位 {self.current_station.name}，"
+                    f"client_id {conflict.get('client_id', '')}，电脑 {conflict.get('computer_name', '')}，IP {conflict.get('ip_address', '')}，"
+                    f"最后心跳 {conflict.get('last_heartbeat_at', '')}"
+                )
             self.message_label.setText(message)
             self.show_station_conflict_dialog(conflict, message)
         else:
-            self.station_session_id = data.get("session_id")
             self.start_station_heartbeat()
         self.recompute_production_enabled()
         return self.station_session_acquired
@@ -1603,8 +1661,10 @@ class QualityControlWindow(QMainWindow):
         except Exception as exc:
             QMessageBox.warning(self, "强制接管失败", str(exc))
             return
-        self.station_session_acquired = bool(data.get("ok"))
         self.station_session_id = data.get("session_id")
+        self.station_session_acquired = bool(
+            data.get("ok") and self.station_session_id
+        )
         self.recompute_production_enabled()
         if self.production_enabled:
             self.start_station_heartbeat()
@@ -2001,11 +2061,20 @@ class QualityControlWindow(QMainWindow):
             )
             if not base:
                 raise ValueError("服务器地址不能为空")
-            url = urllib.parse.urljoin(base + "/", "/api/projects")
-            with urllib.request.urlopen(url, timeout=3) as response:
-                if response.status != 200:
-                    raise RuntimeError(f"HTTP {response.status}")
-                json.loads(response.read().decode("utf-8"))
+            last_error = None
+            for path in ("/api/client/projects", "/api/projects"):
+                try:
+                    url = urllib.parse.urljoin(base + "/", path)
+                    with urllib.request.urlopen(url, timeout=3) as response:
+                        if response.status != 200:
+                            raise RuntimeError(f"HTTP {response.status}")
+                        json.loads(response.read().decode("utf-8"))
+                    last_error = None
+                    break
+                except Exception as exc:
+                    last_error = exc
+            if last_error:
+                raise last_error
         except Exception as exc:
             QMessageBox.warning(self, "连接失败", f"无法连接 MES 服务器：{exc}")
             return False

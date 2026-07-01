@@ -71,15 +71,36 @@ class WebAdminAuthTest(unittest.TestCase):
         with opener.open(request, timeout=3) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
 
+    def acquire_session(self, project_id, station_id, client_id):
+        payload = {
+            "project_id": project_id,
+            "station_id": station_id,
+            "client_id": client_id,
+            "computer_name": "test",
+        }
+        status, acquired = self.json_request(
+            self.opener(),
+            "/api/station-session/acquire",
+            method="POST",
+            payload=payload,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(acquired["ok"])
+        payload["station_session_id"] = acquired["session_id"]
+        return payload
+
     def test_unauthenticated_admin_is_redirected_and_api_returns_401(self):
         with urlopen(self.base + "/", timeout=3) as response:
             self.assertEqual(response.geturl(), self.base + "/login")
         with self.assertRaises(HTTPError) as raised:
             urlopen(self.base + "/api/projects/full", timeout=3)
         self.assertEqual(raised.exception.code, 401)
+        with self.assertRaises(HTTPError) as projects_error:
+            urlopen(self.base + "/api/projects", timeout=3)
+        self.assertEqual(projects_error.exception.code, 401)
 
     def test_production_client_api_remains_public(self):
-        with urlopen(self.base + "/api/projects", timeout=3) as response:
+        with urlopen(self.base + "/api/client/projects", timeout=3) as response:
             self.assertEqual(response.status, 200)
         project = database.fetch_one("SELECT id, name FROM projects ORDER BY id LIMIT 1")
         station = database.fetch_one("SELECT id, name FROM stations ORDER BY id LIMIT 1")
@@ -97,22 +118,143 @@ class WebAdminAuthTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(data["ok"])
 
+    def test_client_barcode_apis_use_station_session_instead_of_web_login(self):
+        project = database.fetch_one(
+            "SELECT id, name FROM projects ORDER BY id LIMIT 1"
+        )
+        station = database.fetch_one(
+            "SELECT id, name FROM stations WHERE project_id = ? ORDER BY id LIMIT 1",
+            (project["id"],),
+        )
+        missing_session_payload = {
+            "project_id": project["id"],
+            "station_id": station["id"],
+            "client_id": "barcode-client",
+            "barcode": "PART-SESSION-001",
+            "step_id": 1,
+            "is_main_barcode": False,
+        }
+        with self.assertRaises(HTTPError) as missing_error:
+            self.json_request(
+                self.opener(),
+                "/api/client/barcode/validate",
+                method="POST",
+                payload=missing_session_payload,
+            )
+        self.assertEqual(missing_error.exception.code, 400)
+        missing_body = json.loads(
+            missing_error.exception.read().decode("utf-8")
+        )
+        self.assertIn("当前工位未占用成功", missing_body["error"])
+        self.assertNotIn("未登录", missing_body["error"])
+
+        session_payload = self.acquire_session(
+            project["id"], station["id"], "barcode-client"
+        )
+        status, validation = self.json_request(
+            self.opener(),
+            "/api/client/barcode/validate",
+            method="POST",
+            payload=dict(
+                session_payload,
+                barcode="PART-SESSION-001",
+                step_id=1,
+                is_main_barcode=False,
+            ),
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(validation["allowed"])
+
+        services.add_scan_record(
+            {
+                "project_id": project["id"],
+                "station_id": station["id"],
+                "barcode": "PART-CANCEL-001",
+                "step": "零件扫码",
+                "step_id": 1,
+                "result": "完成",
+                "is_main_barcode": False,
+            }
+        )
+        status, cancelled = self.json_request(
+            self.opener(),
+            "/api/client/barcode/cancel",
+            method="POST",
+            payload=dict(
+                session_payload,
+                barcode="PART-CANCEL-001",
+                step_id=1,
+                is_main_barcode=False,
+                operator="管理员",
+            ),
+        )
+        self.assertEqual(status, 200)
+        self.assertEqual(cancelled["cancel_type"], "non_main_barcode")
+
+        status, degraded = self.json_request(
+            self.opener(),
+            "/api/client/tool/degrade-mode/report",
+            method="POST",
+            payload=dict(
+                session_payload,
+                operator="管理员",
+                action="enabled",
+                reason="测试",
+            ),
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(degraded["ok"])
+
+    def test_station_session_rejects_mismatched_station_without_web_401(self):
+        project = database.fetch_one(
+            "SELECT id FROM projects ORDER BY id LIMIT 1"
+        )
+        stations = database.fetch_all(
+            "SELECT id FROM stations WHERE project_id = ? ORDER BY id LIMIT 2",
+            (project["id"],),
+        )
+        self.assertGreaterEqual(len(stations), 2)
+        session_payload = self.acquire_session(
+            project["id"], stations[0]["id"], "mismatch-client"
+        )
+        session_payload["station_id"] = stations[1]["id"]
+        session_payload.update(
+            {
+                "barcode": "MISMATCH-001",
+                "step_id": 1,
+                "is_main_barcode": False,
+            }
+        )
+        with self.assertRaises(HTTPError) as mismatch_error:
+            self.json_request(
+                self.opener(),
+                "/api/client/barcode/validate",
+                method="POST",
+                payload=session_payload,
+            )
+        self.assertEqual(mismatch_error.exception.code, 400)
+        body = json.loads(mismatch_error.exception.read().decode("utf-8"))
+        self.assertIn("工位占用信息不匹配", body["error"])
+
     def test_product_flow_client_apis_are_public_and_dependency_admin_api_is_protected(self):
         project = database.fetch_one("SELECT id, name FROM projects ORDER BY id LIMIT 1")
         station = database.fetch_one(
             "SELECT id, name FROM stations WHERE project_id = ? ORDER BY id LIMIT 1",
             (project["id"],),
         )
+        session_payload = self.acquire_session(
+            project["id"], station["id"], "product-flow-client"
+        )
         status, identity = self.json_request(
             self.opener(),
             "/api/product-flow/resolve-barcode",
             method="POST",
-            payload={
+            payload=dict(session_payload, **{
                 "project_id": project["id"],
                 "barcode": "FLOW-HTTP-001",
                 "product_type": "A",
                 "create_if_missing": True,
-            },
+            }),
         )
         self.assertEqual(status, 200)
         self.assertTrue(identity["allowed_production"])
@@ -120,10 +262,10 @@ class WebAdminAuthTest(unittest.TestCase):
             self.opener(),
             "/api/product-flow/verify-entry",
             method="POST",
-            payload={
+            payload=dict(session_payload, **{
                 "product_instance_id": identity["product_instance_id"],
                 "station_id": station["id"],
-            },
+            }),
         )
         self.assertEqual(status, 200)
         self.assertTrue(verification["allowed"])
@@ -159,8 +301,11 @@ class WebAdminAuthTest(unittest.TestCase):
                 "is_main_barcode": True,
             }
         )
+        admin_opener = self.login("admin", "AdminInitial9!")
         query = urlencode({"project": "A/B & C", "station": "工位/特殊"})
-        with urlopen(self.base + "/api/station-config?" + query, timeout=3) as response:
+        with admin_opener.open(
+            self.base + "/api/station-config?" + query, timeout=3
+        ) as response:
             data = json.loads(response.read().decode("utf-8"))
         self.assertEqual(data["product_name"], "A/B & C - 工位/特殊")
         self.assertEqual(data["steps"][0]["name"], "主条码")
@@ -177,7 +322,7 @@ class WebAdminAuthTest(unittest.TestCase):
             }
         )
         legacy_path = f"/api/projects/Legacy/stations/{quote('工位/特殊')}/config"
-        with urlopen(self.base + legacy_path, timeout=3) as response:
+        with admin_opener.open(self.base + legacy_path, timeout=3) as response:
             legacy_data = json.loads(response.read().decode("utf-8"))
         self.assertEqual(legacy_data["product_name"], "Legacy - 工位/特殊")
 
@@ -185,7 +330,7 @@ class WebAdminAuthTest(unittest.TestCase):
             f"/api/projects/{quote('A/B & C', safe='')}/stations/"
             f"{quote('工位/特殊', safe='')}/config"
         )
-        with urlopen(self.base + encoded_path, timeout=3) as response:
+        with admin_opener.open(self.base + encoded_path, timeout=3) as response:
             encoded_data = json.loads(response.read().decode("utf-8"))
         self.assertEqual(encoded_data["project_id"], project["id"])
         self.assertEqual(encoded_data["station_id"], station["id"])
@@ -218,7 +363,9 @@ class WebAdminAuthTest(unittest.TestCase):
             )
             stations.append(station)
 
-        _, project_data = self.json_request(self.opener(), "/api/projects")
+        _, project_data = self.json_request(
+            self.opener(), "/api/client/projects"
+        )
         listed = next(item for item in project_data["projects"] if item["id"] == project["id"])
         self.assertEqual([item["name"] for item in listed["station_items"]], names)
 
@@ -243,6 +390,7 @@ class WebAdminAuthTest(unittest.TestCase):
                 self.opener(), "/api/station-session/acquire", "POST", session_payload
             )
             self.assertTrue(acquired["ok"])
+            session_payload["station_session_id"] = acquired["session_id"]
             _, heartbeat = self.json_request(
                 self.opener(), "/api/station-session/heartbeat", "POST", session_payload
             )
@@ -289,6 +437,11 @@ class WebAdminAuthTest(unittest.TestCase):
                     "project_id": project["id"],
                     "previous_station_id": station["id"],
                     "barcode": barcode,
+                    "station_id": station["id"],
+                    "client_id": session_payload["client_id"],
+                    "station_session_id": session_payload[
+                        "station_session_id"
+                    ],
                 }
             )
             _, completion = self.json_request(
