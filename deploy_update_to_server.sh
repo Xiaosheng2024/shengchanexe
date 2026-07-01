@@ -54,7 +54,7 @@ scp "${DIST_DIR}/mes_update.tar.gz" "${SERVER}:/home/dell/"
 scp "${DIST_DIR}/offline_wheels.tar.gz" "${SERVER}:/home/dell/"
 
 echo "== 在服务器执行部署 =="
-ssh -t "${SERVER}" \
+ssh -tt "${SERVER}" \
   "DEPLOY_COMMIT='${DEPLOY_COMMIT}' MES_PACKAGE_SHA256='${MES_PACKAGE_SHA256}' WHEELS_PACKAGE_SHA256='${WHEELS_PACKAGE_SHA256}' bash -s" <<'REMOTE_SCRIPT'
 set -euo pipefail
 
