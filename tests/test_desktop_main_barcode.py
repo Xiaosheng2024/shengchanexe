@@ -216,6 +216,39 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.current_step_index, 0)
         self.assertEqual(window.message_label.text(), "上一工位未完成，不能进行当前工位")
 
+    def test_route_start_uses_station_material_type_for_new_product(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.current_project.id = 7
+        window.current_project.product_type = "A物料"
+        window.current_station.id = 70
+        window.current_station.route_name = "B子线"
+        window.current_station.station_role = "起点工位"
+        window.current_station.material_type = "B物料"
+        payloads = []
+
+        def api_post(path, payload):
+            payloads.append((path, payload))
+            if path == "/api/product-flow/resolve-barcode":
+                return {
+                    "found": True,
+                    "allowed_production": True,
+                    "project_id": 7,
+                    "product_instance_id": 700,
+                    "current_barcode": "B001",
+                }
+            return {"allowed": True}
+
+        window.api_post = api_post
+        self.assertTrue(window.resolve_and_verify_main_barcode("B001"))
+        resolve_payload = next(
+            payload
+            for path, payload in payloads
+            if path == "/api/product-flow/resolve-barcode"
+        )
+        self.assertTrue(resolve_payload["create_if_missing"])
+        self.assertEqual(resolve_payload["product_type"], "B物料")
+
     def test_online_requests_use_ids_while_preserving_special_character_names(self):
         window = self.make_window()
         window.online_mode = True

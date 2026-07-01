@@ -850,6 +850,10 @@ class QualityControlWindow(QMainWindow):
                                 [ProcessStep("扫码首件条码", SCAN, is_main_barcode=True)],
                             ),
                             id=station_item.get("id"),
+                            route_name=station_item.get("route_name", "其他"),
+                            route_order=int(station_item.get("route_order") or 0),
+                            station_role=station_item.get("station_role", "普通工位"),
+                            material_type=station_item.get("material_type", ""),
                         )
                     )
                 if stations:
@@ -919,6 +923,7 @@ class QualityControlWindow(QMainWindow):
                     switch_disable_old=as_bool(item.get("switch_disable_old", True), True),
                     bind_child_project_id=as_optional_int(item.get("bind_child_project_id")),
                     bind_child_material_type=item.get("bind_child_material_type", ""),
+                    bind_child_route=item.get("bind_child_route", ""),
                     bind_required_count=int(item.get("bind_required_count", 1)),
                     bind_required_station_ids=[
                         int(value)
@@ -2282,7 +2287,14 @@ class QualityControlWindow(QMainWindow):
         self.advance_step()
 
     def resolve_and_verify_main_barcode(self, barcode: str) -> bool:
-        create_if_missing = self.previous_station() is None
+        create_if_missing = (
+            self.current_station.station_role == "起点工位"
+            or (
+                self.current_station.station_role == "普通工位"
+                and self.current_station.route_name == "其他"
+                and self.previous_station() is None
+            )
+        )
         try:
             identity = self.api_post(
                 "/api/product-flow/resolve-barcode",
@@ -2290,7 +2302,8 @@ class QualityControlWindow(QMainWindow):
                     "project_id": getattr(self.current_project, "id", None),
                     "barcode": barcode,
                     "material_code": self.current_project.material_code,
-                    "product_type": self.current_project.product_type
+                    "product_type": self.current_station.material_type
+                    or self.current_project.product_type
                     or self.current_project.name,
                     "create_if_missing": create_if_missing,
                 },

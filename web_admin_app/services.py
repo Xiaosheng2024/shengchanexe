@@ -31,6 +31,13 @@ SCREW_TYPE = "螺丝"
 PLC_TYPE = "PLC接收"
 BARCODE_SWITCH_TYPE = "主条码切换"
 MATERIAL_BIND_TYPE = "子物料绑定"
+STATION_ROLES = {
+    "普通工位",
+    "起点工位",
+    "主条码切换工位",
+    "合并工位",
+    "后续工位",
+}
 STEP_TYPES = (
     SCAN_TYPE,
     SCREW_TYPE,
@@ -301,7 +308,12 @@ def list_projects():
     with get_conn() as conn:
         for project in conn.execute("SELECT * FROM projects ORDER BY id"):
             stations = conn.execute(
-                "SELECT id, name FROM stations WHERE project_id = ? ORDER BY id",
+                """
+                SELECT id, name, route_name, route_order, station_role, material_type
+                FROM stations
+                WHERE project_id = ?
+                ORDER BY route_name, route_order, id
+                """,
                 (project["id"],),
             ).fetchall()
             projects.append(
@@ -312,7 +324,7 @@ def list_projects():
                     "product_type": project["product_type"] or project["name"],
                     "stations": [row["name"] for row in stations],
                     "station_items": [
-                        {"id": row["id"], "name": row["name"]}
+                        row_to_dict(row)
                         for row in stations
                     ],
                 }
@@ -325,12 +337,22 @@ def list_projects_full():
         projects = [row_to_dict(row) for row in conn.execute("SELECT * FROM projects ORDER BY id")]
         for project in projects:
             stations = conn.execute(
-                "SELECT * FROM stations WHERE project_id = ? ORDER BY id",
+                """
+                SELECT * FROM stations
+                WHERE project_id = ?
+                ORDER BY route_name, route_order, id
+                """,
                 (project["id"],),
             ).fetchall()
             project["stations"] = [row_to_dict(row) for row in stations]
             for station in project["stations"]:
-                station["steps"] = list_steps(station["id"])
+                station["steps"] = [
+                    station_config_step(step)
+                    for step in list_steps(station["id"])
+                ]
+                station["dependency"] = product_flow.get_station_dependency(
+                    station["id"]
+                )
     return projects
 
 
@@ -381,10 +403,26 @@ def add_station(payload):
     name = payload.get("name", "").strip()
     if not project_id or not name:
         raise ValueError("项目和工位名称不能为空")
+    route_name, route_order, station_role, material_type = station_route_values(
+        payload
+    )
     with get_conn() as conn:
         cursor = conn.execute(
-            "INSERT INTO stations (project_id, name, created_at) VALUES (?, ?, ?)",
-            (project_id, name, now_text()),
+            """
+            INSERT INTO stations
+            (project_id, name, route_name, route_order, station_role,
+             material_type, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                name,
+                route_name,
+                route_order,
+                station_role,
+                material_type,
+                now_text(),
+            ),
         )
         return {"id": cursor.lastrowid, "name": name}
 
@@ -395,11 +433,338 @@ def update_station(station_id, payload):
     if not project_id or not name:
         raise ValueError("项目和工位名称不能为空")
     with get_conn() as conn:
+        current = conn.execute(
+            "SELECT * FROM stations WHERE id = ?", (station_id,)
+        ).fetchone()
+        if not current:
+            raise ValueError("工位不存在")
+        merged = {
+            "route_name": payload.get("route_name", current["route_name"]),
+            "route_order": payload.get("route_order", current["route_order"]),
+            "station_role": payload.get("station_role", current["station_role"]),
+            "material_type": payload.get("material_type", current["material_type"]),
+        }
+        route_name, route_order, station_role, material_type = (
+            station_route_values(merged)
+        )
         conn.execute(
-            "UPDATE stations SET project_id = ?, name = ? WHERE id = ?",
-            (project_id, name, station_id),
+            """
+            UPDATE stations
+            SET project_id = ?, name = ?, route_name = ?, route_order = ?,
+                station_role = ?, material_type = ?
+            WHERE id = ?
+            """,
+            (
+                project_id,
+                name,
+                route_name,
+                route_order,
+                station_role,
+                material_type,
+                station_id,
+            ),
         )
     return {"ok": True}
+
+
+def station_route_values(payload):
+    route_name = str(payload.get("route_name") or "其他").strip() or "其他"
+    route_order = max(int(payload.get("route_order") or 0), 0)
+    station_role = str(payload.get("station_role") or "普通工位").strip()
+    if station_role not in STATION_ROLES:
+        raise ValueError("工位作用不正确")
+    material_type = str(payload.get("material_type") or "").strip()
+    return route_name, route_order, station_role, material_type
+
+
+def get_route_config(project_id):
+    project_id = int(project_id)
+    project = next(
+        (
+            project
+            for project in list_projects_full()
+            if int(project["id"]) == project_id
+        ),
+        None,
+    )
+    if not project:
+        raise ValueError("项目不存在")
+    return {
+        "project": project,
+        "route_names": sorted(
+            {station["route_name"] or "其他" for station in project["stations"]}
+        ),
+        "templates": [
+            "普通串行路线",
+            "PLC首工位路线",
+            "主条码切换路线",
+            "B子线两工位路线",
+            "A主线绑定B子线路线",
+        ],
+    }
+
+
+def create_route_template(project_id, template_name):
+    project_id = int(project_id)
+    template_name = str(template_name or "").strip()
+    with get_conn() as conn:
+        project = conn.execute(
+            "SELECT id, name FROM projects WHERE id = ?", (project_id,)
+        ).fetchone()
+        if not project:
+            raise ValueError("项目不存在")
+        specs = route_template_specs(project["name"], template_name)
+        existing_names = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM stations WHERE project_id = ?", (project_id,)
+            )
+        }
+        duplicate_names = [
+            spec["name"] for spec in specs if spec["name"] in existing_names
+        ]
+        if duplicate_names:
+            raise ValueError(
+                "模板工位已存在：" + "、".join(duplicate_names)
+            )
+
+        station_ids = {}
+        for spec in specs:
+            cursor = conn.execute(
+                """
+                INSERT INTO stations
+                (project_id, name, route_name, route_order, station_role,
+                 material_type, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    project_id,
+                    spec["name"],
+                    spec["route"],
+                    spec["order"],
+                    spec["role"],
+                    spec["material"],
+                    now_text(),
+                ),
+            )
+            station_ids[spec["key"]] = cursor.lastrowid
+
+        for spec in specs:
+            station_id = station_ids[spec["key"]]
+            for step in spec["steps"]:
+                cursor = conn.execute(
+                    """
+                    INSERT INTO steps
+                    (station_id, step_order, name, type, required_count,
+                     barcode_start, barcode_end, expected_content,
+                     is_main_barcode, created_at)
+                    VALUES (?, ?, ?, ?, ?, 1, 7, '', ?, ?)
+                    """,
+                    (
+                        station_id,
+                        step["order"],
+                        step["name"],
+                        step["type"],
+                        step.get("required_count", 0),
+                        1 if step.get("is_main_barcode") else 0,
+                        now_text(),
+                    ),
+                )
+                if step["type"] == MATERIAL_BIND_TYPE:
+                    conn.execute(
+                        """
+                        UPDATE steps
+                        SET bind_child_project_id = ?,
+                            bind_child_material_type = 'B物料',
+                            bind_child_route = 'B子线',
+                            bind_required_count = 1,
+                            bind_required_station_ids = ?,
+                            bind_require_parent_switch = ?,
+                            bind_allow_duplicate = ?,
+                            bind_allow_unbind = ?
+                        WHERE id = ?
+                        """,
+                        (
+                            project_id,
+                            product_flow.json_ids(
+                                [
+                                    station_ids["b_pre1"],
+                                    station_ids["b_pre2"],
+                                ]
+                            ),
+                            True,
+                            False,
+                            False,
+                            cursor.lastrowid,
+                        ),
+                    )
+
+        for spec in specs:
+            dependency = spec.get("dependency") or {}
+            required_ids = [
+                station_ids[key] for key in dependency.get("required", [])
+            ]
+            child_ids = [
+                station_ids[key]
+                for key in dependency.get("child_required", [])
+            ]
+            conn.execute(
+                """
+                INSERT INTO station_dependencies
+                (station_id, require_previous_station, required_station_ids,
+                 require_barcode_switch, require_current_barcode,
+                 required_child_project_id, required_child_material_type,
+                 required_child_count, required_child_station_ids,
+                 created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    station_ids[spec["key"]],
+                    False,
+                    product_flow.json_ids(required_ids),
+                    bool(dependency.get("switch")),
+                    bool(dependency.get("current_barcode")),
+                    project_id if dependency.get("child_count") else None,
+                    "B物料" if dependency.get("child_count") else "",
+                    int(dependency.get("child_count", 0)),
+                    product_flow.json_ids(child_ids),
+                    now_text(),
+                    now_text(),
+                ),
+            )
+    return get_route_config(project_id)
+
+
+def route_template_specs(project_name, template_name):
+    prefix = str(project_name).strip()
+    scan = lambda name, order=1, main=True: {
+        "name": name,
+        "type": SCAN_TYPE,
+        "order": order,
+        "is_main_barcode": main,
+    }
+    plc = lambda name: {
+        "name": name,
+        "type": PLC_TYPE,
+        "order": 1,
+        "is_main_barcode": True,
+    }
+    switch = {
+        "name": "A主条码切换",
+        "type": BARCODE_SWITCH_TYPE,
+        "order": 1,
+    }
+    bind = {
+        "name": "A绑定B物料",
+        "type": MATERIAL_BIND_TYPE,
+        "order": 1,
+    }
+    if template_name == "A主线绑定B子线路线":
+        return [
+            {
+                "key": "a1", "name": f"{prefix}-A主线1",
+                "route": "A主线", "order": 1, "role": "起点工位",
+                "material": "A物料", "steps": [plc("PLC接收A主条码")],
+                "dependency": {},
+            },
+            {
+                "key": "a2", "name": f"{prefix}-A主线2",
+                "route": "A主线", "order": 2, "role": "普通工位",
+                "material": "A物料",
+                "steps": [scan("扫码A主条码"), scan("A普通规则", 2, False)],
+                "dependency": {"required": ["a1"]},
+            },
+            {
+                "key": "a_switch", "name": f"{prefix}-A主条码切换",
+                "route": "A主线", "order": 3,
+                "role": "主条码切换工位", "material": "A物料",
+                "steps": [switch],
+                "dependency": {"required": ["a2"], "current_barcode": True},
+            },
+            {
+                "key": "a_merge", "name": f"{prefix}-A合并B工位",
+                "route": "A主线", "order": 4, "role": "合并工位",
+                "material": "A物料", "steps": [bind],
+                "dependency": {
+                    "required": ["a_switch"],
+                    "switch": True,
+                    "current_barcode": True,
+                },
+            },
+            {
+                "key": "a_after", "name": f"{prefix}-A后续工位",
+                "route": "A主线", "order": 5, "role": "后续工位",
+                "material": "A物料", "steps": [scan("扫码A当前主条码")],
+                "dependency": {
+                    "required": ["a_merge"],
+                    "switch": True,
+                    "current_barcode": True,
+                    "child_count": 1,
+                    "child_required": ["b_pre1", "b_pre2"],
+                },
+            },
+            {
+                "key": "b_pre1", "name": "B子线-预装1",
+                "route": "B子线", "order": 1, "role": "起点工位",
+                "material": "B物料", "steps": [scan("扫码B主条码")],
+                "dependency": {},
+            },
+            {
+                "key": "b_pre2", "name": "B子线-预装2",
+                "route": "B子线", "order": 2, "role": "普通工位",
+                "material": "B物料",
+                "steps": [scan("扫码B主条码"), scan("B完成确认", 2, False)],
+                "dependency": {"required": ["b_pre1"]},
+            },
+        ]
+    if template_name == "B子线两工位路线":
+        return [
+            {
+                "key": "b_pre1", "name": "B子线-预装1",
+                "route": "B子线", "order": 1, "role": "起点工位",
+                "material": "B物料", "steps": [scan("扫码B主条码")],
+                "dependency": {},
+            },
+            {
+                "key": "b_pre2", "name": "B子线-预装2",
+                "route": "B子线", "order": 2, "role": "普通工位",
+                "material": "B物料", "steps": [scan("扫码B主条码")],
+                "dependency": {"required": ["b_pre1"]},
+            },
+        ]
+    if template_name == "主条码切换路线":
+        return [
+            {
+                "key": "start", "name": f"{prefix}-起点",
+                "route": "A主线", "order": 1, "role": "起点工位",
+                "material": "A物料", "steps": [scan("扫码旧主条码")],
+                "dependency": {},
+            },
+            {
+                "key": "switch", "name": f"{prefix}-主条码切换",
+                "route": "A主线", "order": 2,
+                "role": "主条码切换工位", "material": "A物料",
+                "steps": [switch],
+                "dependency": {"required": ["start"], "current_barcode": True},
+            },
+        ]
+    if template_name in {"普通串行路线", "PLC首工位路线"}:
+        first_step = plc("PLC接收主条码") if template_name == "PLC首工位路线" else scan("扫码主条码")
+        return [
+            {
+                "key": "start", "name": f"{prefix}-工位1",
+                "route": "A主线", "order": 1, "role": "起点工位",
+                "material": "A物料", "steps": [first_step],
+                "dependency": {},
+            },
+            {
+                "key": "next", "name": f"{prefix}-工位2",
+                "route": "A主线", "order": 2, "role": "普通工位",
+                "material": "A物料", "steps": [scan("扫码主条码")],
+                "dependency": {"required": ["start"]},
+            },
+        ]
+    raise ValueError("未知的工艺路线模板")
 
 
 def delete_project(project_id):
@@ -565,18 +930,25 @@ def update_step(step_id, payload):
 
 def list_steps(station_id):
     with get_conn() as conn:
-        return [
+        steps = [
             row_to_dict(row)
             for row in conn.execute(
                 "SELECT * FROM steps WHERE station_id = ? ORDER BY step_order, id",
                 (station_id,),
             )
         ]
+    for step in steps:
+        step["is_main_barcode"] = bool(step.get("is_main_barcode"))
+        step["bind_required_station_ids"] = product_flow.int_list(
+            step.get("bind_required_station_ids")
+        )
+    return steps
 
 
 def station_config_step(step):
     return {
         "id": step.get("id"),
+        "step_order": step.get("step_order") or 1,
         "name": step.get("name", "未命名工序"),
         "type": step.get("type", SCAN_TYPE),
         "required_count": step.get("required_count") or 0,
@@ -608,7 +980,9 @@ def get_station_config(project_or_path, station_name=None):
         row = conn.execute(
             """
             SELECT projects.id AS project_id, stations.id AS station_id,
-                   projects.name AS project_name, stations.name AS station_name
+                   projects.name AS project_name, stations.name AS station_name,
+                   stations.route_name, stations.route_order,
+                   stations.station_role, stations.material_type
             FROM stations
             JOIN projects ON projects.id = stations.project_id
             WHERE projects.name = ? AND stations.name = ?
@@ -621,6 +995,10 @@ def get_station_config(project_or_path, station_name=None):
     return {
         "project_id": row["project_id"],
         "station_id": row["station_id"],
+        "route_name": row["route_name"],
+        "route_order": row["route_order"],
+        "station_role": row["station_role"],
+        "material_type": row["material_type"],
         "product_name": f"{project_name} - {station_name}",
         "steps": [station_config_step(step) for step in steps],
     }
@@ -631,7 +1009,9 @@ def get_station_config_by_ids(project_id, station_id):
         row = conn.execute(
             """
             SELECT projects.id AS project_id, stations.id AS station_id,
-                   projects.name AS project_name, stations.name AS station_name
+                   projects.name AS project_name, stations.name AS station_name,
+                   stations.route_name, stations.route_order,
+                   stations.station_role, stations.material_type
             FROM stations
             JOIN projects ON projects.id = stations.project_id
             WHERE projects.id = ? AND stations.id = ?
@@ -646,6 +1026,10 @@ def get_station_config_by_ids(project_id, station_id):
         "station_id": row["station_id"],
         "project_name": row["project_name"],
         "station_name": row["station_name"],
+        "route_name": row["route_name"],
+        "route_order": row["route_order"],
+        "station_role": row["station_role"],
+        "material_type": row["material_type"],
         "product_name": f"{row['project_name']} - {row['station_name']}",
         "steps": [station_config_step(step) for step in steps],
         "station_dependencies": product_flow.get_station_dependency(station_id),
@@ -666,6 +1050,7 @@ def update_step_flow_config(conn, step_id, payload):
         SET switch_require_old = ?, switch_require_new = ?,
             switch_set_current = ?, switch_disable_old = ?,
             bind_child_project_id = ?, bind_child_material_type = ?,
+            bind_child_route = ?,
             bind_required_count = ?, bind_required_station_ids = ?,
             bind_require_parent_switch = ?, bind_allow_duplicate = ?,
             bind_allow_unbind = ?
@@ -678,6 +1063,7 @@ def update_step_flow_config(conn, step_id, payload):
             bool(payload.get("switch_disable_old", True)),
             int(payload.get("bind_child_project_id") or 0) or None,
             payload.get("bind_child_material_type", ""),
+            payload.get("bind_child_route", ""),
             max(int(payload.get("bind_required_count") or 1), 1),
             product_flow.json_ids(payload.get("bind_required_station_ids")),
             bool(payload.get("bind_require_parent_switch", True)),
@@ -697,6 +1083,7 @@ def validate_flow_step_payload(conn, payload, step_type):
         return
     child_project_id = int(payload.get("bind_child_project_id") or 0)
     child_type = str(payload.get("bind_child_material_type", "")).strip()
+    child_route = str(payload.get("bind_child_route", "")).strip()
     if not child_project_id:
         raise ValueError("子物料绑定工序必须选择子物料项目")
     if not child_type:
@@ -709,13 +1096,15 @@ def validate_flow_step_payload(conn, payload, step_type):
         payload.get("bind_required_station_ids")
     ):
         station = conn.execute(
-            "SELECT project_id FROM stations WHERE id = ?",
+            "SELECT project_id, route_name FROM stations WHERE id = ?",
             (station_id,),
         ).fetchone()
         if not station:
             raise ValueError(f"子物料要求工位不存在：{station_id}")
         if int(station["project_id"]) != child_project_id:
             raise ValueError("子物料要求工位不属于所选子物料项目")
+        if child_route and station["route_name"] != child_route:
+            raise ValueError("子物料要求工位不属于所选子件路线")
 
 
 def flow_step_config(step):
@@ -731,6 +1120,7 @@ def flow_step_config(step):
         "switch_disable_old": bool(value("switch_disable_old", True)),
         "bind_child_project_id": value("bind_child_project_id", None),
         "bind_child_material_type": value("bind_child_material_type", ""),
+        "bind_child_route": value("bind_child_route", ""),
         "bind_required_count": int(value("bind_required_count", 1)),
         "bind_required_station_ids": product_flow.int_list(
             value("bind_required_station_ids", "[]")

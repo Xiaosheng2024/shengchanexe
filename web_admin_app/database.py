@@ -48,11 +48,18 @@ FLOW_STEP_COLUMNS = {
     "switch_disable_old": "INTEGER NOT NULL DEFAULT 1",
     "bind_child_project_id": "INTEGER",
     "bind_child_material_type": "TEXT NOT NULL DEFAULT ''",
+    "bind_child_route": "TEXT NOT NULL DEFAULT ''",
     "bind_required_count": "INTEGER NOT NULL DEFAULT 1",
     "bind_required_station_ids": "TEXT NOT NULL DEFAULT '[]'",
     "bind_require_parent_switch": "INTEGER NOT NULL DEFAULT 1",
     "bind_allow_duplicate": "INTEGER NOT NULL DEFAULT 0",
     "bind_allow_unbind": "INTEGER NOT NULL DEFAULT 0",
+}
+STATION_ROUTE_COLUMNS = {
+    "route_name": "TEXT NOT NULL DEFAULT '其他'",
+    "route_order": "INTEGER NOT NULL DEFAULT 0",
+    "station_role": "TEXT NOT NULL DEFAULT '普通工位'",
+    "material_type": "TEXT NOT NULL DEFAULT ''",
 }
 FLOW_STEP_BOOLEAN_COLUMNS = {
     "switch_require_old",
@@ -338,6 +345,10 @@ def create_sqlite_schema(conn):
             id INTEGER PRIMARY KEY AUTOINCREMENT,
             project_id INTEGER NOT NULL,
             name TEXT NOT NULL,
+            route_name TEXT NOT NULL DEFAULT '其他',
+            route_order INTEGER NOT NULL DEFAULT 0,
+            station_role TEXT NOT NULL DEFAULT '普通工位',
+            material_type TEXT NOT NULL DEFAULT '',
             created_at TEXT NOT NULL,
             UNIQUE(project_id, name),
             FOREIGN KEY(project_id) REFERENCES projects(id)
@@ -415,6 +426,10 @@ def create_postgresql_schema(conn):
             id SERIAL PRIMARY KEY,
             project_id INTEGER NOT NULL REFERENCES projects(id),
             name TEXT NOT NULL,
+            route_name TEXT NOT NULL DEFAULT '其他',
+            route_order INTEGER NOT NULL DEFAULT 0,
+            station_role TEXT NOT NULL DEFAULT '普通工位',
+            material_type TEXT NOT NULL DEFAULT '',
             created_at TIMESTAMP NOT NULL,
             UNIQUE(project_id, name)
         );
@@ -730,6 +745,7 @@ def create_product_flow_schema(conn):
             require_previous_station {bool_default_true},
             required_station_ids TEXT NOT NULL DEFAULT '[]',
             require_barcode_switch {bool_default_false},
+            require_current_barcode {bool_default_false},
             required_child_project_id INTEGER,
             required_child_material_type TEXT NOT NULL DEFAULT '',
             required_child_count INTEGER NOT NULL DEFAULT 0,
@@ -757,6 +773,12 @@ def migrate_sqlite_db(conn):
     for column, definition in PROJECT_FLOW_COLUMNS.items():
         if column not in project_columns:
             conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {definition}")
+    station_columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(stations)").fetchall()
+    }
+    for column, definition in STATION_ROUTE_COLUMNS.items():
+        if column not in station_columns:
+            conn.execute(f"ALTER TABLE stations ADD COLUMN {column} {definition}")
     columns = [row["name"] for row in conn.execute("PRAGMA table_info(steps)").fetchall()]
     if "is_main_barcode" not in columns:
         conn.execute("ALTER TABLE steps ADD COLUMN is_main_barcode INTEGER NOT NULL DEFAULT 0")
@@ -769,6 +791,15 @@ def migrate_sqlite_db(conn):
         if column not in columns:
             conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
             columns.append(column)
+    dependency_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(station_dependencies)").fetchall()
+    }
+    if "require_current_barcode" not in dependency_columns:
+        conn.execute(
+            "ALTER TABLE station_dependencies "
+            "ADD COLUMN require_current_barcode INTEGER NOT NULL DEFAULT 0"
+        )
     migrate_sqlite_flow_record_columns(conn)
     if "plc_barcode_db" in columns and "plc_barcode1_db" in columns:
         conn.execute(
@@ -837,6 +868,16 @@ def migrate_postgresql_db(conn):
     for column, definition in PROJECT_FLOW_COLUMNS.items():
         if column not in project_columns:
             conn.execute(f"ALTER TABLE projects ADD COLUMN {column} {definition}")
+    station_rows = conn.execute(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'stations'
+        """
+    ).fetchall()
+    station_columns = {row["column_name"] for row in station_rows}
+    for column, definition in STATION_ROUTE_COLUMNS.items():
+        if column not in station_columns:
+            conn.execute(f"ALTER TABLE stations ADD COLUMN {column} {definition}")
     rows = conn.execute(
         """
         SELECT column_name
@@ -861,6 +902,18 @@ def migrate_postgresql_db(conn):
             pg_definition = definition
         conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {pg_definition}")
         columns.add(column)
+    dependency_rows = conn.execute(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'station_dependencies'
+        """
+    ).fetchall()
+    dependency_columns = {row["column_name"] for row in dependency_rows}
+    if "require_current_barcode" not in dependency_columns:
+        conn.execute(
+            "ALTER TABLE station_dependencies "
+            "ADD COLUMN require_current_barcode BOOLEAN NOT NULL DEFAULT false"
+        )
     migrate_postgresql_flow_record_columns(conn)
     if {"plc_barcode_db", "plc_barcode1_db", "plc_barcode_offset", "plc_barcode1_offset", "plc_barcode_length", "plc_barcode1_length"}.issubset(columns):
         conn.execute(

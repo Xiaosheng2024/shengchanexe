@@ -48,6 +48,7 @@ class ProcessStep:
     switch_disable_old: bool = True
     bind_child_project_id: Optional[int] = None
     bind_child_material_type: str = ""
+    bind_child_route: str = ""
     bind_required_count: int = 1
     bind_required_station_ids: List[int] = field(default_factory=list)
     bind_require_parent_switch: bool = True
@@ -97,6 +98,10 @@ class StationConfig:
     name: str
     product: ProductConfig
     id: Optional[int] = None
+    route_name: str = "其他"
+    route_order: int = 0
+    station_role: str = "普通工位"
+    material_type: str = ""
 
 
 @dataclass

@@ -37,6 +37,8 @@ from web_admin_app.services import (
     release_station_session,
     get_station_config,
     get_station_config_by_ids,
+    get_route_config,
+    create_route_template,
     latest_client_release,
     get_trace,
     list_projects,
@@ -310,6 +312,9 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, {"projects": list_projects()})
         elif path == "/api/projects/full":
             json_response(self, {"projects": list_projects_full()})
+        elif path.startswith("/api/projects/") and path.endswith("/route-config"):
+            project_id = int(path.strip("/").split("/")[2])
+            json_response(self, get_route_config(project_id))
         elif path.startswith("/api/projects/") and path.endswith("/config"):
             json_response(self, get_station_config(path))
         elif path == "/api/station-config":
@@ -454,6 +459,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, add_station(payload))
         elif path == "/api/steps":
             json_response(self, add_step(payload))
+        elif path.startswith("/api/projects/") and path.endswith("/route-template"):
+            project_id = int(path.strip("/").split("/")[2])
+            json_response(
+                self,
+                create_route_template(project_id, payload.get("template")),
+            )
         elif path == "/api/station-completions":
             json_response(self, add_station_completion(payload))
         elif path == "/api/scan-records":

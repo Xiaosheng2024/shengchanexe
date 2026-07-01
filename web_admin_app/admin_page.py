@@ -45,6 +45,15 @@ HTML = r"""<!doctype html>
     th { background: #f9fafb; }
     .hint { color: #6b7280; font-size: 14px; }
     .status { min-height: 24px; color: #2563eb; font-weight: 700; }
+    .route-layout { display: grid; grid-template-columns: 300px minmax(0, 1fr); gap: 16px; }
+    .route-tree { border: 1px solid #d1d5db; border-radius: 6px; min-height: 420px; padding: 10px; background: #f9fafb; }
+    .route-group { margin-bottom: 14px; }
+    .route-group-title { padding: 8px; font-weight: 700; color: #1d4ed8; border-bottom: 1px solid #dbeafe; }
+    .route-station { width: 100%; padding: 9px 10px; margin-top: 4px; text-align: left; border: 0; border-radius: 5px; background: transparent; cursor: pointer; }
+    .route-station:hover { background: #dbeafe; }
+    .route-station.active { background: #2563eb; color: white; }
+    .route-note { padding: 12px; border-left: 4px solid #2563eb; background: #eff6ff; line-height: 1.7; }
+    @media (max-width: 1000px) { .route-layout { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -61,6 +70,7 @@ HTML = r"""<!doctype html>
       <button class="tab active" data-page="projectPage">项目管理</button>
       <button class="tab" data-page="stationPage">工位管理</button>
       <button class="tab" data-page="stepPage">工序规则管理</button>
+      <button class="tab" data-page="routePage">工艺路线配置</button>
       <button class="tab" data-page="recordPage">扫描记录查询</button>
       <button class="tab" data-page="maintenancePage">系统维护</button>
       <button class="tab" data-page="accountPage">账号与安全</button>
@@ -123,6 +133,7 @@ HTML = r"""<!doctype html>
           <div class="toolbar">
             <label class="checkbox-label"><input id="depPrevious" type="checkbox" checked> 必须完成上一工位</label>
             <label class="checkbox-label"><input id="depSwitch" type="checkbox"> 必须完成主条码切换</label>
+            <label class="checkbox-label"><input id="depCurrentBarcode" type="checkbox"> 必须使用当前有效主条码</label>
             <label>必须完成的指定工位</label>
             <select id="depStationIds" multiple></select>
           </div>
@@ -220,6 +231,7 @@ HTML = r"""<!doctype html>
             <div class="toolbar">
               <label>子物料项目</label><select id="bindChildProject" onchange="refreshBindingStationOptions()"><option value="">请选择</option></select>
               <label>子物料类型</label><input id="bindChildType" placeholder="例如：B">
+              <label>子件路线</label><input id="bindChildRoute" placeholder="例如：B子线">
               <label>子物料数量</label><input id="bindRequiredCount" type="number" min="1" value="1">
               <label>子物料必完工位</label><select id="bindRequiredStationIds" multiple></select>
             </div>
@@ -241,6 +253,88 @@ HTML = r"""<!doctype html>
             <thead><tr><th>顺序</th><th>工序名称</th><th>功能</th><th>螺丝数量</th><th>截取位</th><th>检测内容</th><th>主条码</th><th>操作</th></tr></thead>
             <tbody id="stepRows"></tbody>
           </table>
+        </div>
+      </section>
+
+      <section id="routePage" class="page">
+        <div class="panel">
+          <h2>工艺路线配置</h2>
+          <div class="toolbar">
+            <label>项目</label>
+            <select id="routeProject" onchange="onRouteProjectChanged()"></select>
+            <label>从模板创建路线</label>
+            <select id="routeTemplate">
+              <option>普通串行路线</option>
+              <option>PLC首工位路线</option>
+              <option>主条码切换路线</option>
+              <option>B子线两工位路线</option>
+              <option selected>A主线绑定B子线路线</option>
+            </select>
+            <button class="primary" onclick="applyRouteTemplate()">创建路线</button>
+          </div>
+          <div class="route-note">
+            A主线和B子线可以并行生产。B子线顺序由自己的工位依赖控制；
+            A和B只在A合并B工位通过“子物料绑定”建立关系。
+            普通扫码工序不会自动绑定B。
+          </div>
+        </div>
+        <div class="route-layout">
+          <div class="panel">
+            <h2>1. 路线/工位编排</h2>
+            <div id="routeTree" class="route-tree"></div>
+          </div>
+          <div>
+            <div class="panel">
+              <h2>工位信息 <span id="routeStationIdText" class="hint"></span></h2>
+              <div class="toolbar">
+                <label>工位名称</label><input id="routeStationName">
+                <label>所属路线</label>
+                <select id="routeName">
+                  <option>A主线</option><option>B子线</option>
+                  <option>返修线</option><option>其他</option>
+                </select>
+                <label>路线内顺序</label><input id="routeOrder" type="number" min="0">
+              </div>
+              <div class="toolbar">
+                <label>工位作用</label>
+                <select id="routeStationRole">
+                  <option>普通工位</option><option>起点工位</option>
+                  <option>主条码切换工位</option><option>合并工位</option>
+                  <option>后续工位</option>
+                </select>
+                <label>物料类型</label><input id="routeMaterialType" placeholder="A物料 / B物料">
+                <button class="primary" onclick="saveRouteStation()">保存工位编排</button>
+              </div>
+              <p class="hint">路线顺序仅用于显示；生产放行只读取下面保存的显式依赖。</p>
+            </div>
+            <div class="panel">
+              <h2>2. 工位规则配置</h2>
+              <button class="secondary" onclick="openSelectedStationRules()">在规则管理中配置</button>
+              <table>
+                <thead><tr><th>顺序</th><th>名称</th><th>功能</th><th>主条码</th><th>操作</th></tr></thead>
+                <tbody id="routeRuleRows"></tbody>
+              </table>
+            </div>
+            <div class="panel">
+              <h2>3. 绑定/合并配置</h2>
+              <div id="routeBindingSummary" class="hint">当前工位未配置子物料绑定。</div>
+            </div>
+            <div class="panel">
+              <h2>4. 工位依赖配置</h2>
+              <div class="toolbar">
+                <label class="checkbox-label"><input id="routeDepPrevious" type="checkbox"> 兼容旧逻辑：上一工位</label>
+                <label class="checkbox-label"><input id="routeDepSwitch" type="checkbox"> 必须完成主条码切换</label>
+                <label class="checkbox-label"><input id="routeDepCurrent" type="checkbox"> 必须使用当前有效主条码</label>
+              </div>
+              <div class="toolbar">
+                <label>必须完成工位</label><select id="routeDepStationIds" multiple></select>
+                <label>必须绑定子物料数量</label><input id="routeDepChildCount" type="number" min="0" value="0">
+                <label>子物料类型</label><input id="routeDepChildType" placeholder="B物料">
+                <label>子物料必完工位</label><select id="routeDepChildStationIds" multiple></select>
+                <button class="primary" onclick="saveRouteDependency()">保存依赖</button>
+              </div>
+            </div>
+          </div>
         </div>
       </section>
 
@@ -443,6 +537,7 @@ HTML = r"""<!doctype html>
       refreshStationOptions();
       loadSteps();
       await loadStationDependency();
+      renderRoutePage();
     }
 
     function keepValidSelection() {
@@ -472,6 +567,170 @@ HTML = r"""<!doctype html>
     function currentStation() {
       const project = currentProject();
       return project ? project.stations.find(item => item.id === selectedStationId) || null : null;
+    }
+
+    function onRouteProjectChanged() {
+      selectedProjectId = Number(document.getElementById("routeProject").value);
+      const project = currentProject();
+      selectedStationId = project && project.stations.length ? project.stations[0].id : null;
+      renderMenuTree();
+      renderRoutePage();
+    }
+
+    function selectRouteStation(projectId, stationId) {
+      selectedProjectId = Number(projectId);
+      selectedStationId = Number(stationId);
+      expandedProjects.add(selectedProjectId);
+      expandedStations.add(selectedStationId);
+      refreshProjectOptions();
+      refreshStationOptions();
+      renderMenuTree();
+      renderRoutePage();
+    }
+
+    function renderRoutePage() {
+      const projectSelect = document.getElementById("routeProject");
+      if (!projectSelect) return;
+      if (selectedProjectId) projectSelect.value = selectedProjectId;
+      const project = currentProject();
+      const station = currentStation();
+      const groups = {};
+      (project ? project.stations : []).forEach(item => {
+        const route = item.route_name || "其他";
+        (groups[route] ||= []).push(item);
+      });
+      document.getElementById("routeTree").innerHTML = Object.entries(groups)
+        .sort(([left], [right]) => left.localeCompare(right, "zh-CN"))
+        .map(([route, stations]) => {
+          const rows = stations
+            .sort((left, right) => (left.route_order || 0) - (right.route_order || 0) || left.id - right.id)
+            .map(item => `<button class="route-station ${item.id === selectedStationId ? "active" : ""}" data-station-id="${item.id}" onclick="selectRouteStation(${project.id}, ${item.id})">${item.route_order || 0}. ${htmlEscape(item.name)}<br><small>${htmlEscape(item.station_role || "普通工位")} / ${htmlEscape(item.material_type || "未设置物料")}</small></button>`)
+            .join("");
+          return `<div class="route-group"><div class="route-group-title">${htmlEscape(route)}</div>${rows}</div>`;
+        }).join("") || `<div class="hint">当前项目暂无路线工位，可从模板创建。</div>`;
+
+      document.getElementById("routeStationIdText").textContent = station ? `station_id=${station.id}` : "";
+      document.getElementById("routeStationName").value = station ? station.name : "";
+      document.getElementById("routeName").value = station ? (station.route_name || "其他") : "其他";
+      document.getElementById("routeOrder").value = station ? (station.route_order || 0) : 0;
+      document.getElementById("routeStationRole").value = station ? (station.station_role || "普通工位") : "普通工位";
+      document.getElementById("routeMaterialType").value = station ? (station.material_type || "") : "";
+
+      const steps = station ? (station.steps || []) : [];
+      document.getElementById("routeRuleRows").innerHTML = steps.map(step =>
+        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${htmlEscape(step.type)}</td><td>${step.is_main_barcode ? "是" : "否"}</td><td><button class="secondary" onclick="selectStep(${project.id}, ${station.id}, ${step.id})">编辑</button></td></tr>`
+      ).join("") || `<tr><td colspan="5">当前工位暂无规则</td></tr>`;
+
+      const bindings = steps.filter(step => step.type === "子物料绑定");
+      document.getElementById("routeBindingSummary").innerHTML = bindings.map(step => {
+        const stationNames = (step.bind_required_station_ids || []).map(id => {
+          for (const candidateProject of fullData.projects) {
+            const found = candidateProject.stations.find(item => item.id === Number(id));
+            if (found) return found.name;
+          }
+          return `station_id=${id}`;
+        });
+        return `<div><strong>${htmlEscape(step.name)}</strong><br>
+          父件路线：${htmlEscape(station.route_name || "其他")}；父件物料：${htmlEscape(station.material_type || "")}；父件条码：当前有效主条码<br>
+          子件路线：${htmlEscape(step.bind_child_route || "未设置")}；子件物料：${htmlEscape(step.bind_child_material_type || "")}；数量：${step.bind_required_count || 1}<br>
+          子件必须完成：${htmlEscape(stationNames.join("、") || "未设置")}；
+          ${step.bind_require_parent_switch ? "父件必须完成主条码切换；" : ""}
+          B只能绑定一次且不能绑定多个A
+          <button class="secondary" onclick="selectStep(${project.id}, ${station.id}, ${step.id})">编辑绑定规则</button>
+        </div>`;
+      }).join("") || "当前工位未配置子物料绑定。只有“子物料绑定”工序会建立A-B关系。";
+
+      const dependency = station ? (station.dependency || {}) : {};
+      const stationOptionsHtml = (project ? project.stations : [])
+        .filter(item => !station || item.id !== station.id)
+        .map(item => `<option value="${item.id}">${htmlEscape(item.route_name || "其他")} / ${htmlEscape(item.name)}</option>`)
+        .join("");
+      document.getElementById("routeDepStationIds").innerHTML = stationOptionsHtml;
+      document.getElementById("routeDepChildStationIds").innerHTML = (project ? project.stations : [])
+        .filter(item => item.material_type === "B物料" || item.route_name === "B子线")
+        .map(item => `<option value="${item.id}">${htmlEscape(item.name)}</option>`)
+        .join("");
+      document.getElementById("routeDepPrevious").checked = !!dependency.require_previous_station;
+      document.getElementById("routeDepSwitch").checked = !!dependency.require_barcode_switch;
+      document.getElementById("routeDepCurrent").checked = !!dependency.require_current_barcode;
+      document.getElementById("routeDepChildCount").value = dependency.required_child_count || 0;
+      document.getElementById("routeDepChildType").value = dependency.required_child_material_type || "";
+      setSelectedIds("routeDepStationIds", dependency.required_station_ids || []);
+      setSelectedIds("routeDepChildStationIds", dependency.required_child_station_ids || []);
+    }
+
+    async function saveRouteStation() {
+      const project = currentProject();
+      const station = currentStation();
+      if (!project || !station) return showStatus("请先选择工位");
+      await api(`/api/stations/${station.id}`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          project_id: project.id,
+          name: document.getElementById("routeStationName").value.trim(),
+          route_name: document.getElementById("routeName").value,
+          route_order: Number(document.getElementById("routeOrder").value || 0),
+          station_role: document.getElementById("routeStationRole").value,
+          material_type: document.getElementById("routeMaterialType").value.trim()
+        })
+      });
+      showStatus("工位编排已保存");
+      await refreshAll();
+    }
+
+    async function saveRouteDependency() {
+      const project = currentProject();
+      const station = currentStation();
+      if (!project || !station) return showStatus("请先选择工位");
+      await api(`/api/stations/${station.id}/dependencies`, {
+        method: "PUT",
+        headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          require_previous_station: document.getElementById("routeDepPrevious").checked,
+          require_barcode_switch: document.getElementById("routeDepSwitch").checked,
+          require_current_barcode: document.getElementById("routeDepCurrent").checked,
+          required_station_ids: selectedIds("routeDepStationIds"),
+          required_child_project_id: Number(document.getElementById("routeDepChildCount").value || 0) > 0 ? project.id : null,
+          required_child_material_type: document.getElementById("routeDepChildType").value.trim(),
+          required_child_count: Number(document.getElementById("routeDepChildCount").value || 0),
+          required_child_station_ids: selectedIds("routeDepChildStationIds")
+        })
+      });
+      showStatus("显式工位依赖已保存");
+      await refreshAll();
+    }
+
+    async function applyRouteTemplate() {
+      const projectId = Number(document.getElementById("routeProject").value || selectedProjectId);
+      const template = document.getElementById("routeTemplate").value;
+      if (!projectId) return showStatus("请先选择项目");
+      if (!confirm(`确定在当前项目新增“${template}”吗？模板不会修改已有工位。`)) return;
+      try {
+        await api(`/api/projects/${projectId}/route-template`, {
+          method: "POST",
+          headers: {"Content-Type": "application/json"},
+          body: JSON.stringify({template})
+        });
+      } catch (err) {
+        return showStatus(err.message);
+      }
+      selectedProjectId = projectId;
+      selectedStationId = null;
+      showStatus("路线模板已创建");
+      await refreshAll();
+      setActivePage("routePage");
+    }
+
+    function openSelectedStationRules() {
+      const station = currentStation();
+      if (!station) return showStatus("请先选择工位");
+      refreshProjectOptions();
+      refreshStationOptions();
+      document.getElementById("stepProject").value = selectedProjectId;
+      document.getElementById("stepStation").value = selectedStationId;
+      loadSteps();
+      setActivePage("stepPage");
     }
 
     function setActivePage(pageId) {
@@ -580,7 +839,7 @@ HTML = r"""<!doctype html>
     }
 
     function refreshProjectOptions() {
-      ["stationProject", "stepProject"].forEach(id => {
+      ["stationProject", "stepProject", "routeProject"].forEach(id => {
         const select = document.getElementById(id);
         select.innerHTML = fullData.projects.map(project => `<option value="${project.id}">${htmlEscape(project.name)}</option>`).join("");
         if (selectedProjectId) select.value = selectedProjectId;
@@ -824,6 +1083,7 @@ HTML = r"""<!doctype html>
         switch_disable_old: document.getElementById("switchDisableOld").checked,
         bind_child_project_id: Number(document.getElementById("bindChildProject").value || 0) || null,
         bind_child_material_type: document.getElementById("bindChildType").value.trim(),
+        bind_child_route: document.getElementById("bindChildRoute").value.trim(),
         bind_required_count: Number(document.getElementById("bindRequiredCount").value || 1),
         bind_required_station_ids: selectedIds("bindRequiredStationIds"),
         bind_require_parent_switch: document.getElementById("bindRequireSwitch").checked,
@@ -867,6 +1127,7 @@ HTML = r"""<!doctype html>
       document.getElementById("switchDisableOld").checked = step.switch_disable_old ?? true;
       document.getElementById("bindChildProject").value = step.bind_child_project_id || "";
       document.getElementById("bindChildType").value = step.bind_child_material_type || "";
+      document.getElementById("bindChildRoute").value = step.bind_child_route || "";
       document.getElementById("bindRequiredCount").value = step.bind_required_count ?? 1;
       refreshBindingStationOptions();
       setSelectedIds("bindRequiredStationIds", step.bind_required_station_ids || []);
@@ -985,6 +1246,7 @@ HTML = r"""<!doctype html>
       refreshDependencyStationOptions();
       document.getElementById("depPrevious").checked = dep.require_previous_station ?? true;
       document.getElementById("depSwitch").checked = !!dep.require_barcode_switch;
+      document.getElementById("depCurrentBarcode").checked = !!dep.require_current_barcode;
       setSelectedIds("depStationIds", dep.required_station_ids || []);
       document.getElementById("depChildProject").value = dep.required_child_project_id || "";
       refreshDependencyStationOptions();
@@ -1001,6 +1263,7 @@ HTML = r"""<!doctype html>
         body: JSON.stringify({
           require_previous_station: document.getElementById("depPrevious").checked,
           require_barcode_switch: document.getElementById("depSwitch").checked,
+          require_current_barcode: document.getElementById("depCurrentBarcode").checked,
           required_station_ids: selectedIds("depStationIds"),
           required_child_project_id: Number(document.getElementById("depChildProject").value || 0) || null,
           required_child_material_type: document.getElementById("depChildType").value.trim(),

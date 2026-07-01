@@ -233,6 +233,7 @@ def _station_dependency(conn, station_id):
             "require_previous_station": True,
             "required_station_ids": [],
             "require_barcode_switch": False,
+            "require_current_barcode": False,
             "required_child_project_id": None,
             "required_child_material_type": "",
             "required_child_count": 0,
@@ -241,6 +242,7 @@ def _station_dependency(conn, station_id):
     data = row_to_dict(row)
     data["require_previous_station"] = bool(data["require_previous_station"])
     data["require_barcode_switch"] = bool(data["require_barcode_switch"])
+    data["require_current_barcode"] = bool(data["require_current_barcode"])
     data["required_station_ids"] = int_list(data["required_station_ids"])
     data["required_child_station_ids"] = int_list(data["required_child_station_ids"])
     return data
@@ -256,6 +258,7 @@ def save_station_dependency(station_id, payload):
         as_bool(payload.get("require_previous_station"), True),
         json_ids(required_station_ids),
         as_bool(payload.get("require_barcode_switch"), False),
+        as_bool(payload.get("require_current_barcode"), False),
         child_project_id,
         str(payload.get("required_child_material_type", "")).strip(),
         max(int(payload.get("required_child_count") or 0), 0),
@@ -295,7 +298,8 @@ def save_station_dependency(station_id, payload):
                 """
                 UPDATE station_dependencies
                 SET require_previous_station = ?, required_station_ids = ?,
-                    require_barcode_switch = ?, required_child_project_id = ?,
+                    require_barcode_switch = ?, require_current_barcode = ?,
+                    required_child_project_id = ?,
                     required_child_material_type = ?, required_child_count = ?,
                     required_child_station_ids = ?, updated_at = ?
                 WHERE station_id = ?
@@ -307,17 +311,18 @@ def save_station_dependency(station_id, payload):
                 """
                 INSERT INTO station_dependencies
                 (require_previous_station, required_station_ids, require_barcode_switch,
-                 required_child_project_id, required_child_material_type,
+                 require_current_barcode, required_child_project_id,
+                 required_child_material_type,
                  required_child_count, required_child_station_ids, updated_at,
                  station_id, created_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (*values, now),
             )
     return get_station_dependency(station_id)
 
 
-def _verify_station_entry(conn, product, station_id):
+def _verify_station_entry(conn, product, station_id, barcode=""):
     station = conn.execute(
         "SELECT id, project_id, name FROM stations WHERE id = ?",
         (station_id,),
@@ -328,6 +333,12 @@ def _verify_station_entry(conn, product, station_id):
         return False, "当前产品状态异常，禁止生产", []
     dependency = _station_dependency(conn, station_id)
     failed = []
+    if (
+        dependency["require_current_barcode"]
+        and barcode
+        and barcode != product["current_barcode"]
+    ):
+        failed.append(f"必须使用当前有效主条码：{product['current_barcode']}")
     if dependency["require_previous_station"]:
         previous_id = previous_station_id(conn, station["project_id"], station_id)
         if previous_id and not completion_exists(
@@ -421,7 +432,12 @@ def verify_station_entry(payload):
             )
         if not product:
             return {"allowed": False, "message": "未找到产品实体", "failed": ["未找到产品实体"]}
-        allowed, message, failed = _verify_station_entry(conn, product, station_id)
+        allowed, message, failed = _verify_station_entry(
+            conn,
+            product,
+            station_id,
+            str(payload.get("barcode") or product["current_barcode"]),
+        )
         return {
             "allowed": allowed,
             "message": message,
