@@ -33,8 +33,19 @@ mkdir -p "${WHEEL_DIR}"
 echo "== 打包 MES 源码 =="
 # 直接从已提交 commit 生成归档，天然排除工作区中的配置、日志、
 # 虚拟环境、数据库、备份和历史 EXE/ZIP 等未跟踪文件。
+STAGING_DIR="$(mktemp -d "${TMPDIR:-/tmp}/mes-update.XXXXXX")"
+trap 'rm -rf "${STAGING_DIR}"' EXIT
 git archive --format=tar "${DEPLOY_COMMIT}" \
-  | gzip -9 > "${DIST_DIR}/mes_update.tar.gz"
+  | tar -xf - -C "${STAGING_DIR}"
+find "${STAGING_DIR}" -type d \
+  \( -name '.venv' -o -name '__pycache__' -o -name 'logs' -o -name 'backups' \) \
+  -prune -exec rm -rf {} +
+find "${STAGING_DIR}" -type f \
+  \( -name '*.pyc' -o -name 'quality_control.db' -o -name 'config.ini' \) \
+  -delete
+tar -czf "${DIST_DIR}/mes_update.tar.gz" \
+  -C "${STAGING_DIR}" \
+  .
 
 if tar -tzf "${DIST_DIR}/mes_update.tar.gz" \
   | grep -Eq '(^|/)(\.git|\.venv|__pycache__|quality_control\.db|config\.ini|logs|backups)(/|$)|\.pyc$'; then
