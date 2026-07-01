@@ -1,4 +1,5 @@
 from dataclasses import dataclass
+import struct
 from typing import Optional, Tuple
 
 
@@ -99,8 +100,28 @@ class S7PlcClient:
     def read_int(self, db_number: int, offset: int) -> int:
         raw = self.read_bytes(db_number, offset, 2)
         if self.snap7_util:
-            return int(self.snap7_util.get_int(raw, 0))
+            return int(self.snap7_util.get_int(bytearray(raw), 0))
         return int.from_bytes(raw, byte_order="big", signed=True)
+
+    def read_dint(self, db_number: int, offset: int) -> int:
+        raw = self.read_bytes(db_number, offset, 4)
+        if self.snap7_util:
+            return int(self.snap7_util.get_dint(bytearray(raw), 0))
+        return int.from_bytes(raw, byte_order="big", signed=True)
+
+    def read_real(self, db_number: int, offset: int) -> float:
+        raw = self.read_bytes(db_number, offset, 4)
+        if self.snap7_util:
+            return float(self.snap7_util.get_real(bytearray(raw), 0))
+        return float(struct.unpack(">f", raw)[0])
+
+    def read_bool(self, db_number: int, offset: int, bit_index: int) -> bool:
+        if not 0 <= bit_index <= 7:
+            raise ValueError("bit_index 必须在 0-7 之间")
+        raw = self.read_bytes(db_number, offset, 1)
+        if self.snap7_util:
+            return bool(self.snap7_util.get_bool(bytearray(raw), 0, bit_index))
+        return bool(raw[0] & (1 << bit_index))
 
     def read_snapshot(
         self,
