@@ -270,6 +270,9 @@ class RouteConfigurationTest(unittest.TestCase):
         self.assertIn('data-station-id="${item.id}"', HTML)
         self.assertIn("selectedStationId = Number(stationId)", HTML)
         self.assertIn("station.id === selectedStationId", HTML)
+        self.assertIn(
+            'if (btn.dataset.page === "routePage") renderRoutePage()', HTML
+        )
 
     def test_station_management_adds_edits_and_lists_route_fields(self):
         created = services.add_station(
@@ -316,6 +319,14 @@ class RouteConfigurationTest(unittest.TestCase):
         self.assertIn('class="tree-node tree-route"', HTML)
         self.assertIn('const route = station.route_name || "A主线"', HTML)
         self.assertIn("routeSortValue(left.route_name)", HTML)
+
+    def test_binding_material_types_are_selects_not_free_text(self):
+        self.assertIn('<select id="routeMaterialType">', HTML)
+        self.assertIn('<select id="bindParentType" disabled>', HTML)
+        self.assertIn('<select id="bindChildType"></select>', HTML)
+        self.assertNotIn('<input id="routeMaterialType"', HTML)
+        self.assertNotIn('<input id="bindChildType"', HTML)
+        self.assertIn("refreshBindingOptions(step.bind_child_material_type", HTML)
 
     def test_station_route_order_is_project_route_then_order(self):
         services.add_station(

@@ -245,12 +245,14 @@ HTML = r"""<!doctype html>
           </div>
           <div id="bindFields" style="display:none">
             <div class="toolbar">
-              <label>子物料项目</label><select id="bindChildProject" onchange="refreshBindingStationOptions()"><option value="">请选择</option></select>
-              <label>子物料类型</label><input id="bindChildType" placeholder="例如：B">
+              <label>父件物料类型</label><select id="bindParentType" disabled></select>
+              <label>子物料项目</label><select id="bindChildProject" onchange="refreshBindingOptions()"><option value="">请选择</option></select>
+              <label>子件物料类型</label><select id="bindChildType"></select>
               <label>子件路线</label><input id="bindChildRoute" placeholder="例如：B子线">
               <label>子物料数量</label><input id="bindRequiredCount" type="number" min="1" value="1">
               <label>子物料必完工位</label><select id="bindRequiredStationIds" multiple></select>
             </div>
+            <p class="hint">父件物料类型直接读取当前工位配置；父件和子件物料类型均使用下拉选项，不能手工输入。</p>
             <div class="toolbar">
               <label class="checkbox-label"><input id="bindRequireSwitch" type="checkbox" checked> 父件必须已切换主条码</label>
               <label class="checkbox-label"><input id="bindAllowDuplicate" type="checkbox"> 允许重复绑定</label>
@@ -319,7 +321,10 @@ HTML = r"""<!doctype html>
                   <option>合并绑定工位</option><option>后续工位</option>
                   <option>B起点工位</option><option>B完成工位</option>
                 </select>
-                <label>物料类型</label><input id="routeMaterialType" placeholder="A物料 / B物料">
+                <label>物料类型</label>
+                <select id="routeMaterialType">
+                  <option>A物料</option><option>B物料</option>
+                </select>
                 <button class="primary" onclick="saveRouteStation()">保存工位编排</button>
               </div>
               <p class="hint">路线顺序仅用于显示；生产放行只读取下面保存的显式依赖。</p>
@@ -541,6 +546,7 @@ HTML = r"""<!doctype html>
         document.querySelectorAll(".page").forEach(item => item.classList.remove("active"));
         btn.classList.add("active");
         document.getElementById(btn.dataset.page).classList.add("active");
+        if (btn.dataset.page === "routePage") renderRoutePage();
       });
     });
 
@@ -631,7 +637,11 @@ HTML = r"""<!doctype html>
       document.getElementById("routeName").value = station ? (station.route_name || "A主线") : "A主线";
       document.getElementById("routeOrder").value = station ? (station.route_order || 0) : 0;
       document.getElementById("routeStationRole").value = station ? (station.station_role || "普通工位") : "普通工位";
-      document.getElementById("routeMaterialType").value = station ? (station.material_type || "") : "";
+      setMaterialTypeOptions(
+        "routeMaterialType",
+        project ? project.id : null,
+        station ? station.material_type : ""
+      );
 
       const steps = station ? (station.steps || []) : [];
       document.getElementById("routeRuleRows").innerHTML = steps.map(step =>
@@ -689,7 +699,7 @@ HTML = r"""<!doctype html>
           route_name: document.getElementById("routeName").value,
           route_order: Number(document.getElementById("routeOrder").value || 0),
           station_role: document.getElementById("routeStationRole").value,
-          material_type: document.getElementById("routeMaterialType").value.trim()
+          material_type: document.getElementById("routeMaterialType").value
         })
       });
       showStatus("工位编排已保存");
@@ -892,7 +902,7 @@ HTML = r"""<!doctype html>
         if (current) select.value = current;
       });
       refreshDependencyStationOptions();
-      refreshBindingStationOptions();
+      refreshBindingOptions();
     }
 
     function refreshStationOptions() {
@@ -917,6 +927,7 @@ HTML = r"""<!doctype html>
       selectedStationId = Number(document.getElementById("stepStation").value);
       renderMenuTree();
       renderStations();
+      refreshBindingOptions();
       loadSteps();
     }
 
@@ -1139,7 +1150,7 @@ HTML = r"""<!doctype html>
         switch_set_current: document.getElementById("switchSetCurrent").checked,
         switch_disable_old: document.getElementById("switchDisableOld").checked,
         bind_child_project_id: Number(document.getElementById("bindChildProject").value || 0) || null,
-        bind_child_material_type: document.getElementById("bindChildType").value.trim(),
+        bind_child_material_type: document.getElementById("bindChildType").value,
         bind_child_route: document.getElementById("bindChildRoute").value.trim(),
         bind_required_count: Number(document.getElementById("bindRequiredCount").value || 1),
         bind_required_station_ids: selectedIds("bindRequiredStationIds"),
@@ -1183,10 +1194,9 @@ HTML = r"""<!doctype html>
       document.getElementById("switchSetCurrent").checked = step.switch_set_current ?? true;
       document.getElementById("switchDisableOld").checked = step.switch_disable_old ?? true;
       document.getElementById("bindChildProject").value = step.bind_child_project_id || "";
-      document.getElementById("bindChildType").value = step.bind_child_material_type || "";
       document.getElementById("bindChildRoute").value = step.bind_child_route || "";
       document.getElementById("bindRequiredCount").value = step.bind_required_count ?? 1;
-      refreshBindingStationOptions();
+      refreshBindingOptions(step.bind_child_material_type || "");
       setSelectedIds("bindRequiredStationIds", step.bind_required_station_ids || []);
       document.getElementById("bindRequireSwitch").checked = step.bind_require_parent_switch ?? true;
       document.getElementById("bindAllowDuplicate").checked = !!step.bind_allow_duplicate;
@@ -1278,6 +1288,35 @@ HTML = r"""<!doctype html>
       ).join("");
     }
 
+    function materialTypeValues(projectId = null, selectedValue = "") {
+      const values = new Set(["A物料", "B物料"]);
+      const projects = projectId
+        ? fullData.projects.filter(project => project.id === Number(projectId))
+        : fullData.projects;
+      projects.forEach(project => {
+        if (project.product_type) values.add(project.product_type);
+        project.stations.forEach(station => {
+          if (station.material_type) values.add(station.material_type);
+        });
+      });
+      if (selectedValue) values.add(selectedValue);
+      const rank = {"A物料": 1, "B物料": 2};
+      return Array.from(values).sort(
+        (left, right) => (rank[left] || 99) - (rank[right] || 99)
+          || left.localeCompare(right, "zh-CN")
+      );
+    }
+
+    function setMaterialTypeOptions(selectId, projectId, selectedValue = "", allowEmpty = false) {
+      const select = document.getElementById(selectId);
+      if (!select) return;
+      const values = materialTypeValues(projectId, selectedValue);
+      select.innerHTML = (allowEmpty ? `<option value="">未配置</option>` : "") + values.map(
+        value => `<option value="${htmlEscape(value)}">${htmlEscape(value)}</option>`
+      ).join("");
+      select.value = selectedValue || (allowEmpty ? "" : values[0] || "");
+    }
+
     function refreshDependencyStationOptions() {
       const required = document.getElementById("depStationIds");
       const requiredSelected = selectedIds("depStationIds");
@@ -1289,11 +1328,23 @@ HTML = r"""<!doctype html>
       setSelectedIds("depChildStationIds", childSelected);
     }
 
-    function refreshBindingStationOptions() {
+    function refreshBindingOptions(selectedChildType = null) {
       const select = document.getElementById("bindRequiredStationIds");
       const selected = selectedIds("bindRequiredStationIds");
-      select.innerHTML = stationOptions(document.getElementById("bindChildProject").value || null);
+      const childProjectId = document.getElementById("bindChildProject").value || null;
+      select.innerHTML = stationOptions(childProjectId);
       setSelectedIds("bindRequiredStationIds", selected);
+      const station = currentStation();
+      setMaterialTypeOptions(
+        "bindParentType",
+        station ? station.project_id || selectedProjectId : selectedProjectId,
+        station ? station.material_type : "",
+        true
+      );
+      const childType = selectedChildType === null
+        ? document.getElementById("bindChildType").value
+        : selectedChildType;
+      setMaterialTypeOptions("bindChildType", childProjectId, childType);
     }
 
     async function loadStationDependency() {
