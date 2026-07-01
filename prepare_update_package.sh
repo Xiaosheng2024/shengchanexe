@@ -31,18 +31,16 @@ rm -rf "${DIST_DIR}"
 mkdir -p "${WHEEL_DIR}"
 
 echo "== 打包 MES 源码 =="
-tar \
-  --exclude='./.git' \
-  --exclude='./.venv' \
-  --exclude='*/__pycache__' \
-  --exclude='*.pyc' \
-  --exclude='./quality_control.db' \
-  --exclude='./config.ini' \
-  --exclude='*/logs' \
-  --exclude='*/backups' \
-  --exclude='./dist_deploy' \
-  -czf "${DIST_DIR}/mes_update.tar.gz" \
-  .
+# 直接从已提交 commit 生成归档，天然排除工作区中的配置、日志、
+# 虚拟环境、数据库、备份和历史 EXE/ZIP 等未跟踪文件。
+git archive --format=tar "${DEPLOY_COMMIT}" \
+  | gzip -9 > "${DIST_DIR}/mes_update.tar.gz"
+
+if tar -tzf "${DIST_DIR}/mes_update.tar.gz" \
+  | grep -Eq '(^|/)(\.git|\.venv|__pycache__|quality_control\.db|config\.ini|logs|backups)(/|$)|\.pyc$'; then
+  echo "错误：源码更新包包含禁止部署的文件。" >&2
+  exit 1
+fi
 
 echo "== 准备服务端离线依赖 =="
 # 保留调用者要求的当前 Mac/Python 下载结果。
