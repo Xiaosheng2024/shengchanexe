@@ -59,14 +59,14 @@ from shared.models import (
 )
 
 
-APP_VERSION = "v0.9.3-rc1"
+APP_VERSION = "v0.9.3-rc2"
 SYSTEM_NAME = "关键工位防错追溯系统"
 DEFAULT_MES_SERVER_URL = "http://10.162.70.53:8000"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
 DEFAULT_TOOL_REVERSE_VALUE = 2
 DEFAULT_TOOL_COMMAND_DELAY_MS = 50
-DEFAULT_TOOL_POLL_INTERVAL_MS = 100
+DEFAULT_TOOL_POLL_INTERVAL_MS = 800
 CLIENT_SESSION_API_PATHS = {
     "/api/station-completions",
     "/api/scan-records",
@@ -130,8 +130,88 @@ def as_optional_int(value):
         return None
 
 
+class NumericPasswordDialog(QDialog):
+    def __init__(self, title: str, parent=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.setModal(True)
+        self.setFixedSize(420, 500)
+        layout = QVBoxLayout(self)
+        prompt = QLabel("请输入管理员密码")
+        prompt.setAlignment(Qt.AlignCenter)
+        prompt.setStyleSheet("font-size: 20px; font-weight: 700;")
+        layout.addWidget(prompt)
+
+        self.password_input = QLineEdit()
+        self.password_input.setEchoMode(QLineEdit.Password)
+        self.password_input.setAlignment(Qt.AlignCenter)
+        self.password_input.setStyleSheet("font-size: 28px; min-height: 52px;")
+        self.password_input.setInputMethodHints(Qt.ImhDigitsOnly)
+        layout.addWidget(self.password_input)
+
+        keypad = QGridLayout()
+        keypad.setSpacing(10)
+        for index, digit in enumerate("123456789"):
+            button = QPushButton(digit)
+            button.setMinimumSize(100, 64)
+            button.setStyleSheet("font-size: 24px; font-weight: 700;")
+            button.clicked.connect(
+                lambda _, value=digit: self.append_digit(value)
+            )
+            keypad.addWidget(button, index // 3, index % 3)
+        delete_btn = QPushButton("删除")
+        zero_btn = QPushButton("0")
+        clear_btn = QPushButton("清空")
+        for button in (delete_btn, zero_btn, clear_btn):
+            button.setMinimumSize(100, 64)
+            button.setStyleSheet("font-size: 20px; font-weight: 700;")
+        delete_btn.clicked.connect(self.delete_digit)
+        zero_btn.clicked.connect(lambda: self.append_digit("0"))
+        clear_btn.clicked.connect(self.password_input.clear)
+        keypad.addWidget(delete_btn, 3, 0)
+        keypad.addWidget(zero_btn, 3, 1)
+        keypad.addWidget(clear_btn, 3, 2)
+        layout.addLayout(keypad)
+
+        buttons = QHBoxLayout()
+        self.cancel_button = QPushButton("取消")
+        self.confirm_button = QPushButton("确认")
+        for button in (self.cancel_button, self.confirm_button):
+            button.setMinimumHeight(52)
+            button.setStyleSheet("font-size: 18px; font-weight: 700;")
+        self.cancel_button.clicked.connect(self.reject)
+        self.confirm_button.clicked.connect(self.accept)
+        buttons.addWidget(self.cancel_button)
+        buttons.addWidget(self.confirm_button)
+        layout.addLayout(buttons)
+
+        self.password_input.returnPressed.connect(self.accept)
+        center_timer = QTimer(self)
+        center_timer.setSingleShot(True)
+        center_timer.timeout.connect(self.center_on_parent)
+        center_timer.start(0)
+        self.password_input.setFocus()
+
+    def append_digit(self, digit: str):
+        self.password_input.setText(self.password_input.text() + digit)
+
+    def delete_digit(self):
+        self.password_input.setText(self.password_input.text()[:-1])
+
+    def password(self) -> str:
+        return self.password_input.text()
+
+    def center_on_parent(self):
+        parent = self.parentWidget()
+        if parent is not None:
+            self.move(
+                parent.frameGeometry().center() - self.rect().center()
+            )
+
+
 class QualityControlWindow(QMainWindow):
     tool_worker_write_requested = pyqtSignal(int, int)
+    tool_worker_bypass_requested = pyqtSignal(bool)
 
     def __init__(self, app_config_path: Optional[Path] = None):
         super().__init__()
@@ -146,6 +226,10 @@ class QualityControlWindow(QMainWindow):
         self.current_step_index = 0
         self.online_mode = False
         self.is_switching_station = False
+        self.syncing_config = False
+        self.last_config_sync_error = ""
+        self.last_warning_key = ""
+        self.last_warning_at = 0.0
         self.current_project_id = self.current_project.name
         self.current_station_id = self.current_station.name
         self.saved_project_id = None
@@ -222,7 +306,11 @@ class QualityControlWindow(QMainWindow):
         self.degrade_mode_requires_admin = True
         self._degraded_mode_guard = False
         self.tool_ng_dialog_open = False
+        self.tool_ng_password_dialog: Optional[NumericPasswordDialog] = None
         self.tool_lock_state = None
+        self.tool_event_sequence = 0
+        self.last_tool_event_snapshot = None
+        self.defer_tool_close_for_event = False
 
         self.build_ui()
         self.load_scanner_settings()
@@ -232,13 +320,27 @@ class QualityControlWindow(QMainWindow):
         self.refresh_project_station_selectors()
         self.load_station(self.current_project.name, self.current_station.name)
         if not self.api_base_input.text().strip():
-            QTimer.singleShot(0, self.notify_missing_server_url)
+            self.schedule_callback(0, self.notify_missing_server_url)
         app = QApplication.instance()
         if app is not None:
             app.installEventFilter(self)
             self._scanner_event_filter_installed = True
-        QTimer.singleShot(0, self.set_english_keyboard_layout)
-        QTimer.singleShot(1500, self.check_for_client_update)
+        self.schedule_callback(0, self.set_english_keyboard_layout)
+        self.schedule_callback(1500, self.check_for_client_update)
+
+    def schedule_callback(self, delay_ms: int, callback):
+        timer = QTimer(self)
+        timer.setSingleShot(True)
+
+        def run_callback():
+            try:
+                callback()
+            finally:
+                timer.deleteLater()
+
+        timer.timeout.connect(run_callback)
+        timer.start(max(int(delay_ms), 0))
+        return timer
 
     def default_projects(self) -> List[ProjectConfig]:
         stations = []
@@ -523,6 +625,11 @@ class QualityControlWindow(QMainWindow):
         self.tool_admin_password_input = QLineEdit("0000")
         self.tool_admin_password_input.setEchoMode(QLineEdit.Password)
         self.tool_admin_password_input.setFixedWidth(120)
+        self.tool_admin_password_input.setReadOnly(True)
+        self.tool_admin_password_button = QPushButton("数字键盘")
+        self.tool_admin_password_button.clicked.connect(
+            self.edit_tool_admin_password
+        )
         self.tool_status_label = QLabel("未连接")
         self.tool_status_label.setFixedWidth(90)
         self.tool_status_label.setAlignment(Qt.AlignCenter)
@@ -674,16 +781,27 @@ class QualityControlWindow(QMainWindow):
                 return
         if enabled:
             self.stop_plc_worker()
-            self.stop_tool_worker(lock_before_disconnect=False)
             self.degraded_mode_checkbox.setStyleSheet(
                 "color:#dc2626;font-weight:700;background:#fef2f2;padding:5px;"
             )
-            self.message_label.setText("降级模式已开启，系统不进行防错控制。")
+            if self.is_tool_worker_running():
+                logging.info("开启降级模式：暂停螺钉枪监控并请求写4=1")
+                self.tool_worker_bypass_requested.emit(True)
+                self.message_label.setText(
+                    "降级模式已开启，正在发送螺钉枪开锁命令"
+                )
+            else:
+                logging.error("开启降级模式失败：螺钉枪 worker 未连接，无法写4=1")
+                self.message_label.setText(
+                    "降级模式已开启，但螺钉枪开锁命令发送失败，请检查连接。"
+                )
         else:
             self.degraded_mode_checkbox.setStyleSheet("")
             self.message_label.setText("降级模式已关闭，系统恢复全部防错控制")
+            if self.is_tool_worker_running():
+                self.tool_worker_bypass_requested.emit(False)
             self.sync_workers_for_station()
-            self.prompt_current_step_start()
+            self.schedule_callback(0, self.prompt_current_step_start)
         self.report_degrade_mode_change(enabled)
         self.refresh_work_area()
 
@@ -750,12 +868,14 @@ class QualityControlWindow(QMainWindow):
             logging.info("%s 完成，耗时 %.2f 秒", step_name, duration)
 
     def switch_station(self, project_name: str, station_name: str, auto_download: bool = True):
-        if self.is_switching_station:
+        if self.is_switching_station or self.syncing_config:
             return
         old_project = self.current_project.name if self.current_project else ""
         old_station = self.current_station.name if self.current_station else ""
         logging.info("开始切换工位：%s/%s -> %s/%s", old_project, old_station, project_name, station_name)
         self.is_switching_station = True
+        self.syncing_config = bool(self.online_mode and auto_download)
+        self.last_config_sync_error = ""
         if hasattr(self, "station_combo"):
             self.station_combo.setEnabled(False)
         try:
@@ -785,6 +905,14 @@ class QualityControlWindow(QMainWindow):
                 start = monotonic()
                 if not self.download_config_for_current_station():
                     self.log_step_duration("下载新工位配置失败", start)
+                    message = (
+                        "重新同步配置失败，请检查网络或服务器；当前禁止生产。"
+                    )
+                    if self.last_config_sync_error:
+                        message += f"\n{self.last_config_sync_error}"
+                    self.production_enabled = False
+                    self.message_label.setText(message)
+                    self.show_auto_close_warning("同步配置失败", message)
                     return
                 self.log_step_duration("下载新工位配置", start)
 
@@ -797,7 +925,10 @@ class QualityControlWindow(QMainWindow):
                     logging.info("切换完成：%s/%s", project_name, station_name)
                 else:
                     self.log_step_duration("acquire 新工位失败", start)
-                    self.disable_production("在线配置已下载，但当前工位被其他设备占用，禁止生产。请释放工位或选择其它工位。")
+                    self.disable_production(
+                        "在线配置已下载，但当前工位被其他设备占用，禁止生产。请释放工位或选择其它工位。",
+                        show_warning=False,
+                    )
                     logging.warning("切换失败：新工位占用失败 %s/%s", project_name, station_name)
             else:
                 self.recompute_production_enabled()
@@ -810,8 +941,11 @@ class QualityControlWindow(QMainWindow):
             self.station_session_acquired = False
             self.recompute_production_enabled()
             logging.exception("切换失败：%s", exc)
-            self.message_label.setText(f"切换工位失败：{exc}")
+            message = f"重新同步配置失败，请检查网络或服务器；当前禁止生产。\n{exc}"
+            self.message_label.setText(message)
+            self.show_auto_close_warning("同步配置失败", message)
         finally:
+            self.syncing_config = False
             self.is_switching_station = False
             if hasattr(self, "station_combo"):
                 self.station_combo.setEnabled(True)
@@ -874,13 +1008,15 @@ class QualityControlWindow(QMainWindow):
                 data = self.api_get(f"/api/station-config?{query}")
             product = self.product_from_api(data)
         except Exception as exc:
-            QMessageBox.warning(self, "下载配置失败", str(exc))
+            self.last_config_sync_error = str(exc)
+            logging.exception("下载在线配置失败：%s", exc)
             self.station_config_loaded = False
             self.recompute_production_enabled()
             return False
         self.current_station.product = product
         self.current_product = product
         self.station_config_loaded = True
+        self.last_config_sync_error = ""
         self.reset_current_product(update_table=True)
         logging.info("在线配置已下载：%s/%s", project_name, station_name)
         return True
@@ -1227,6 +1363,7 @@ class QualityControlWindow(QMainWindow):
             "reverse_value": str(DEFAULT_TOOL_REVERSE_VALUE),
             "command_delay_ms": str(DEFAULT_TOOL_COMMAND_DELAY_MS),
             "poll_interval_ms": str(DEFAULT_TOOL_POLL_INTERVAL_MS),
+            "tool_poll_interval_ms": str(DEFAULT_TOOL_POLL_INTERVAL_MS),
             "ng_status_values": "3,4",
             "reverse_lock_enabled": "true",
             "degrade_mode_requires_admin": "true",
@@ -1290,7 +1427,7 @@ class QualityControlWindow(QMainWindow):
             and bool(self.station_session_id)
         )
         if self.production_enabled and not was_enabled:
-            QTimer.singleShot(0, self.set_english_keyboard_layout)
+            self.schedule_callback(0, self.set_english_keyboard_layout)
         return self.production_enabled
 
     def production_disabled_message(self) -> str:
@@ -1304,12 +1441,15 @@ class QualityControlWindow(QMainWindow):
         self.recompute_production_enabled()
         if self.production_enabled:
             return True
+        if self.syncing_config:
+            self.message_label.setText("正在同步在线配置，请稍候")
+            return False
         message = self.production_disabled_message()
         self.message_label.setText(message)
         self.show_auto_close_warning("禁止生产", message)
         return False
 
-    def disable_production(self, message: str):
+    def disable_production(self, message: str, show_warning: bool = True):
         self.station_session_acquired = False
         self.recompute_production_enabled()
         self.stop_plc_worker()
@@ -1318,7 +1458,8 @@ class QualityControlWindow(QMainWindow):
         self.barcode_input.setEnabled(False)
         self.screw_ok_btn.setEnabled(False)
         self.message_label.setText(message)
-        self.show_auto_close_warning("禁止生产", message)
+        if show_warning:
+            self.show_auto_close_warning("禁止生产", message)
 
     def load_scanner_settings(self):
         config = configparser.ConfigParser()
@@ -1485,7 +1626,7 @@ class QualityControlWindow(QMainWindow):
         if self._replaying_scanner_keys:
             return super().eventFilter(watched, event)
         if watched is self.barcode_input and event.type() == QEvent.FocusIn:
-            QTimer.singleShot(0, self.set_english_keyboard_layout)
+            self.schedule_callback(0, self.set_english_keyboard_layout)
         if (
             event.type() == QEvent.KeyPress
             and isinstance(watched, QWidget)
@@ -1504,7 +1645,7 @@ class QualityControlWindow(QMainWindow):
     def changeEvent(self, event):
         super().changeEvent(event)
         if event.type() == QEvent.ActivationChange and self.isActiveWindow():
-            QTimer.singleShot(0, self.set_english_keyboard_layout)
+            self.schedule_callback(0, self.set_english_keyboard_layout)
 
     def set_english_keyboard_layout(self) -> bool:
         if sys.platform != "win32":
@@ -1644,9 +1785,9 @@ class QualityControlWindow(QMainWindow):
         dialog.exec_()
         clicked = dialog.clickedButton()
         if clicked == refresh_btn:
-            QTimer.singleShot(0, self.download_online_config)
+            self.schedule_callback(0, self.download_online_config)
         elif clicked == force_btn:
-            QTimer.singleShot(0, self.force_acquire_station_session)
+            self.schedule_callback(0, self.force_acquire_station_session)
         elif clicked == back_btn:
             self.message_label.setText("请重新选择项目工位")
 
@@ -1675,25 +1816,19 @@ class QualityControlWindow(QMainWindow):
             self.disable_production("当前工位未占用成功，禁止生产")
 
     def prompt_admin_password(self, title: str):
-        dialog = QDialog(self)
-        dialog.setWindowTitle(title)
-        layout = QVBoxLayout(dialog)
-        layout.addWidget(QLabel("请输入管理员密码"))
-        password_input = QLineEdit()
-        password_input.setEchoMode(QLineEdit.Password)
-        layout.addWidget(password_input)
-        row = QHBoxLayout()
-        ok_btn = QPushButton("确认")
-        cancel_btn = QPushButton("取消")
-        row.addStretch(1)
-        row.addWidget(ok_btn)
-        row.addWidget(cancel_btn)
-        layout.addLayout(row)
-        ok_btn.clicked.connect(dialog.accept)
-        cancel_btn.clicked.connect(dialog.reject)
-        password_input.returnPressed.connect(dialog.accept)
+        dialog = NumericPasswordDialog(title, self)
         accepted = dialog.exec_() == QDialog.Accepted
-        return password_input.text(), accepted
+        return dialog.password(), accepted
+
+    def edit_tool_admin_password(self):
+        dialog = NumericPasswordDialog("设置管理员密码", self)
+        if dialog.exec_() != QDialog.Accepted:
+            return
+        password = dialog.password()
+        if not password:
+            QMessageBox.warning(self, "设置失败", "管理员密码不能为空")
+            return
+        self.tool_admin_password_input.setText(password)
 
     def open_settings_dialog(self):
         self.settings_dialog.show()
@@ -1791,7 +1926,13 @@ class QualityControlWindow(QMainWindow):
         form.addRow("轮询间隔ms", self.tool_poll_interval_input)
         form.addRow("通讯超时秒", self.tool_timeout_input)
         form.addRow("写指令延迟", self.tool_command_delay_input)
-        form.addRow("管理员密码", self.tool_admin_password_input)
+        password_row = QWidget()
+        password_layout = QHBoxLayout(password_row)
+        password_layout.setContentsMargins(0, 0, 0, 0)
+        password_layout.addWidget(self.tool_admin_password_input)
+        password_layout.addWidget(self.tool_admin_password_button)
+        password_layout.addStretch(1)
+        form.addRow("管理员密码", password_row)
         form.addRow("是否启用防重复触发", self.tool_enable_dedup_checkbox)
         form.addRow("是否显示详细通讯日志", self.tool_verbose_log_checkbox)
         layout.addLayout(form)
@@ -1871,7 +2012,15 @@ class QualityControlWindow(QMainWindow):
         self.tool_forward_value_input.setValue(tool.getint("forward_value", fallback=self.tool_forward_value_input.value()))
         self.tool_reverse_value_input.setValue(tool.getint("reverse_value", fallback=self.tool_reverse_value_input.value()))
         self.tool_clear_trigger_when_reverse_checkbox.setChecked(tool.getboolean("clear_trigger_when_reverse", fallback=True))
-        self.tool_poll_interval_input.setValue(tool.getint("poll_interval_ms", fallback=self.tool_poll_interval_input.value()))
+        self.tool_poll_interval_input.setValue(
+            tool.getint(
+                "tool_poll_interval_ms",
+                fallback=tool.getint(
+                    "poll_interval_ms",
+                    fallback=self.tool_poll_interval_input.value(),
+                ),
+            )
+        )
         self.tool_timeout_input.setValue(tool.getint("timeout_seconds", fallback=self.tool_timeout_input.value()))
         self.tool_command_delay_input.setValue(
             tool.getint("command_delay_ms", fallback=self.tool_command_delay_input.value())
@@ -1915,6 +2064,9 @@ class QualityControlWindow(QMainWindow):
                 "reverse_value": str(self.tool_reverse_value_input.value()),
                 "clear_trigger_when_reverse": str(self.tool_clear_trigger_when_reverse_checkbox.isChecked()).lower(),
                 "poll_interval_ms": str(self.tool_poll_interval_input.value()),
+                "tool_poll_interval_ms": str(
+                    self.tool_poll_interval_input.value()
+                ),
                 "timeout_seconds": str(self.tool_timeout_input.value()),
                 "command_delay_ms": str(self.tool_command_delay_input.value()),
                 "admin_unlock_password": self.tool_admin_password_input.text(),
@@ -2436,7 +2588,7 @@ class QualityControlWindow(QMainWindow):
         self.cancel_mode_started_ms = self.scanner_now_ms()
         self.barcode_input.clear()
         self.message_label.setText("已进入取消条码模式，请扫描需要取消的条码。")
-        QTimer.singleShot(
+        self.schedule_callback(
             self.cancel_mode_timeout_seconds * 1000,
             self.expire_cancel_barcode_mode,
         )
@@ -2467,8 +2619,12 @@ class QualityControlWindow(QMainWindow):
                     "project_id": getattr(self.current_project, "id", None),
                     "station_id": getattr(self.current_station, "id", None),
                     "step_id": getattr(step, "step_id", None),
+                    "current_step_id": getattr(step, "step_id", None),
                     "product_instance_id": self.current_product_instance_id,
+                    "current_product_id": self.current_product_instance_id,
+                    "current_main_barcode": self.current_barcode,
                     "barcode": barcode,
+                    "barcode_to_cancel": barcode,
                     "is_main_barcode": is_main,
                     "operator": "管理员",
                 },
@@ -2833,11 +2989,12 @@ class QualityControlWindow(QMainWindow):
                 "螺丝打满后延迟%sms再锁枪",
                 self.tool_command_delay_input.value(),
             )
-            self.close_tool_for_screw_step()
+            if not self.defer_tool_close_for_event:
+                self.close_tool_for_screw_step()
             self.speak("螺丝已完成")
             self.message_label.setText(f"{step.name} 已完成 {step.required_count}/{step.required_count}")
             product = self.current_product
-            QTimer.singleShot(
+            self.schedule_callback(
                 1600,
                 lambda current_product=product, completed_step=step:
                 self.finish_screw_step_after_trigger_clear(current_product, completed_step),
@@ -2871,6 +3028,7 @@ class QualityControlWindow(QMainWindow):
             lock_register=self.tool_control_register_input.value(),
             lock_value=self.tool_lock_value_input.value(),
             command_delay_ms=self.tool_command_delay_input.value(),
+            unlock_value=self.tool_unlock_value_input.value(),
         )
         self.tool_thread = QThread(self)
         self.tool_worker = ToolPollWorker(config)
@@ -2880,6 +3038,10 @@ class QualityControlWindow(QMainWindow):
         worker.moveToThread(thread)
         thread.started.connect(worker.start)
         self.tool_worker_write_requested.connect(worker.write_register, Qt.QueuedConnection)
+        self.tool_worker_bypass_requested.connect(
+            worker.set_bypass,
+            Qt.QueuedConnection,
+        )
         worker.result.connect(
             lambda status, trigger, direction, gen=generation:
             self.on_tool_poll_result_for_generation(gen, status, trigger, direction)
@@ -2894,6 +3056,15 @@ class QualityControlWindow(QMainWindow):
             self.on_tool_write_error_for_generation(gen, address, value, message)
         )
         worker.connection_state.connect(self.on_tool_connection_state)
+        worker.bypass_changed.connect(
+            lambda enabled, success, message, gen=generation:
+            self.on_tool_bypass_changed(
+                gen,
+                enabled,
+                success,
+                message,
+            )
+        )
         worker.stopped.connect(thread.quit)
         thread.finished.connect(worker.deleteLater)
         thread.finished.connect(lambda w=worker, t=thread: self.cleanup_tool_worker(w, t))
@@ -2977,6 +3148,36 @@ class QualityControlWindow(QMainWindow):
             self.tool_status_label.setText("已断开")
             self.tool_status_label.setStyleSheet("font-size: 12px; color: #6b7280;")
 
+    def on_tool_bypass_changed(
+        self,
+        generation: int,
+        enabled: bool,
+        success: bool,
+        message: str,
+    ):
+        if generation != self.tool_worker_generation:
+            return
+        if enabled:
+            if success:
+                self.tool_lock_state = "unlocked"
+                self.tool_status_label.setText("降级放开")
+                self.tool_status_label.setStyleSheet(
+                    "font-size: 12px; color: #f97316;"
+                )
+                self.message_label.setText(
+                    "降级模式已开启，螺钉枪控制已放开"
+                )
+                logging.info("降级模式开启：写4=1成功，螺钉枪监控已暂停")
+            else:
+                self.message_label.setText(
+                    "降级模式已开启，但螺钉枪开锁命令发送失败，请检查连接。"
+                )
+                logging.error("降级模式开启：写4=1失败：%s", message)
+            return
+        logging.info("降级模式关闭：恢复螺钉枪监控和正常锁定逻辑")
+        self.tool_lock_state = None
+        self.sync_tool_lock_for_current_step()
+
     def start_plc_worker(self, step: ProcessStep):
         if not self.ensure_station_session_for_production():
             return
@@ -3048,9 +3249,13 @@ class QualityControlWindow(QMainWindow):
         self.plc_waiting_parts_ok = False
 
     def on_plc_error(self, message: str):
+        if self.syncing_config:
+            return
         self.message_label.setText(f"PLC通讯异常：{message}")
 
     def on_plc_snapshot_for_generation(self, generation: int, parts_ok: int, main_barcode: str, main_barcode_hex: str = ""):
+        if self.syncing_config:
+            return
         if generation != self.plc_worker_generation:
             logging.info("忽略旧 PLC worker 信号 generation=%s current=%s", generation, self.plc_worker_generation)
             return
@@ -3184,6 +3389,8 @@ class QualityControlWindow(QMainWindow):
             pass
 
     def on_tool_poll_error(self, message: str):
+        if self.syncing_config:
+            return
         logging.error("螺钉枪通讯异常：%s", message)
         self.tool_status_label.setText("正在重连")
         self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
@@ -3231,6 +3438,8 @@ class QualityControlWindow(QMainWindow):
         self.on_tool_poll_result(status, trigger, direction)
 
     def on_tool_poll_result(self, status: int, trigger: int, direction: int):
+        if self.syncing_config:
+            return
         if self.processing_tool_signal:
             return
         self.processing_tool_signal = True
@@ -3240,15 +3449,27 @@ class QualityControlWindow(QMainWindow):
             self.processing_tool_signal = False
 
     def process_tool_poll_result(self, status: int, trigger: int, direction: Optional[int] = None):
-        if self.degraded_mode_checkbox.isChecked():
+        if self.syncing_config or self.degraded_mode_checkbox.isChecked():
             return
         self.recompute_production_enabled()
         trigger_value = self.tool_trigger_value_input.value()
         preview_step = self.current_step()
         if trigger == trigger_value:
+            if not self.waiting_tool_trigger_reset:
+                self.tool_event_sequence += 1
+                self.last_tool_event_snapshot = {
+                    "sequence": self.tool_event_sequence,
+                    "direction": direction,
+                    "status": status,
+                    "trigger": trigger,
+                    "timestamp": datetime.now().isoformat(
+                        timespec="milliseconds"
+                    ),
+                }
             logging.info(
-                "检测到螺钉枪触发：direction=%s trigger=%s status=%s 当前工序=%s "
+                "检测到螺钉枪触发：event=%s direction=%s trigger=%s status=%s 当前工序=%s "
                 "production_enabled=%s tool_ng_locked=%s screw_ok_count=%s required_count=%s",
+                self.last_tool_event_snapshot,
                 direction,
                 trigger,
                 status,
@@ -3332,6 +3553,9 @@ class QualityControlWindow(QMainWindow):
                     self.tool_command_delay_input.value(),
                 )
                 self.clear_active_tool_trigger("反转动作，清除触发")
+                logging.info(
+                    "螺钉枪事件完成：分支=反转 写4=是 写53=是 弹窗=否 计数=否"
+                )
             return
 
         if direction != forward_value:
@@ -3364,18 +3588,34 @@ class QualityControlWindow(QMainWindow):
                 "OK后延迟%sms再清53",
                 self.tool_command_delay_input.value(),
             )
-            self.clear_active_tool_trigger("OK后清除触发")
-            self.handle_screw_ok()
+            final_screw = completed_after_ok >= required_count
+            self.defer_tool_close_for_event = True
+            try:
+                self.handle_screw_ok()
+            finally:
+                self.defer_tool_close_for_event = False
+            self.clear_active_tool_trigger("OK业务完成后清除触发")
+            if final_screw:
+                self.lock_tool()
             logging.info(
                 "螺钉枪OK：第%s颗，已完成%s/共%s",
                 completed_after_ok,
                 completed_after_ok,
                 required_count,
             )
+            logging.info(
+                "螺钉枪事件完成：分支=OK 写4=%s 写53=是 弹窗=否 计数=是",
+                "是" if final_screw else "否",
+            )
             return
 
         if status in ng_values:
-            self.handle_screw_ng()
+            self.handle_screw_ng(clear_trigger=False)
+            self.clear_active_tool_trigger("NG业务完成后清除触发")
+            logging.info(
+                "螺钉枪事件完成：分支=NG%s 写4=是 写53=是 弹窗=是 计数=否",
+                status,
+            )
             return
 
         logging.warning("设备状态未计数：status不是OK%s或NG%s，实际=%s", ok_value, sorted(ng_values), status)
@@ -3448,7 +3688,7 @@ class QualityControlWindow(QMainWindow):
         if self.waiting_tool_trigger_reset:
             logging.warning("螺丝工序已满，但53尚未清除成功，延后工序流转并继续重试")
             self.reset_tool_trigger()
-            QTimer.singleShot(
+            self.schedule_callback(
                 300,
                 lambda: self.finish_screw_step_after_trigger_clear(product, step),
             )
@@ -3462,7 +3702,7 @@ class QualityControlWindow(QMainWindow):
         self.add_history_record(step, "NG", "螺钉枪NG", "螺丝NG，请重新打当前这颗", completed=False)
         self.message_label.setText("螺丝NG，请重新打当前这颗")
 
-    def handle_screw_ng(self):
+    def handle_screw_ng(self, clear_trigger: bool = True):
         self.add_screw_ng_record()
         self.tool_ng_locked = True
         self.tool_admin_unlock_btn.setEnabled(True)
@@ -3471,12 +3711,13 @@ class QualityControlWindow(QMainWindow):
             self.tool_command_delay_input.value(),
         )
         self.lock_tool()
-        self.clear_active_tool_trigger("NG后清除触发")
         self.speak("螺丝NG，请管理员解锁")
         self.tool_status_label.setText("NG锁定")
         self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
         self.message_label.setText("检测到螺丝NG，螺钉枪已锁定，请管理员输入密码解锁")
         self.show_tool_ng_unlock_dialog()
+        if clear_trigger:
+            self.clear_active_tool_trigger("NG后清除触发")
 
     def reopen_tool_ng_unlock_dialog(self):
         if self.tool_ng_locked and not self.tool_ng_dialog_open:
@@ -3486,58 +3727,29 @@ class QualityControlWindow(QMainWindow):
         if self.tool_ng_dialog_open:
             return
         self.tool_ng_dialog_open = True
-        dialog = QDialog(self)
-        dialog.setWindowTitle("螺丝NG确认 / 管理解锁")
-        dialog.setModal(True)
-        layout = QVBoxLayout(dialog)
-        prompt = QLabel("检测到螺丝NG，螺钉枪已锁定，请管理员输入密码解锁")
-        prompt.setWordWrap(True)
-        layout.addWidget(prompt)
-
-        password_input = QLineEdit()
-        password_input.setEchoMode(QLineEdit.Password)
-        password_input.setPlaceholderText("请输入管理员密码")
-        layout.addWidget(password_input)
-
-        keypad = QGridLayout()
-        for index, digit in enumerate("123456789"):
-            button = QPushButton(digit)
-            button.clicked.connect(lambda _, value=digit: password_input.setText(password_input.text() + value))
-            keypad.addWidget(button, index // 3, index % 3)
-        clear_btn = QPushButton("清除")
-        zero_btn = QPushButton("0")
-        backspace_btn = QPushButton("退格")
-        clear_btn.clicked.connect(password_input.clear)
-        zero_btn.clicked.connect(lambda: password_input.setText(password_input.text() + "0"))
-        backspace_btn.clicked.connect(lambda: password_input.setText(password_input.text()[:-1]))
-        keypad.addWidget(clear_btn, 3, 0)
-        keypad.addWidget(zero_btn, 3, 1)
-        keypad.addWidget(backspace_btn, 3, 2)
-        layout.addLayout(keypad)
-
-        button_row = QHBoxLayout()
-        confirm_btn = QPushButton("确认")
-        cancel_btn = QPushButton("取消")
-        button_row.addStretch(1)
-        button_row.addWidget(confirm_btn)
-        button_row.addWidget(cancel_btn)
-        layout.addLayout(button_row)
+        dialog = NumericPasswordDialog(
+            "螺丝NG确认 / 管理解锁",
+            self,
+        )
+        self.tool_ng_password_dialog = dialog
+        dialog.confirm_button.clicked.disconnect()
+        dialog.password_input.returnPressed.disconnect()
 
         def confirm_unlock():
-            if self.unlock_tool_after_ng(password_input.text()):
+            if self.unlock_tool_after_ng(dialog.password()):
                 dialog.accept()
                 return
-            password_input.clear()
+            dialog.password_input.clear()
             QMessageBox.warning(dialog, "密码错误", "密码错误")
 
-        confirm_btn.clicked.connect(confirm_unlock)
-        cancel_btn.clicked.connect(dialog.reject)
-        password_input.returnPressed.connect(confirm_unlock)
+        dialog.confirm_button.clicked.connect(confirm_unlock)
+        dialog.password_input.returnPressed.connect(confirm_unlock)
         dialog.finished.connect(lambda _: self._tool_ng_dialog_finished())
-        dialog.exec_()
+        dialog.open()
 
     def _tool_ng_dialog_finished(self):
         self.tool_ng_dialog_open = False
+        self.tool_ng_password_dialog = None
         if self.tool_ng_locked:
             self.lock_tool()
             self.tool_status_label.setText("NG锁定")
@@ -3604,7 +3816,10 @@ class QualityControlWindow(QMainWindow):
         self.last_voice_step_key = None
         self.refresh_work_area()
         if prompt_delay_ms:
-            QTimer.singleShot(prompt_delay_ms, self.prompt_current_step_start)
+            self.schedule_callback(
+                prompt_delay_ms,
+                self.prompt_current_step_start,
+            )
         else:
             self.prompt_current_step_start()
 
@@ -3939,6 +4154,16 @@ class QualityControlWindow(QMainWindow):
                 self.report_table.setItem(row, column, QTableWidgetItem(str(value)))
 
     def show_auto_close_warning(self, title: str, message: str):
+        warning_key = f"{title}\n{message}"
+        now = monotonic()
+        if (
+            warning_key == self.last_warning_key
+            and now - self.last_warning_at < 3.0
+        ):
+            logging.info("忽略3秒内重复警告：%s", title)
+            return
+        self.last_warning_key = warning_key
+        self.last_warning_at = now
         dialog = QMessageBox(self)
         dialog.setIcon(QMessageBox.Warning)
         dialog.setWindowTitle(title)
@@ -3947,7 +4172,10 @@ class QualityControlWindow(QMainWindow):
         dialog.setStyleSheet("QLabel { font-size: 20px; } QMessageBox { min-width: 420px; }")
         dialog.finished.connect(lambda: self.warning_dialogs.remove(dialog) if dialog in self.warning_dialogs else None)
         self.warning_dialogs.append(dialog)
-        QTimer.singleShot(5000, dialog.accept)
+        close_timer = QTimer(dialog)
+        close_timer.setSingleShot(True)
+        close_timer.timeout.connect(dialog.accept)
+        close_timer.start(5000)
         dialog.open()
 
     def save_product_name(self):

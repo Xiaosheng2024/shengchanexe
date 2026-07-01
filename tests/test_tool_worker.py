@@ -4,6 +4,7 @@ from unittest.mock import patch
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
+from PyQt5.QtCore import QEvent
 from PyQt5.QtWidgets import QApplication
 
 from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
@@ -71,6 +72,10 @@ class ToolPollWorkerTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def tearDown(self):
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.app.processEvents()
+
     def test_poll_reuses_worker_client_for_all_business_registers(self):
         worker = ToolPollWorker(make_config())
         client = FakeConnectedClient()
@@ -81,11 +86,11 @@ class ToolPollWorkerTest(unittest.TestCase):
 
         worker.poll_once()
 
-        self.assertEqual(client.reads, [53, 54, 100])
+        self.assertEqual(client.reads, [54, 100, 53])
         self.assertEqual(results, [(2, 1, 3)])
 
         worker.poll_once()
-        self.assertEqual(client.reads, [53, 54, 100, 53, 54, 100])
+        self.assertEqual(client.reads, [54, 100, 53, 54, 100, 53])
         self.assertEqual(results, [(2, 1, 3), (2, 1, 3)])
 
     def test_start_keeps_100ms_poll_timer_active(self):
@@ -152,6 +157,26 @@ class ToolPollWorkerTest(unittest.TestCase):
 
         self.assertEqual(errors[0][:2], (53, 0))
         self.assertIn("write failed", errors[0][2])
+
+    def test_degraded_bypass_stops_polling_and_writes_unlock(self):
+        worker = ToolPollWorker(make_config())
+        client = FakeConnectedClient()
+        worker.client = client
+        worker.polling = True
+        results = []
+        worker.bypass_changed.connect(
+            lambda enabled, success, message: results.append(
+                (enabled, success, message)
+            )
+        )
+
+        worker.set_bypass(True)
+        worker.poll_once()
+
+        self.assertTrue(worker.bypass)
+        self.assertEqual(client.writes, [(4, 1)])
+        self.assertEqual(client.reads, [])
+        self.assertEqual(results, [(True, True, "")])
 
 
 if __name__ == "__main__":

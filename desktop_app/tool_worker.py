@@ -19,6 +19,7 @@ class ToolPollConfig:
     poll_interval_ms: int
     lock_register: int = 4
     lock_value: int = 2
+    unlock_value: int = 1
     command_delay_ms: int = 50
     reconnect_interval_seconds: float = 2.0
 
@@ -29,6 +30,7 @@ class ToolPollWorker(QObject):
     write_succeeded = pyqtSignal(int, int)
     write_error = pyqtSignal(int, int, str)
     connection_state = pyqtSignal(str)
+    bypass_changed = pyqtSignal(bool, bool, str)
     stopped = pyqtSignal()
 
     def __init__(self, config: ToolPollConfig):
@@ -45,6 +47,7 @@ class ToolPollWorker(QObject):
         self.reading = False
         self.next_reconnect_at = 0.0
         self.reconnecting = False
+        self.bypass = False
 
     @pyqtSlot()
     def start(self):
@@ -95,6 +98,7 @@ class ToolPollWorker(QObject):
 
     def _stop(self, lock_before_disconnect: bool):
         self.polling = False
+        self.bypass = False
         if self.timer is not None:
             self.timer.stop()
             self.timer.deleteLater()
@@ -114,15 +118,22 @@ class ToolPollWorker(QObject):
 
     @pyqtSlot()
     def poll_once(self):
-        if not self.polling or self.reading:
+        if not self.polling or self.reading or self.bypass:
             return
         self.reading = True
         try:
             if not self.ensure_connection_for_poll():
                 return
-            trigger = self.client.read_register(self.config.trigger_register)
             direction = self.client.read_register(self.config.direction_register)
             status = self.client.read_register(self.config.status_register)
+            trigger = self.client.read_register(self.config.trigger_register)
+            if trigger == 1:
+                logging.info(
+                    "螺钉枪事件快照：direction=%s status=%s trigger=%s",
+                    direction,
+                    status,
+                    trigger,
+                )
             self.result.emit(status, trigger, direction)
         except Exception as exc:
             logging.error("螺钉枪读取53/54/100失败：%s", exc)
@@ -130,6 +141,39 @@ class ToolPollWorker(QObject):
             self.error.emit(str(exc))
         finally:
             self.reading = False
+
+    @pyqtSlot(bool)
+    def set_bypass(self, enabled: bool):
+        if not self.polling:
+            self.bypass_changed.emit(
+                enabled,
+                False,
+                "螺钉枪 worker 未运行",
+            )
+            return
+        if enabled:
+            self.bypass = True
+            if self.timer is not None:
+                self.timer.stop()
+            try:
+                if not self.ensure_connection_for_poll():
+                    raise ConnectionError("螺钉枪通讯断开")
+                self.write_register_with_delay(
+                    self.config.lock_register,
+                    self.config.unlock_value,
+                    "进入降级模式开锁",
+                )
+                logging.info("降级模式已写地址%s=%s", self.config.lock_register, self.config.unlock_value)
+                self.bypass_changed.emit(True, True, "")
+            except Exception as exc:
+                logging.error("降级模式开锁失败：%s", exc)
+                self.bypass_changed.emit(True, False, str(exc))
+            return
+        self.bypass = False
+        if self.timer is not None:
+            self.timer.start()
+        self.bypass_changed.emit(False, True, "")
+        QTimer.singleShot(0, self.poll_once)
 
     @pyqtSlot(int, int)
     def write_register(self, register_address: int, value: int):

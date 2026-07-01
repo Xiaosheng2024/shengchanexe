@@ -8,12 +8,14 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 from PyQt5.QtCore import QEvent, Qt
 from PyQt5.QtGui import QKeyEvent
-from PyQt5.QtWidgets import QApplication, QLabel
+from PyQt5.QtTest import QTest
+from PyQt5.QtWidgets import QApplication, QDialog, QLabel
 
 import desktop_app.window as window_module
 from desktop_app.window import (
     APP_VERSION,
     DEFAULT_MES_SERVER_URL,
+    NumericPasswordDialog,
     QualityControlWindow,
     SYSTEM_NAME,
 )
@@ -33,6 +35,21 @@ class DesktopMainBarcodeTest(unittest.TestCase):
     def setUpClass(cls):
         cls.app = QApplication.instance() or QApplication([])
 
+    def tearDown(self):
+        for widget in QApplication.topLevelWidgets():
+            if isinstance(widget, QDialog):
+                widget.close()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        self.app.processEvents()
+
+    @classmethod
+    def tearDownClass(cls):
+        for widget in QApplication.topLevelWidgets():
+            widget.close()
+            widget.deleteLater()
+        QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+        cls.app.processEvents()
+
     def make_window(self):
         window_module.shutil.which = lambda command: None
         temp_dir = tempfile.TemporaryDirectory()
@@ -43,7 +60,14 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.show_auto_close_warning = lambda title, message: None
         window.disable_tool_auto_listen_checkbox.setChecked(True)
         window.station_session_id = 1
-        self.addCleanup(window.close)
+
+        def cleanup_window():
+            window.close()
+            window.deleteLater()
+            QApplication.sendPostedEvents(None, QEvent.DeferredDelete)
+            self.app.processEvents()
+
+        self.addCleanup(cleanup_window)
         return window
 
     def set_current_step_to_screw(self, window):
@@ -832,7 +856,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(window.tool_forward_value_input.value(), 3)
             self.assertEqual(window.tool_reverse_value_input.value(), 2)
             self.assertEqual(window.tool_command_delay_input.value(), 50)
-            self.assertEqual(window.tool_poll_interval_input.value(), 100)
+            self.assertEqual(window.tool_poll_interval_input.value(), 800)
             self.assertTrue(config_path.exists())
             generated = configparser.ConfigParser()
             generated.read(config_path, encoding="utf-8")
@@ -840,7 +864,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(generated.getint("TOOL", "forward_value"), 3)
             self.assertEqual(generated.getint("TOOL", "reverse_value"), 2)
             self.assertEqual(generated.getint("TOOL", "command_delay_ms"), 50)
-            self.assertEqual(generated.getint("TOOL", "poll_interval_ms"), 100)
+            self.assertEqual(generated.getint("TOOL", "poll_interval_ms"), 800)
 
     def test_restore_defaults_uses_new_direction_protocol(self):
         window = self.make_window()
@@ -856,7 +880,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_forward_value_input.value(), 3)
         self.assertEqual(window.tool_reverse_value_input.value(), 2)
         self.assertEqual(window.tool_command_delay_input.value(), 50)
-        self.assertEqual(window.tool_poll_interval_input.value(), 100)
+        self.assertEqual(window.tool_poll_interval_input.value(), 800)
 
     def test_old_tool_config_gets_command_delay_without_overwriting_values(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -1072,9 +1096,10 @@ class DesktopMainBarcodeTest(unittest.TestCase):
     def test_degraded_mode_stops_workers_and_ignores_tool_signals(self):
         window = self.make_window()
         window.degrade_mode_requires_admin = False
-        calls = {"tool_stop": 0, "plc_stop": 0, "ok": 0}
-        window.stop_tool_worker = lambda *args, **kwargs: calls.__setitem__(
-            "tool_stop", calls["tool_stop"] + 1
+        calls = {"bypass": [], "plc_stop": 0, "ok": 0}
+        window.is_tool_worker_running = lambda: True
+        window.tool_worker_bypass_requested.connect(
+            lambda enabled: calls["bypass"].append(enabled)
         )
         window.stop_plc_worker = lambda: calls.__setitem__(
             "plc_stop", calls["plc_stop"] + 1
@@ -1084,10 +1109,134 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.degraded_mode_checkbox.setChecked(True)
         window.process_tool_poll_result(status=2, trigger=1, direction=3)
 
-        self.assertGreaterEqual(calls["tool_stop"], 1)
+        self.assertEqual(calls["bypass"], [True])
         self.assertGreaterEqual(calls["plc_stop"], 1)
         self.assertEqual(calls["ok"], 0)
-        self.assertIn("不进行防错控制", window.message_label.text())
+        self.assertIn("正在发送螺钉枪开锁命令", window.message_label.text())
+
+    def test_ng_or_reverse_lock_still_requests_degraded_unlock(self):
+        for ng_locked, direction in ((True, 3), (False, 2)):
+            window = self.make_window()
+            window.degrade_mode_requires_admin = False
+            window.tool_ng_locked = ng_locked
+            window.tool_direction_value = direction
+            window.is_tool_worker_running = lambda: True
+            bypass = []
+            window.tool_worker_bypass_requested.connect(bypass.append)
+
+            window.degraded_mode_checkbox.setChecked(True)
+
+            self.assertEqual(bypass, [True])
+
+    def test_closing_degraded_mode_restores_tool_lock_logic(self):
+        window = self.make_window()
+        calls = []
+        window.tool_worker_generation = 5
+        window.sync_tool_lock_for_current_step = lambda: calls.append("sync")
+
+        window.on_tool_bypass_changed(5, False, True, "")
+
+        self.assertEqual(calls, ["sync"])
+
+    def test_syncing_config_suppresses_repeated_production_warnings(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.syncing_config = True
+        window.station_config_loaded = False
+        window.station_session_acquired = False
+        window.station_session_id = None
+        warnings = []
+        window.show_auto_close_warning = (
+            lambda title, message: warnings.append((title, message))
+        )
+
+        self.assertFalse(window.ensure_production_enabled())
+        self.assertFalse(window.ensure_production_enabled())
+        window.process_tool_poll_result(status=3, trigger=1, direction=3)
+        window.on_plc_snapshot(1, "MAIN-SYNC", "")
+
+        self.assertEqual(warnings, [])
+        self.assertEqual(window.message_label.text(), "正在同步在线配置，请稍候")
+
+    def test_resync_download_failure_warns_once_with_specific_message(self):
+        window = self.make_window()
+        window.online_mode = True
+        window.stop_plc_worker = lambda: None
+        window.try_lock_tool_nonblocking = lambda: None
+        window.stop_tool_worker = lambda *args, **kwargs: None
+        window.release_station_session = lambda: None
+        window.set_current_station = lambda project, station: True
+        window.clear_station_runtime_state = lambda update_table=False: None
+        window.download_config_for_current_station = lambda: False
+        window.last_config_sync_error = "HTTP 500"
+        warnings = []
+        window.show_auto_close_warning = (
+            lambda title, message: warnings.append((title, message))
+        )
+
+        window.switch_station(
+            window.current_project.name,
+            window.current_station.name,
+        )
+
+        self.assertFalse(window.syncing_config)
+        self.assertFalse(window.production_enabled)
+        self.assertEqual(len(warnings), 1)
+        self.assertIn("重新同步配置失败", warnings[0][1])
+
+    def test_numeric_password_dialog_has_touch_keypad(self):
+        window = self.make_window()
+        dialog = NumericPasswordDialog("管理员验证", window)
+        self.addCleanup(dialog.close)
+        labels = {
+            button.text()
+            for button in dialog.findChildren(window_module.QPushButton)
+        }
+
+        self.assertTrue(
+            set("0123456789") <= labels
+        )
+        self.assertTrue({"删除", "清空", "确认", "取消"} <= labels)
+        dialog.append_digit("1")
+        dialog.append_digit("2")
+        dialog.delete_digit()
+        self.assertEqual(dialog.password(), "1")
+        dialog.show()
+        QTest.keyClick(dialog.password_input, Qt.Key_Return)
+        self.assertEqual(dialog.result(), QDialog.Accepted)
+
+        escape_dialog = NumericPasswordDialog("管理员验证", window)
+        self.addCleanup(escape_dialog.close)
+        escape_dialog.show()
+        QTest.keyClick(escape_dialog.password_input, Qt.Key_Escape)
+        self.assertEqual(escape_dialog.result(), QDialog.Rejected)
+
+    def test_tool_ok_business_runs_before_trigger_clear(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.current_step().required_count = 2
+        events = []
+        window.handle_screw_ok = lambda: events.append("count")
+        window.write_tool_register = (
+            lambda register, value: events.append((register, value)) or True
+        )
+
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+
+        self.assertEqual(events, ["count", (53, 0)])
+
+    def test_tool_ng_locks_and_opens_dialog_before_trigger_clear(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        events = []
+        window.write_tool_register = (
+            lambda register, value: events.append((register, value)) or True
+        )
+        window.show_tool_ng_unlock_dialog = lambda: events.append("dialog")
+
+        window.process_tool_poll_result(status=3, trigger=1, direction=3)
+
+        self.assertEqual(events[:3], [(4, 2), "dialog", (53, 0)])
 
     def test_station_worker_sync_connects_only_when_screw_step_exists(self):
         window = self.make_window()
@@ -1345,7 +1494,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertTrue(step.done)
         self.assertEqual(window.screw_progress_label.text(), "已完成：10 / 10")
         self.assertTrue(all("#22c55e" in block.styleSheet() for block in window.screw_blocks))
-        self.assertEqual(writes[:3], [(53, 0), (4, 2), (53, 0)])
+        self.assertEqual(writes[:2], [(53, 0), (4, 2)])
         self.assertTrue(window.waiting_tool_trigger_reset)
 
         window.on_tool_write_succeeded_for_generation(

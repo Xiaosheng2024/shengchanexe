@@ -12,6 +12,7 @@ from web_admin_app.admin_page import HTML
 from web_admin_app.database import CONFIG_PATH, get_database_type, init_db, load_database_config
 from web_admin_app.login_page import render_login_page
 from web_admin_app.services import (
+    ClientValidationError,
     add_project,
     add_production_record,
     add_scan_record,
@@ -307,6 +308,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
         try:
             self.route_post()
+        except ClientValidationError as exc:
+            json_response(
+                self,
+                {"error": str(exc), **exc.details},
+                400,
+            )
         except ValueError as exc:
             json_response(self, {"error": str(exc)}, 400)
         except Exception as exc:

@@ -106,6 +106,105 @@ class BarcodeSafetyTest(unittest.TestCase):
         resolved = product_flow.resolve_barcode({"barcode": "MAIN001"})
         self.assertTrue(resolved["found"])
 
+    def test_cancel_non_main_allows_different_step_in_current_station(self):
+        record = self.scan_payload(
+            self.station1,
+            "PART-CROSS-STEP",
+            False,
+            step_id=20,
+        )
+        services.add_scan_record(record)
+
+        result = services.cancel_barcode_record(
+            {
+                "project_id": str(self.project["id"]),
+                "station_id": str(self.station1["id"]),
+                "current_step_id": 99,
+                "current_product_id": self.product["product_instance_id"],
+                "current_main_barcode": "MAIN001",
+                "barcode_to_cancel": "PART-CROSS-STEP",
+                "is_main_barcode": False,
+                "operator": "管理员",
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cancel_type"], "non_main_barcode")
+
+    def test_cancel_prefers_current_station_and_rejects_other_station(self):
+        other = self.scan_payload(
+            self.station2,
+            "PART-MULTI",
+            False,
+            step_id=30,
+        )
+        current = self.scan_payload(
+            self.station1,
+            "PART-MULTI",
+            False,
+            step_id=31,
+        )
+        other["enforce_barcode_unique"] = False
+        current["enforce_barcode_unique"] = False
+        services.add_scan_record(other)
+        with database.get_conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO scan_records
+                (project_id, station_id, barcode, product_instance_id,
+                 barcode_used, step_id, step, result, note,
+                 is_main_barcode, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    current["project_id"],
+                    current["station_id"],
+                    current["barcode"],
+                    current["product_instance_id"],
+                    current["barcode_used"],
+                    current["step_id"],
+                    current["step"],
+                    current["result"],
+                    "",
+                    0,
+                    "2026-07-02T00:00:00",
+                ),
+            )
+
+        result = services.cancel_barcode_record(
+            {
+                **current,
+                "current_step_id": 999,
+                "barcode_to_cancel": "PART-MULTI",
+            }
+        )
+        self.assertTrue(result["ok"])
+        current_row = database.fetch_one(
+            "SELECT is_cancelled FROM scan_records "
+            "WHERE station_id = ? AND barcode = ?",
+            (self.station1["id"], "PART-MULTI"),
+        )
+        other_row = database.fetch_one(
+            "SELECT is_cancelled FROM scan_records "
+            "WHERE station_id = ? AND barcode = ?",
+            (self.station2["id"], "PART-MULTI"),
+        )
+        self.assertEqual(current_row["is_cancelled"], 1)
+        self.assertEqual(other_row["is_cancelled"], 0)
+
+        with self.assertRaises(services.ClientValidationError) as raised:
+            services.cancel_barcode_record(
+                {
+                    **current,
+                    "station_id": 999999,
+                    "barcode_to_cancel": "PART-MULTI",
+                }
+            )
+        self.assertEqual(
+            raised.exception.details["record_station_id"],
+            self.station2["id"],
+        )
+
     def test_degrade_mode_log_and_migration_are_available(self):
         database.init_db()
         result = services.report_degrade_mode(

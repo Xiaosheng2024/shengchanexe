@@ -1,5 +1,6 @@
 import csv
 import json
+import logging
 import shutil
 import socket
 import subprocess
@@ -79,6 +80,12 @@ PLC_DEFAULTS = {
     "plc_barcode_wait_ok_timeout_seconds": 30,
 }
 STATION_SESSION_TIMEOUT_SECONDS = 120
+
+
+class ClientValidationError(ValueError):
+    def __init__(self, message, details=None):
+        super().__init__(message)
+        self.details = details or {}
 
 
 def pagination(query):
@@ -1547,16 +1554,51 @@ def validate_barcode_use(payload):
 
 
 def cancel_barcode_record(payload):
-    barcode = str(payload.get("barcode") or "").strip()
+    barcode = str(
+        payload.get("barcode_to_cancel") or payload.get("barcode") or ""
+    ).strip()
     station_id = int(payload.get("station_id") or 0)
     project_id = int(payload.get("project_id") or 0)
-    step_id = int(payload.get("step_id") or 0) or None
-    product_instance_id = int(payload.get("product_instance_id") or 0) or None
+    step_id = int(
+        payload.get("current_step_id") or payload.get("step_id") or 0
+    ) or None
+    product_instance_id = int(
+        payload.get("current_product_id")
+        or payload.get("product_instance_id")
+        or 0
+    ) or None
+    current_main_barcode = str(
+        payload.get("current_main_barcode") or ""
+    ).strip()
     is_main = bool(payload.get("is_main_barcode"))
     operator = str(payload.get("operator") or "管理员").strip()
     if not barcode or not station_id or not project_id:
         raise ValueError("取消条码缺少项目、工位或条码")
     with get_conn() as conn:
+        def cancel_mismatch(message):
+            other = conn.execute(
+                """
+                SELECT id, project_id, station_id, step_id
+                FROM scan_records
+                WHERE barcode = ? AND is_cancelled = 0
+                  AND result IN ('完成', 'OK')
+                ORDER BY CASE WHEN station_id = ? THEN 0 ELSE 1 END, id DESC
+                LIMIT 1
+                """,
+                (barcode, station_id),
+            ).fetchone()
+            details = {
+                "request_station_id": station_id,
+                "record_station_id": other["station_id"] if other else None,
+                "record_step_id": other["step_id"] if other else None,
+                "record_project_id": other["project_id"] if other else None,
+                "barcode": barcode,
+                "matched_record_id": other["id"] if other else None,
+                "reason": message,
+            }
+            logging.warning("取消条码拒绝：%s", details)
+            raise ClientValidationError(message, details)
+
         if is_main:
             record = conn.execute(
                 """
@@ -1577,7 +1619,7 @@ def cancel_barcode_record(payload):
             ).fetchone()
             scan_record = conn.execute(
                 """
-                SELECT id FROM scan_records
+                SELECT id, step_id FROM scan_records
                 WHERE project_id = ? AND station_id = ?
                   AND is_main_barcode = 1 AND is_cancelled = 0
                   AND result IN ('完成', 'OK')
@@ -1595,7 +1637,7 @@ def cancel_barcode_record(payload):
                 ),
             ).fetchone()
             if not record and not scan_record:
-                raise ValueError("该主条码在当前工位没有可取消记录")
+                cancel_mismatch("该主条码在当前工位没有可取消记录")
             if record:
                 conn.execute(
                     "DELETE FROM station_completions WHERE id = ?", (record["id"],)
@@ -1619,30 +1661,34 @@ def cancel_barcode_record(payload):
                 ),
             )
             old_record_id = record["id"] if record else scan_record["id"]
+            matched_step_id = (
+                scan_record["step_id"] if scan_record else step_id
+            )
             cancel_type = "main_barcode"
         else:
+            params = [project_id, station_id, barcode]
+            product_clause = ""
+            if product_instance_id is not None:
+                product_clause = " AND product_instance_id = ?"
+                params.append(product_instance_id)
             record = conn.execute(
-                """
-                SELECT id FROM scan_records
+                f"""
+                SELECT id, project_id, station_id, step_id,
+                       product_instance_id
+                FROM scan_records
                 WHERE project_id = ? AND station_id = ?
                   AND barcode = ? AND is_main_barcode = 0 AND is_cancelled = 0
                   AND result IN ('完成', 'OK')
-                  AND (? IS NULL OR step_id = ?)
-                  AND (? IS NULL OR product_instance_id = ?)
+                  {product_clause}
                 ORDER BY id DESC LIMIT 1
                 """,
-                (
-                    project_id,
-                    station_id,
-                    barcode,
-                    step_id,
-                    step_id,
-                    product_instance_id,
-                    product_instance_id,
-                ),
+                tuple(params),
             ).fetchone()
             if not record:
-                raise ValueError("待取消条码不属于当前工位、当前工序或当前产品")
+                reason = "待取消条码不属于本工位"
+                if product_instance_id is not None or current_main_barcode:
+                    reason = "待取消条码不属于当前工位或当前产品"
+                cancel_mismatch(reason)
             conn.execute(
                 """
                 UPDATE scan_records
@@ -1652,6 +1698,7 @@ def cancel_barcode_record(payload):
                 (now_text(), record["id"]),
             )
             old_record_id = record["id"]
+            matched_step_id = record["step_id"]
             cancel_type = "non_main_barcode"
         cursor = conn.execute(
             """
@@ -1663,7 +1710,7 @@ def cancel_barcode_record(payload):
             (
                 project_id,
                 station_id,
-                step_id,
+                matched_step_id,
                 product_instance_id,
                 barcode,
                 cancel_type,
