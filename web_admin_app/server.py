@@ -15,6 +15,7 @@ from web_admin_app.services import (
     add_project,
     add_production_record,
     add_scan_record,
+    cancel_barcode_record,
     add_screw_record,
     add_station,
     add_station_completion,
@@ -57,6 +58,8 @@ from web_admin_app.services import (
     update_step,
     upsert_client_release,
     report_client_update,
+    report_degrade_mode,
+    validate_barcode_use,
     download_client_release,
     vacuum_or_analyze,
 )
@@ -152,6 +155,9 @@ def is_public_client_api(method, path):
             "/api/product-flow/verify-entry",
             "/api/product-flow/switch-barcode",
             "/api/product-flow/bind-material",
+            "/api/client/barcode/validate",
+            "/api/client/barcode/cancel",
+            "/api/client/tool/degrade-mode/report",
         }
     return False
 
@@ -483,6 +489,12 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, product_flow.switch_main_barcode(payload))
         elif path == "/api/product-flow/bind-material":
             json_response(self, product_flow.bind_child_material(payload))
+        elif path == "/api/client/barcode/validate":
+            json_response(self, validate_barcode_use(payload))
+        elif path == "/api/client/barcode/cancel":
+            json_response(self, cancel_barcode_record(payload))
+        elif path == "/api/client/tool/degrade-mode/report":
+            json_response(self, report_degrade_mode(payload))
         elif path == "/api/station-session/acquire":
             json_response(self, acquire_station_session(payload))
         elif path == "/api/station-session/force-acquire":

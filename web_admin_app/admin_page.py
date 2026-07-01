@@ -3,7 +3,7 @@ HTML = r"""<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>生产工艺过程质量控制系统 - 管理后台</title>
+  <title>关键工位防错追溯系统 - 管理后台</title>
   <style>
     * { box-sizing: border-box; }
     body { margin: 0; font-family: Arial, "Microsoft YaHei", sans-serif; color: #111827; background: #f3f4f6; }
@@ -60,7 +60,7 @@ HTML = r"""<!doctype html>
 </head>
 <body>
   <header>
-    <h1>生产工艺过程质量控制系统 - 管理后台</h1>
+    <h1>关键工位防错追溯系统 - 管理后台</h1>
     <div class="account-summary">
       <span>当前用户：<strong id="currentUsername">-</strong></span>
       <span>角色：<strong id="currentRole">-</strong></span>

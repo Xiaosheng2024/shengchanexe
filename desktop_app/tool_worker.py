@@ -87,12 +87,19 @@ class ToolPollWorker(QObject):
 
     @pyqtSlot()
     def stop(self):
+        self._stop(lock_before_disconnect=True)
+
+    @pyqtSlot()
+    def stop_without_lock(self):
+        self._stop(lock_before_disconnect=False)
+
+    def _stop(self, lock_before_disconnect: bool):
         self.polling = False
         if self.timer is not None:
             self.timer.stop()
             self.timer.deleteLater()
             self.timer = None
-        if self.client.is_connected():
+        if lock_before_disconnect and self.client.is_connected():
             try:
                 self.write_register_with_delay(
                     self.config.lock_register,

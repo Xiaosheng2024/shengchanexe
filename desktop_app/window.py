@@ -59,7 +59,8 @@ from shared.models import (
 )
 
 
-APP_VERSION = "v0.9.2"
+APP_VERSION = "v0.9.3-rc1"
+SYSTEM_NAME = "关键工位防错追溯系统"
 DEFAULT_MES_SERVER_URL = "http://10.162.70.53:8000"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
 DEFAULT_TOOL_FORWARD_VALUE = 3
@@ -117,7 +118,7 @@ class QualityControlWindow(QMainWindow):
 
     def __init__(self, app_config_path: Optional[Path] = None):
         super().__init__()
-        self.setWindowTitle(f"生产工艺过程质量控制系统 {APP_VERSION}")
+        self.setWindowTitle(SYSTEM_NAME)
         self.resize(1280, 820)
 
         self.projects = self.default_projects()
@@ -167,6 +168,11 @@ class QualityControlWindow(QMainWindow):
         self._replaying_scanner_keys = False
         self.last_barcode = ""
         self.last_barcode_time = 0.0
+        self.cancel_barcode_value = "cancelcode"
+        self.cancel_mode_timeout_seconds = 30
+        self.cancel_requires_admin = True
+        self.cancel_mode_active = False
+        self.cancel_mode_started_ms = 0.0
         self._scanner_event_filter_installed = False
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
@@ -193,6 +199,11 @@ class QualityControlWindow(QMainWindow):
         self.waiting_tool_trigger_reset = False
         self.tool_connection_rearming = False
         self.tool_ng_locked = False
+        self.tool_direction_value = None
+        self.tool_ng_status_values = {3, 4}
+        self.tool_reverse_lock_enabled = True
+        self.degrade_mode_requires_admin = True
+        self._degraded_mode_guard = False
         self.tool_ng_dialog_open = False
         self.tool_lock_state = None
 
@@ -242,7 +253,7 @@ class QualityControlWindow(QMainWindow):
         root_layout.setSpacing(12)
         self.setCentralWidget(root)
 
-        title = QLabel("生产工艺过程质量控制系统")
+        title = QLabel(SYSTEM_NAME)
         title.setAlignment(Qt.AlignCenter)
         title.setStyleSheet("font-size: 26px; font-weight: 700; padding: 8px;")
         root_layout.addWidget(title)
@@ -275,8 +286,8 @@ class QualityControlWindow(QMainWindow):
         download_btn.clicked.connect(self.download_online_config)
         local_device_btn = QPushButton("本机设置")
         local_device_btn.clicked.connect(self.open_local_device_dialog)
-        self.degraded_mode_checkbox = QCheckBox("降级模式（跳过上道工位校验）")
-        self.degraded_mode_checkbox.setToolTip("勾选后不检查上道工位是否完成，只检测当前工位自己的工序")
+        self.degraded_mode_checkbox = QCheckBox("降级模式（关闭全部防错控制）")
+        self.degraded_mode_checkbox.setToolTip("需管理员授权；开启后不控制PLC、螺钉枪和工序防错")
         self.degraded_mode_checkbox.stateChanged.connect(self.change_degraded_mode)
         for label_text, widget in [
             ("模式", self.mode_combo),
@@ -633,10 +644,50 @@ class QualityControlWindow(QMainWindow):
             self.notify_missing_server_url()
 
     def change_degraded_mode(self):
-        if self.degraded_mode_checkbox.isChecked():
-            self.message_label.setText("降级模式已开启：不检查上道工位，只检测当前工位")
+        if self._degraded_mode_guard:
+            return
+        enabled = self.degraded_mode_checkbox.isChecked()
+        if enabled and self.degrade_mode_requires_admin:
+            password, accepted = self.prompt_admin_password("开启降级模式")
+            if not accepted or password != self.tool_admin_password_input.text():
+                self._degraded_mode_guard = True
+                self.degraded_mode_checkbox.setChecked(False)
+                self._degraded_mode_guard = False
+                self.message_label.setText("管理员授权失败，降级模式未开启")
+                return
+        if enabled:
+            self.stop_plc_worker()
+            self.stop_tool_worker(lock_before_disconnect=False)
+            self.degraded_mode_checkbox.setStyleSheet(
+                "color:#dc2626;font-weight:700;background:#fef2f2;padding:5px;"
+            )
+            self.message_label.setText("降级模式已开启，系统不进行防错控制。")
         else:
-            self.message_label.setText("降级模式已关闭")
+            self.degraded_mode_checkbox.setStyleSheet("")
+            self.message_label.setText("降级模式已关闭，系统恢复全部防错控制")
+            self.sync_workers_for_station()
+            self.prompt_current_step_start()
+        self.report_degrade_mode_change(enabled)
+        self.refresh_work_area()
+
+    def report_degrade_mode_change(self, enabled: bool):
+        if not self.online_mode or not self.station_session_acquired:
+            logging.info("降级模式%s（离线日志）", "开启" if enabled else "关闭")
+            return
+        try:
+            self.api_post(
+                "/api/client/tool/degrade-mode/report",
+                {
+                    "project_id": getattr(self.current_project, "id", None),
+                    "station_id": getattr(self.current_station, "id", None),
+                    "client_id": self.station_session_client_id,
+                    "operator": "管理员",
+                    "action": "enabled" if enabled else "disabled",
+                    "reason": "现场人工放行",
+                },
+            )
+        except Exception as exc:
+            logging.warning("降级模式日志上报失败：%s", exc)
 
     def refresh_project_station_selectors(self):
         self.project_combo.blockSignals(True)
@@ -753,6 +804,8 @@ class QualityControlWindow(QMainWindow):
         self.clear_station_runtime_state(update_table=True)
         if self.online_mode:
             self.message_label.setText("请下载在线配置并申请工位占用后开始生产")
+        elif self.production_enabled:
+            self.sync_workers_for_station()
 
     def set_current_station(self, project_name: str, station_name: str) -> bool:
         project = next((item for item in self.projects if item.name == project_name), None)
@@ -1128,10 +1181,25 @@ class QualityControlWindow(QMainWindow):
             "reverse_value": str(DEFAULT_TOOL_REVERSE_VALUE),
             "command_delay_ms": str(DEFAULT_TOOL_COMMAND_DELAY_MS),
             "poll_interval_ms": str(DEFAULT_TOOL_POLL_INTERVAL_MS),
+            "ng_status_values": "3,4",
+            "reverse_lock_enabled": "true",
+            "degrade_mode_requires_admin": "true",
         }
         for key, value in tool_defaults.items():
             if key not in config["TOOL"]:
                 config["TOOL"][key] = value
+                changed = True
+        if "SCANNER" not in config:
+            config["SCANNER"] = {}
+            changed = True
+        scanner_defaults = {
+            "cancel_barcode": "cancelcode",
+            "cancel_mode_timeout_seconds": "30",
+            "cancel_requires_admin": "true",
+        }
+        for key, value in scanner_defaults.items():
+            if key not in config["SCANNER"]:
+                config["SCANNER"][key] = value
                 changed = True
         if "LOCAL_DEVICE" not in config:
             config["LOCAL_DEVICE"] = {}
@@ -1230,6 +1298,15 @@ class QualityControlWindow(QMainWindow):
         )
         self.scanner_allow_chinese_chars = as_bool(
             section.get("allow_chinese_chars", False), False
+        )
+        self.cancel_barcode_value = str(
+            section.get("cancel_barcode", self.cancel_barcode_value)
+        ).strip() or "cancelcode"
+        self.cancel_mode_timeout_seconds = read_int(
+            "cancel_mode_timeout_seconds", self.cancel_mode_timeout_seconds, 1
+        )
+        self.cancel_requires_admin = as_bool(
+            section.get("cancel_requires_admin", True), True
         )
 
     def update_scanner_hint(self):
@@ -1709,6 +1786,21 @@ class QualityControlWindow(QMainWindow):
         self.tool_status_register_input.setValue(tool.getint("status_address", fallback=self.tool_status_register_input.value()))
         self.tool_ok_value_input.setValue(tool.getint("ok_value", fallback=self.tool_ok_value_input.value()))
         self.tool_ng_value_input.setValue(tool.getint("ng_value", fallback=self.tool_ng_value_input.value()))
+        ng_values_text = tool.get(
+            "ng_status_values",
+            tool.get(
+                "tool_ng_status_values",
+                tool.get("tool_ng_status", tool.get("ng_value", "3")),
+            ),
+        )
+        try:
+            self.tool_ng_status_values = {
+                int(value.strip())
+                for value in ng_values_text.split(",")
+                if value.strip()
+            } or {3}
+        except ValueError:
+            self.tool_ng_status_values = {3, 4}
         self.tool_trigger_register_input.setValue(tool.getint("trigger_address", fallback=self.tool_trigger_register_input.value()))
         self.tool_trigger_value_input.setValue(tool.getint("trigger_value", fallback=self.tool_trigger_value_input.value()))
         self.tool_trigger_reset_value_input.setValue(tool.getint("trigger_reset_value", fallback=self.tool_trigger_reset_value_input.value()))
@@ -1727,6 +1819,12 @@ class QualityControlWindow(QMainWindow):
         self.tool_admin_password_input.setText(tool.get("admin_unlock_password", self.tool_admin_password_input.text()))
         self.tool_enable_dedup_checkbox.setChecked(tool.getboolean("enable_dedup", fallback=True))
         self.tool_verbose_log_checkbox.setChecked(tool.getboolean("verbose_log", fallback=False))
+        self.tool_reverse_lock_enabled = tool.getboolean(
+            "reverse_lock_enabled", fallback=True
+        )
+        self.degrade_mode_requires_admin = tool.getboolean(
+            "degrade_mode_requires_admin", fallback=True
+        )
 
     def save_tool_settings(self):
         config = configparser.ConfigParser()
@@ -1734,6 +1832,7 @@ class QualityControlWindow(QMainWindow):
             config.read(self.app_config_path, encoding="utf-8")
         if "TOOL" not in config:
             config["TOOL"] = {}
+        self.tool_ng_status_values.add(self.tool_ng_value_input.value())
         config["TOOL"].update(
             {
                 "ip": self.tool_ip_input.text().strip(),
@@ -1742,6 +1841,9 @@ class QualityControlWindow(QMainWindow):
                 "status_address": str(self.tool_status_register_input.value()),
                 "ok_value": str(self.tool_ok_value_input.value()),
                 "ng_value": str(self.tool_ng_value_input.value()),
+                "ng_status_values": ",".join(
+                    str(value) for value in sorted(self.tool_ng_status_values)
+                ),
                 "trigger_address": str(self.tool_trigger_register_input.value()),
                 "trigger_value": str(self.tool_trigger_value_input.value()),
                 "trigger_reset_value": str(self.tool_trigger_reset_value_input.value()),
@@ -1758,6 +1860,10 @@ class QualityControlWindow(QMainWindow):
                 "admin_unlock_password": self.tool_admin_password_input.text(),
                 "enable_dedup": str(self.tool_enable_dedup_checkbox.isChecked()).lower(),
                 "verbose_log": str(self.tool_verbose_log_checkbox.isChecked()).lower(),
+                "reverse_lock_enabled": str(self.tool_reverse_lock_enabled).lower(),
+                "degrade_mode_requires_admin": str(
+                    self.degrade_mode_requires_admin
+                ).lower(),
             }
         )
         with self.app_config_path.open("w", encoding="utf-8") as file:
@@ -2084,8 +2190,11 @@ class QualityControlWindow(QMainWindow):
             self.screw_ok_btn.setEnabled(self.production_enabled and current_step.step_type == SCREW)
             self.barcode_input.setEnabled(
                 self.production_enabled
-                and current_step.step_type
-                in (SCAN, BARCODE_SWITCH, MATERIAL_BIND)
+                and (
+                    self.degraded_mode_checkbox.isChecked()
+                    or current_step.step_type
+                    in (SCAN, BARCODE_SWITCH, MATERIAL_BIND)
+                )
             )
             if current_step.step_type == BARCODE_SWITCH:
                 old_status = (
@@ -2215,6 +2324,10 @@ class QualityControlWindow(QMainWindow):
         if not barcode:
             self.message_label.setText("请先输入或扫描条码")
             return False
+        if self.cancel_mode_active:
+            return self.cancel_scanned_barcode(barcode)
+        if barcode.lower() == self.cancel_barcode_value.lower():
+            return self.enter_cancel_barcode_mode()
         if (
             not self.scanner_allow_chinese_chars
             and self.barcode_contains_chinese(barcode)
@@ -2244,6 +2357,71 @@ class QualityControlWindow(QMainWindow):
         self._process_scanned_barcode()
         return True
 
+    def enter_cancel_barcode_mode(self) -> bool:
+        if self.cancel_requires_admin:
+            password, accepted = self.prompt_admin_password("取消条码授权")
+            if not accepted or password != self.tool_admin_password_input.text():
+                self.message_label.setText("管理员授权失败，未进入取消条码模式")
+                return False
+        self.cancel_mode_active = True
+        self.cancel_mode_started_ms = self.scanner_now_ms()
+        self.barcode_input.clear()
+        self.message_label.setText("已进入取消条码模式，请扫描需要取消的条码。")
+        QTimer.singleShot(
+            self.cancel_mode_timeout_seconds * 1000,
+            self.expire_cancel_barcode_mode,
+        )
+        return True
+
+    def expire_cancel_barcode_mode(self):
+        if not self.cancel_mode_active:
+            return
+        if (
+            self.scanner_now_ms() - self.cancel_mode_started_ms
+            < self.cancel_mode_timeout_seconds * 1000
+        ):
+            return
+        self.cancel_mode_active = False
+        self.message_label.setText("取消条码模式已超时退出")
+
+    def cancel_scanned_barcode(self, barcode: str) -> bool:
+        self.cancel_mode_active = False
+        step = self.current_step()
+        is_main = bool(self.current_barcode and barcode == self.current_barcode)
+        if not self.online_mode:
+            self.message_label.setText("取消条码需要在线模式")
+            return False
+        try:
+            result = self.api_post(
+                "/api/client/barcode/cancel",
+                {
+                    "project_id": getattr(self.current_project, "id", None),
+                    "station_id": getattr(self.current_station, "id", None),
+                    "step_id": getattr(step, "step_id", None),
+                    "product_instance_id": self.current_product_instance_id,
+                    "barcode": barcode,
+                    "is_main_barcode": is_main,
+                    "operator": "管理员",
+                },
+            )
+        except Exception as exc:
+            self.show_flow_error(f"取消条码失败：{exc}")
+            return False
+        if result.get("cancel_type") == "main_barcode":
+            self.reset_current_product(update_table=True)
+        else:
+            for index, candidate in enumerate(self.current_product.steps):
+                if candidate.step_id == getattr(step, "step_id", None):
+                    candidate.done = False
+                    candidate.completed_count = 0
+                    self.current_step_index = index
+                    break
+            self.refresh_work_area()
+        self.last_barcode = ""
+        self.barcode_input.clear()
+        self.message_label.setText(f"条码 {barcode} 已取消，可重新扫描")
+        return True
+
     def handle_scan(self):
         return self.handle_scanned_barcode(
             self.barcode_input.text(), source="input"
@@ -2256,6 +2434,9 @@ class QualityControlWindow(QMainWindow):
         if step is None:
             self.reset_current_product()
             step = self.current_step()
+        if self.degraded_mode_checkbox.isChecked():
+            self.complete_step_in_degraded_mode(step, self.barcode_input.text().strip())
+            return
         if step is not None and step.step_type == BARCODE_SWITCH:
             self.handle_barcode_switch_scan()
             return
@@ -2297,12 +2478,43 @@ class QualityControlWindow(QMainWindow):
                 return
             else:
                 self.current_barcode = barcode
+        elif self.online_mode and not self.validate_barcode_use(
+            barcode, step, is_main_barcode=False
+        ):
+            return
 
         self.add_history_record(step, "完成", barcode, "扫码复核通过", completed=True)
         self.play_ok_sound()
         step.done = True
         self.message_label.setText(f"{step.name} 已完成")
         self.barcode_input.clear()
+        self.advance_step()
+
+    def complete_step_in_degraded_mode(
+        self, step: Optional[ProcessStep], barcode: str
+    ):
+        if step is None:
+            return
+        if step.step_type == SCREW:
+            self.message_label.setText(
+                "降级模式：请使用模拟OK按钮人工确认螺丝数量"
+            )
+            return
+        if not barcode:
+            self.message_label.setText("降级模式：请扫描任意放行条码")
+            return
+        if step.is_main_barcode or not self.current_barcode:
+            self.current_barcode = barcode
+        step.done = True
+        self.add_history_record(
+            step,
+            "完成",
+            barcode,
+            "降级模式人工放行，未执行防错校验",
+            completed=True,
+        )
+        self.barcode_input.clear()
+        self.message_label.setText(f"降级模式人工放行：{step.name}")
         self.advance_step()
 
     def resolve_and_verify_main_barcode(self, barcode: str) -> bool:
@@ -2340,9 +2552,46 @@ class QualityControlWindow(QMainWindow):
             return False
         if not self.verify_station_entry_allowed(identity["product_instance_id"]):
             return False
+        if not self.validate_barcode_use(
+            identity.get("current_barcode") or barcode,
+            self.current_step(),
+            is_main_barcode=True,
+            product_instance_id=identity["product_instance_id"],
+        ):
+            return False
         self.current_product_instance_id = identity["product_instance_id"]
         self.current_barcode = identity.get("current_barcode") or barcode
         return True
+
+    def validate_barcode_use(
+        self,
+        barcode: str,
+        step: Optional[ProcessStep],
+        is_main_barcode: bool,
+        product_instance_id=None,
+    ) -> bool:
+        if not self.online_mode or self.degraded_mode_checkbox.isChecked():
+            return True
+        try:
+            result = self.api_post(
+                "/api/client/barcode/validate",
+                {
+                    "project_id": getattr(self.current_project, "id", None),
+                    "station_id": getattr(self.current_station, "id", None),
+                    "step_id": getattr(step, "step_id", None),
+                    "product_instance_id": product_instance_id
+                    or self.current_product_instance_id,
+                    "barcode": barcode,
+                    "is_main_barcode": is_main_barcode,
+                },
+            )
+        except Exception as exc:
+            self.show_flow_error(f"条码防重校验失败：{exc}")
+            return False
+        if result.get("allowed"):
+            return True
+        self.show_flow_error(result.get("message") or "条码已被使用")
+        return False
 
     def verify_station_entry_allowed(self, product_instance_id) -> bool:
         if not self.should_check_previous_station():
@@ -2588,13 +2837,14 @@ class QualityControlWindow(QMainWindow):
     def is_tool_worker_running(self) -> bool:
         return self.tool_thread is not None and self.tool_thread.isRunning()
 
-    def stop_tool_worker(self):
+    def stop_tool_worker(self, lock_before_disconnect: bool = True):
         worker = self.tool_worker
         thread = self.tool_thread
         if thread is not None:
             if worker is not None and thread.isRunning():
                 try:
-                    QMetaObject.invokeMethod(worker, "stop", Qt.QueuedConnection)
+                    method = "stop" if lock_before_disconnect else "stop_without_lock"
+                    QMetaObject.invokeMethod(worker, method, Qt.QueuedConnection)
                 except Exception as exc:
                     logging.warning("停止螺钉枪 worker 通知失败：%s", exc)
             if not thread.wait(1500):
@@ -2921,6 +3171,8 @@ class QualityControlWindow(QMainWindow):
             self.processing_tool_signal = False
 
     def process_tool_poll_result(self, status: int, trigger: int, direction: Optional[int] = None):
+        if self.degraded_mode_checkbox.isChecked():
+            return
         self.recompute_production_enabled()
         trigger_value = self.tool_trigger_value_input.value()
         preview_step = self.current_step()
@@ -2972,8 +3224,9 @@ class QualityControlWindow(QMainWindow):
 
         if direction is None:
             direction = self.tool_forward_value_input.value()
+        self.tool_direction_value = direction
         ok_value = self.tool_ok_value_input.value()
-        ng_value = self.tool_ng_value_input.value()
+        ng_values = set(self.tool_ng_status_values)
         trigger_reset_value = self.tool_trigger_reset_value_input.value()
         forward_value = self.tool_forward_value_input.value()
         reverse_value = self.tool_reverse_value_input.value()
@@ -2999,9 +3252,11 @@ class QualityControlWindow(QMainWindow):
         if direction == reverse_value:
             if trigger == trigger_value:
                 logging.info("设备状态未计数：direction=%s为反转", direction)
-            self.tool_status_label.setText("反向")
-            self.message_label.setText("反向状态，不计数")
-            self.tool_status_label.setStyleSheet("font-size: 12px; color: #f59e0b;")
+            if self.tool_reverse_lock_enabled:
+                self.lock_tool()
+            self.tool_status_label.setText("反转锁定")
+            self.message_label.setText("螺钉枪反转状态，已强制锁定，禁止作业。")
+            self.tool_status_label.setStyleSheet("font-size: 12px; color: #dc2626;")
             if trigger == trigger_value and self.tool_clear_trigger_when_reverse_checkbox.isChecked():
                 logging.info(
                     "反转后延迟%sms再清53",
@@ -3050,17 +3305,11 @@ class QualityControlWindow(QMainWindow):
             )
             return
 
-        if status == ng_value:
+        if status in ng_values:
             self.handle_screw_ng()
             return
 
-        if status == 4:
-            logging.info("设备状态未计数：螺钉枪暂停 status=4")
-            self.clear_active_tool_trigger("暂停状态，清除触发")
-            self.message_label.setText("螺钉枪暂停")
-            return
-
-        logging.warning("设备状态未计数：status不是OK%s或NG%s，实际=%s", ok_value, ng_value, status)
+        logging.warning("设备状态未计数：status不是OK%s或NG%s，实际=%s", ok_value, sorted(ng_values), status)
         self.clear_active_tool_trigger("状态未确认，清除触发")
 
     def write_tool_register(self, register_address: int, value: int):
@@ -3092,12 +3341,23 @@ class QualityControlWindow(QMainWindow):
             self.tool_lock_state = "locked"
 
     def unlock_tool(self):
+        if self.degraded_mode_checkbox.isChecked():
+            return
+        if (
+            self.tool_reverse_lock_enabled
+            and self.tool_direction_value == self.tool_reverse_value_input.value()
+        ):
+            self.lock_tool()
+            self.message_label.setText("螺钉枪反转状态，禁止解锁")
+            return
         if self.tool_lock_state == "unlocked":
             return
         if self.write_tool_register(self.tool_control_register_input.value(), self.tool_unlock_value_input.value()):
             self.tool_lock_state = "unlocked"
 
     def sync_tool_lock_for_current_step(self):
+        if self.degraded_mode_checkbox.isChecked():
+            return
         step = self.current_step()
         self.reset_tool_trigger()
         if self.tool_ng_locked:
@@ -3215,6 +3475,13 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText("NG锁定：等待管理员解锁")
 
     def unlock_tool_after_ng(self, password: str) -> bool:
+        if (
+            self.tool_reverse_lock_enabled
+            and self.tool_direction_value == self.tool_reverse_value_input.value()
+        ):
+            self.lock_tool()
+            self.message_label.setText("螺钉枪反转状态，管理员也不能解锁")
+            return False
         if password != self.tool_admin_password_input.text():
             self.lock_tool()
             return False
@@ -3235,7 +3502,7 @@ class QualityControlWindow(QMainWindow):
             1: "作业中",
             2: "OK",
             3: "NG",
-            4: "暂停",
+            4: "NG",
             5: "正转",
             6: "反转",
         }
@@ -3390,6 +3657,13 @@ class QualityControlWindow(QMainWindow):
     def prompt_current_step_start(self):
         if not self.ensure_production_enabled():
             return
+        if self.degraded_mode_checkbox.isChecked():
+            self.stop_plc_worker()
+            self.stop_tool_worker(lock_before_disconnect=False)
+            self.message_label.setText("降级模式已开启，系统不进行防错控制。")
+            self.refresh_work_area()
+            return
+        self.sync_workers_for_station()
         self.set_english_keyboard_layout()
         step = self.current_step()
         if step is None:
@@ -3422,6 +3696,30 @@ class QualityControlWindow(QMainWindow):
             self.stop_plc_worker()
             self.lock_tool()
             self.speak("请扫码")
+
+    def station_has_step_type(self, step_type: str) -> bool:
+        return any(
+            step.step_type == step_type for step in self.current_product.steps
+        )
+
+    def sync_workers_for_station(self):
+        if self.degraded_mode_checkbox.isChecked():
+            self.stop_plc_worker()
+            self.stop_tool_worker(lock_before_disconnect=False)
+            return
+        if self.station_has_step_type(SCREW):
+            if (
+                self.production_enabled
+                and not self.disable_tool_auto_listen_checkbox.isChecked()
+                and not self.is_tool_worker_running()
+            ):
+                self.toggle_tool_connection()
+        else:
+            if self.is_tool_worker_running():
+                self.stop_tool_worker()
+            self.tool_status_label.setText("当前工位无螺钉枪工序，已断开")
+        if not self.station_has_step_type(PLC):
+            self.stop_plc_worker()
 
     def enter_tool_screw_step(self, step: ProcessStep):
         if not self.is_tool_worker_running():
@@ -3503,6 +3801,13 @@ class QualityControlWindow(QMainWindow):
             "station": self.current_station.name,
             "barcode": barcode,
             "step": step.name,
+            "step_type": step.step_type,
+            "step_id": step.step_id,
+            "is_main_barcode": bool(step.is_main_barcode),
+            "enforce_barcode_unique": (
+                step.step_type == SCAN or bool(step.is_main_barcode)
+            ),
+            "skip_validation": self.degraded_mode_checkbox.isChecked(),
             "result": result,
             "note": note,
             "created_at": created_at.isoformat(timespec="seconds"),

@@ -15,6 +15,7 @@ from desktop_app.window import (
     APP_VERSION,
     DEFAULT_MES_SERVER_URL,
     QualityControlWindow,
+    SYSTEM_NAME,
 )
 from shared.models import (
     BARCODE_SWITCH,
@@ -446,7 +447,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
     def test_default_tool_ip_is_localhost(self):
         window = self.make_window()
         self.assertEqual(window.tool_ip_input.text(), "127.0.0.1")
-        self.assertIn(APP_VERSION, window.windowTitle())
+        self.assertEqual(window.windowTitle(), SYSTEM_NAME)
 
     def test_station_client_id_is_persisted(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -951,10 +952,14 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.process_tool_poll_result(status=2, trigger=1, direction=2)
 
         self.assertEqual(count["ok"], 0)
+        self.assertIn((4, 2), count["writes"])
         self.assertIn((53, 0), count["writes"])
-        self.assertEqual(window.message_label.text(), "反向状态，不计数")
+        self.assertEqual(
+            window.message_label.text(),
+            "螺钉枪反转状态，已强制锁定，禁止作业。",
+        )
 
-    def test_reverse_direction_ng_does_not_lock_or_show_ng(self):
+    def test_reverse_direction_ng_locks_without_showing_ng_dialog(self):
         window = self.make_window()
         self.set_current_step_to_screw(window)
         calls = {"dialog": 0, "writes": []}
@@ -965,7 +970,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
         self.assertFalse(window.tool_ng_locked)
         self.assertEqual(calls["dialog"], 0)
-        self.assertNotIn((4, 2), calls["writes"])
+        self.assertIn((4, 2), calls["writes"])
 
     def test_unknown_direction_does_not_count_or_process_ng(self):
         window = self.make_window()
@@ -993,6 +998,142 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(calls["dialog"], 1)
         self.assertIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
+
+    def test_forward_direction_status_four_is_also_ng(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"dialog": 0, "writes": []}
+        window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+            "dialog", calls["dialog"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append((register, value))
+            or True
+        )
+
+        window.process_tool_poll_result(status=4, trigger=1, direction=3)
+
+        self.assertTrue(window.tool_ng_locked)
+        self.assertEqual(calls["dialog"], 1)
+        self.assertIn((4, 2), calls["writes"])
+        self.assertIn((53, 0), calls["writes"])
+
+    def test_reverse_direction_blocks_admin_unlock(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value)) or True
+        )
+        window.tool_ng_locked = True
+        window.tool_direction_value = 2
+
+        self.assertFalse(window.unlock_tool_after_ng("0000"))
+        self.assertTrue(window.tool_ng_locked)
+        self.assertIn((4, 2), writes)
+        self.assertIn("反转状态", window.message_label.text())
+
+    def test_degraded_mode_stops_workers_and_ignores_tool_signals(self):
+        window = self.make_window()
+        window.degrade_mode_requires_admin = False
+        calls = {"tool_stop": 0, "plc_stop": 0, "ok": 0}
+        window.stop_tool_worker = lambda *args, **kwargs: calls.__setitem__(
+            "tool_stop", calls["tool_stop"] + 1
+        )
+        window.stop_plc_worker = lambda: calls.__setitem__(
+            "plc_stop", calls["plc_stop"] + 1
+        )
+        window.handle_screw_ok = lambda: calls.__setitem__("ok", calls["ok"] + 1)
+
+        window.degraded_mode_checkbox.setChecked(True)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+
+        self.assertGreaterEqual(calls["tool_stop"], 1)
+        self.assertGreaterEqual(calls["plc_stop"], 1)
+        self.assertEqual(calls["ok"], 0)
+        self.assertIn("不进行防错控制", window.message_label.text())
+
+    def test_station_worker_sync_connects_only_when_screw_step_exists(self):
+        window = self.make_window()
+        window.disable_tool_auto_listen_checkbox.setChecked(False)
+        calls = {"connect": 0, "stop": 0}
+        running = {"value": False}
+        window.is_tool_worker_running = lambda: running["value"]
+        window.toggle_tool_connection = lambda: calls.__setitem__(
+            "connect", calls["connect"] + 1
+        )
+        window.stop_tool_worker = lambda *args, **kwargs: calls.__setitem__(
+            "stop", calls["stop"] + 1
+        )
+        window.current_product = ProductConfig(
+            "含螺丝", [ProcessStep("打螺丝", SCREW, required_count=1)]
+        )
+        window.sync_workers_for_station()
+        self.assertEqual(calls["connect"], 1)
+
+        running["value"] = True
+        window.current_product = ProductConfig(
+            "无螺丝", [ProcessStep("扫码", SCAN, is_main_barcode=True)]
+        )
+        window.sync_workers_for_station()
+        self.assertEqual(calls["stop"], 1)
+
+    def test_cancelcode_enters_mode_and_cancels_next_main_barcode(self):
+        window = self.make_window()
+        window.cancel_requires_admin = False
+        window.online_mode = True
+        window.station_config_loaded = True
+        window.station_session_acquired = True
+        window.production_enabled = True
+        window.current_project.id = 1
+        window.current_station.id = 2
+        window.current_barcode = "MAIN-CANCEL"
+        window.current_product_instance_id = 3
+        window.prompt_current_step_start = lambda *args, **kwargs: None
+        posted = []
+        window.api_post = lambda path, payload: (
+            posted.append((path, payload))
+            or {"ok": True, "cancel_type": "main_barcode"}
+        )
+
+        self.assertTrue(window.handle_scanned_barcode("cancelcode"))
+        self.assertTrue(window.cancel_mode_active)
+        self.assertTrue(window.handle_scanned_barcode("MAIN-CANCEL"))
+
+        self.assertFalse(window.cancel_mode_active)
+        self.assertEqual(window.current_barcode, "")
+        self.assertEqual(posted[0][0], "/api/client/barcode/cancel")
+        self.assertTrue(posted[0][1]["is_main_barcode"])
+
+    def test_cancelcode_mode_expires(self):
+        window = self.make_window()
+        window.cancel_requires_admin = False
+        values = iter([1000.0, 32000.0])
+        window.scanner_now_ms = lambda: next(values)
+        window.enter_cancel_barcode_mode()
+        window.expire_cancel_barcode_mode()
+        self.assertFalse(window.cancel_mode_active)
+        self.assertIn("超时", window.message_label.text())
+
+    def test_first_plc_step_starts_worker_and_advances_only_that_step(self):
+        window = self.make_window()
+        plc_step = ProcessStep("PLC接收", PLC, is_main_barcode=True)
+        scan_step = ProcessStep("后续扫码", SCAN)
+        window.current_product = ProductConfig("PLC首工序", [plc_step, scan_step])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.online_mode = True
+        window.station_config_loaded = True
+        window.station_session_acquired = True
+        window.production_enabled = True
+        starts = []
+        window.sync_workers_for_station = lambda: None
+        window.start_plc_worker = lambda step: starts.append(step)
+
+        window.prompt_current_step_start()
+
+        self.assertEqual(starts, [plc_step])
+        self.assertFalse(scan_step.done)
 
     def test_ng_correct_password_unlocks_tool(self):
         window = self.make_window()

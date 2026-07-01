@@ -79,6 +79,10 @@ FLOW_RECORD_COLUMNS = {
     "scan_records": {
         "product_instance_id": "BIGINT",
         "barcode_used": "TEXT",
+        "step_id": "BIGINT",
+        "is_main_barcode": "INTEGER NOT NULL DEFAULT 0",
+        "is_cancelled": "INTEGER NOT NULL DEFAULT 0",
+        "cancelled_at": "TEXT",
     },
     "station_work_records": {
         "product_instance_id": "BIGINT",
@@ -268,6 +272,8 @@ def needs_returning_id(sql):
             "insert into barcode_switch_records ",
             "insert into material_bindings ",
             "insert into station_dependencies ",
+            "insert into barcode_cancel_logs ",
+            "insert into degrade_mode_logs ",
         )
     )
 
@@ -655,11 +661,35 @@ def create_traceability_schema(conn):
             message TEXT,
             created_at {ts_type} NOT NULL DEFAULT {current_ts}
         );
+        CREATE TABLE IF NOT EXISTS barcode_cancel_logs (
+            id {id_type},
+            project_id INTEGER NOT NULL,
+            station_id INTEGER NOT NULL,
+            step_id BIGINT,
+            product_instance_id BIGINT,
+            barcode TEXT NOT NULL,
+            cancel_type TEXT NOT NULL,
+            old_record_id BIGINT,
+            operator TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS degrade_mode_logs (
+            id {id_type},
+            project_id INTEGER,
+            station_id INTEGER,
+            client_id TEXT,
+            operator TEXT,
+            action TEXT NOT NULL,
+            reason TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
         CREATE INDEX IF NOT EXISTS idx_client_update_logs_created_at ON client_update_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
         CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_created_at ON web_admin_login_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_username ON web_admin_login_logs(username);
         CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_ip ON web_admin_login_logs(ip_address);
+        CREATE INDEX IF NOT EXISTS idx_barcode_cancel_logs_barcode ON barcode_cancel_logs(barcode);
+        CREATE INDEX IF NOT EXISTS idx_degrade_mode_logs_created_at ON degrade_mode_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_station_work_barcode ON station_work_records(main_barcode);
         CREATE INDEX IF NOT EXISTS idx_station_work_project_station_time ON station_work_records(project_id, station_id, created_at);
         CREATE INDEX IF NOT EXISTS idx_station_work_result ON station_work_records(result);

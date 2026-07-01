@@ -1368,6 +1368,277 @@ def check_station_completion(query):
     return {"completed": row is not None}
 
 
+def _validate_barcode_use(conn, payload):
+    barcode = str(payload.get("barcode") or "").strip()
+    station_id = int(payload.get("station_id") or 0)
+    product_instance_id = int(payload.get("product_instance_id") or 0) or None
+    step_id = int(payload.get("step_id") or 0) or None
+    is_main = bool(payload.get("is_main_barcode"))
+    if not barcode or not station_id:
+        raise ValueError("缺少条码或工位")
+    if is_main:
+        completion = conn.execute(
+            """
+            SELECT station_completions.id, projects.name AS project_name,
+                   stations.name AS station_name,
+                   station_completions.completed_at AS used_at
+            FROM station_completions
+            JOIN projects ON projects.id = station_completions.project_id
+            JOIN stations ON stations.id = station_completions.station_id
+            WHERE station_completions.station_id = ?
+              AND (station_completions.barcode = ?
+                   OR station_completions.barcode_used = ?
+                   OR (? IS NOT NULL AND station_completions.product_instance_id = ?))
+            LIMIT 1
+            """,
+            (station_id, barcode, barcode, product_instance_id, product_instance_id),
+        ).fetchone()
+        record = completion or conn.execute(
+            """
+            SELECT scan_records.id, projects.name AS project_name,
+                   stations.name AS station_name, scan_records.step AS step_name,
+                   scan_records.created_at AS used_at
+            FROM scan_records
+            LEFT JOIN projects ON projects.id = scan_records.project_id
+            LEFT JOIN stations ON stations.id = scan_records.station_id
+            WHERE scan_records.station_id = ?
+              AND scan_records.is_main_barcode = 1
+              AND scan_records.is_cancelled = 0
+              AND scan_records.result IN ('完成', 'OK')
+              AND (scan_records.barcode = ?
+                   OR scan_records.barcode_used = ?
+                   OR (? IS NOT NULL AND scan_records.product_instance_id = ?))
+            LIMIT 1
+            """,
+            (station_id, barcode, barcode, product_instance_id, product_instance_id),
+        ).fetchone()
+        if record:
+            return {
+                "allowed": False,
+                "message": "当前主条码已在本工位扫码/完成，禁止重复扫码。",
+                "existing": row_to_dict(record),
+            }
+        return {"allowed": True}
+    bound = conn.execute(
+        """
+        SELECT material_bindings.id, projects.name AS project_name,
+               stations.name AS station_name, '子物料绑定' AS step_name,
+               material_bindings.created_at AS used_at
+        FROM material_bindings
+        LEFT JOIN projects ON projects.id = material_bindings.project_id
+        LEFT JOIN stations ON stations.id = material_bindings.station_id
+        WHERE material_bindings.child_barcode = ?
+          AND material_bindings.is_active
+        LIMIT 1
+        """,
+        (barcode,),
+    ).fetchone()
+    alias = conn.execute(
+        """
+        SELECT barcode_aliases.id, projects.name AS project_name,
+               '' AS station_name, '产品主条码' AS step_name,
+               barcode_aliases.created_at AS used_at
+        FROM barcode_aliases
+        JOIN product_instances
+          ON product_instances.id = barcode_aliases.product_instance_id
+        LEFT JOIN projects ON projects.id = product_instances.project_id
+        WHERE barcode_aliases.barcode = ?
+        LIMIT 1
+        """,
+        (barcode,),
+    ).fetchone()
+    record = bound or alias or conn.execute(
+        """
+        SELECT scan_records.id, scan_records.station_id, scan_records.step_id,
+               scan_records.product_instance_id, projects.name AS project_name,
+               stations.name AS station_name, scan_records.step AS step_name,
+               scan_records.created_at AS used_at
+        FROM scan_records
+        LEFT JOIN projects ON projects.id = scan_records.project_id
+        LEFT JOIN stations ON stations.id = scan_records.station_id
+        WHERE scan_records.barcode = ?
+          AND scan_records.is_main_barcode = 0
+          AND scan_records.is_cancelled = 0
+          AND scan_records.result IN ('完成', 'OK')
+        ORDER BY scan_records.id
+        LIMIT 1
+        """,
+        (barcode,),
+    ).fetchone()
+    if record:
+        detail = row_to_dict(record)
+        return {
+            "allowed": False,
+            "message": (
+                "该条码已在其他位置使用："
+                f"{detail.get('project_name') or ''}/"
+                f"{detail.get('station_name') or ''}/"
+                f"{detail.get('step_name') or ''}/"
+                f"{detail.get('used_at') or ''}"
+            ),
+            "existing": detail,
+        }
+    return {"allowed": True, "step_id": step_id}
+
+
+def validate_barcode_use(payload):
+    with get_conn() as conn:
+        return _validate_barcode_use(conn, payload)
+
+
+def cancel_barcode_record(payload):
+    barcode = str(payload.get("barcode") or "").strip()
+    station_id = int(payload.get("station_id") or 0)
+    project_id = int(payload.get("project_id") or 0)
+    step_id = int(payload.get("step_id") or 0) or None
+    product_instance_id = int(payload.get("product_instance_id") or 0) or None
+    is_main = bool(payload.get("is_main_barcode"))
+    operator = str(payload.get("operator") or "管理员").strip()
+    if not barcode or not station_id or not project_id:
+        raise ValueError("取消条码缺少项目、工位或条码")
+    with get_conn() as conn:
+        if is_main:
+            record = conn.execute(
+                """
+                SELECT id FROM station_completions
+                WHERE project_id = ? AND station_id = ?
+                  AND (barcode = ? OR barcode_used = ?
+                       OR (? IS NOT NULL AND product_instance_id = ?))
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    project_id,
+                    station_id,
+                    barcode,
+                    barcode,
+                    product_instance_id,
+                    product_instance_id,
+                ),
+            ).fetchone()
+            scan_record = conn.execute(
+                """
+                SELECT id FROM scan_records
+                WHERE project_id = ? AND station_id = ?
+                  AND is_main_barcode = 1 AND is_cancelled = 0
+                  AND result IN ('完成', 'OK')
+                  AND (barcode = ? OR barcode_used = ?
+                       OR (? IS NOT NULL AND product_instance_id = ?))
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    project_id,
+                    station_id,
+                    barcode,
+                    barcode,
+                    product_instance_id,
+                    product_instance_id,
+                ),
+            ).fetchone()
+            if not record and not scan_record:
+                raise ValueError("该主条码在当前工位没有可取消记录")
+            if record:
+                conn.execute(
+                    "DELETE FROM station_completions WHERE id = ?", (record["id"],)
+                )
+            conn.execute(
+                """
+                UPDATE scan_records SET is_cancelled = 1, cancelled_at = ?
+                WHERE project_id = ? AND station_id = ?
+                  AND is_main_barcode = 1 AND is_cancelled = 0
+                  AND (barcode = ? OR barcode_used = ?
+                       OR (? IS NOT NULL AND product_instance_id = ?))
+                """,
+                (
+                    now_text(),
+                    project_id,
+                    station_id,
+                    barcode,
+                    barcode,
+                    product_instance_id,
+                    product_instance_id,
+                ),
+            )
+            old_record_id = record["id"] if record else scan_record["id"]
+            cancel_type = "main_barcode"
+        else:
+            record = conn.execute(
+                """
+                SELECT id FROM scan_records
+                WHERE project_id = ? AND station_id = ?
+                  AND barcode = ? AND is_main_barcode = 0 AND is_cancelled = 0
+                  AND result IN ('完成', 'OK')
+                  AND (? IS NULL OR step_id = ?)
+                  AND (? IS NULL OR product_instance_id = ?)
+                ORDER BY id DESC LIMIT 1
+                """,
+                (
+                    project_id,
+                    station_id,
+                    barcode,
+                    step_id,
+                    step_id,
+                    product_instance_id,
+                    product_instance_id,
+                ),
+            ).fetchone()
+            if not record:
+                raise ValueError("待取消条码不属于当前工位、当前工序或当前产品")
+            conn.execute(
+                """
+                UPDATE scan_records
+                SET is_cancelled = 1, cancelled_at = ?
+                WHERE id = ?
+                """,
+                (now_text(), record["id"]),
+            )
+            old_record_id = record["id"]
+            cancel_type = "non_main_barcode"
+        cursor = conn.execute(
+            """
+            INSERT INTO barcode_cancel_logs
+            (project_id, station_id, step_id, product_instance_id, barcode,
+             cancel_type, old_record_id, operator, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                station_id,
+                step_id,
+                product_instance_id,
+                barcode,
+                cancel_type,
+                old_record_id,
+                operator,
+                now_text(),
+            ),
+        )
+    return {"ok": True, "cancel_type": cancel_type, "log_id": cursor.lastrowid}
+
+
+def report_degrade_mode(payload):
+    action = str(payload.get("action") or "").strip()
+    if action not in {"enabled", "disabled"}:
+        raise ValueError("降级模式动作不正确")
+    with get_conn() as conn:
+        cursor = conn.execute(
+            """
+            INSERT INTO degrade_mode_logs
+            (project_id, station_id, client_id, operator, action, reason, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                int(payload.get("project_id") or 0) or None,
+                int(payload.get("station_id") or 0) or None,
+                payload.get("client_id", ""),
+                payload.get("operator", "管理员"),
+                action,
+                payload.get("reason", ""),
+                now_text(),
+            ),
+        )
+    return {"ok": True, "id": cursor.lastrowid}
+
+
 def add_station_completion(payload):
     barcode = payload.get("barcode", "")
     completed_at = payload.get("completed_at") or now_text()
@@ -1378,45 +1649,21 @@ def add_station_completion(payload):
         product_instance_id = product_flow.ensure_product_for_completion(
             conn, payload, project_id, barcode
         )
-        if conn.db_type == "postgresql":
-            conn.execute(
-                """
-                INSERT INTO station_completions
-                (project_id, station_id, barcode, product_instance_id, barcode_used, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                ON CONFLICT (project_id, station_id, barcode) DO NOTHING
-                """,
-                (
-                    project_id,
-                    station_id,
-                    barcode,
-                    product_instance_id,
-                    payload.get("barcode_used") or barcode,
-                    completed_at,
-                ),
-            )
-        else:
-            conn.execute(
-                """
-                INSERT OR REPLACE INTO station_completions
-                (project_id, station_id, barcode, product_instance_id, barcode_used, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?)
-                """,
-                (
-                    project_id,
-                    station_id,
-                    barcode,
-                    product_instance_id,
-                    payload.get("barcode_used") or barcode,
-                    completed_at,
-                ),
-            )
+        duplicate = conn.execute(
+            """
+            SELECT 1 FROM station_completions
+            WHERE project_id = ? AND station_id = ?
+              AND (barcode = ? OR product_instance_id = ?)
+            """,
+            (project_id, station_id, barcode, product_instance_id),
+        ).fetchone()
+        if duplicate:
+            raise ValueError("当前主条码已在本工位扫码/完成，禁止重复扫码。")
         conn.execute(
             """
-            INSERT INTO scan_records
-            (project_id, station_id, barcode, product_instance_id, barcode_used,
-             step, result, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO station_completions
+            (project_id, station_id, barcode, product_instance_id, barcode_used, completed_at)
+            VALUES (?, ?, ?, ?, ?, ?)
             """,
             (
                 project_id,
@@ -1424,9 +1671,27 @@ def add_station_completion(payload):
                 barcode,
                 product_instance_id,
                 payload.get("barcode_used") or barcode,
+                completed_at,
+            ),
+        )
+        conn.execute(
+            """
+            INSERT INTO scan_records
+            (project_id, station_id, barcode, product_instance_id, barcode_used,
+             step_id, step, result, note, is_main_barcode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                station_id,
+                barcode,
+                product_instance_id,
+                payload.get("barcode_used") or barcode,
+                None,
                 "工位完成",
                 "完成",
                 "桌面端上报",
+                1,
                 completed_at,
             ),
         )
@@ -1446,12 +1711,32 @@ def add_scan_record(payload):
             ids = {"project_id": project_id, "station_id": station_id}
         elif project and station:
             ids = find_project_station(conn, project, station)
+        is_main = bool(payload.get("is_main_barcode"))
+        enforce_unique = bool(payload.get("is_main_barcode")) or str(
+            payload.get("step_type") or ""
+        ) == SCAN_TYPE
+        if (
+            ids
+            and payload.get("result", "记录") in {"完成", "OK"}
+            and enforce_unique
+            and not bool(payload.get("skip_validation"))
+        ):
+            validation = _validate_barcode_use(
+                conn,
+                {
+                    **payload,
+                    "station_id": ids["station_id"],
+                    "is_main_barcode": is_main,
+                },
+            )
+            if not validation["allowed"]:
+                raise ValueError(validation["message"])
         conn.execute(
             """
             INSERT INTO scan_records
             (project_id, station_id, barcode, product_instance_id, barcode_used,
-             step, result, note, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+             step_id, step, result, note, is_main_barcode, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 ids["project_id"] if ids else None,
@@ -1459,9 +1744,11 @@ def add_scan_record(payload):
                 barcode,
                 int(payload.get("product_instance_id") or 0) or None,
                 payload.get("barcode_used") or barcode,
+                int(payload.get("step_id") or 0) or None,
                 payload.get("step", ""),
                 payload.get("result", "记录"),
                 payload.get("note", ""),
+                int(is_main),
                 payload.get("created_at") or now_text(),
             ),
         )
