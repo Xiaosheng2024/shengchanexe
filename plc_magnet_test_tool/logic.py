@@ -7,6 +7,28 @@ WRITE_ONE_OFFSETS = {0, 4, 8}
 VERIFY_WARNING = (
     "未读回 1，可能写入失败或 PLC 已快速复位，请结合 PLC 在线监控确认。"
 )
+DB_ACCESS_GUIDANCE = (
+    "PLC连接成功，但DB读取失败。S7-1200请检查 PUT/GET 是否开启、"
+    "DB221 是否关闭优化块访问、DB221 是否已下载、DB号是否正确。"
+)
+REAL_ACCESS_GUIDANCE = (
+    "Word读取成功，REAL读取失败，请检查 DBD10 地址、DB长度、REAL类型。"
+)
+DB_LENGTH_GUIDANCE = "DB221 块长度不足或外部访问失败。"
+
+POINT_DEFINITIONS = (
+    ("barcode_ok", "barcode_ok", "DBW", "WORD", 2),
+    ("cylinder_clamped", "cylinder_clamped", "DBW", "WORD", 2),
+    ("screw_complete", "screw_complete", "DBW", "WORD", 2),
+    ("magnet_complete", "magnet_complete", "DBW", "WORD", 2),
+    ("mes_read_done", "mes_read_done", "DBW", "WORD", 2),
+    ("left_flux", "left_flux", "DBD", "FLUX", 4),
+    ("left_polarity", "left_polarity", "DBW", "WORD", 2),
+    ("left_result", "left_result", "DBW", "WORD", 2),
+    ("right_flux", "right_flux", "DBD", "FLUX", 4),
+    ("right_polarity", "right_polarity", "DBW", "WORD", 2),
+    ("right_result", "right_result", "DBW", "WORD", 2),
+)
 
 
 @dataclass
@@ -74,6 +96,131 @@ class MagnetFlowController:
             f"读取 DB{self.config.db_number}.DBW{offset} = {format_word(value)}"
         )
         return value
+
+    def _point_definition(self, key: str):
+        for definition in POINT_DEFINITIONS:
+            if definition[0] == key:
+                return definition
+        raise ValueError(f"未知读取点：{key}")
+
+    def _read_failure_text(
+        self,
+        address_label: str,
+        length: int,
+        exc: Exception,
+    ) -> str:
+        return (
+            f"读取失败 PLC IP={getattr(self.client, 'ip', '未知')} "
+            f"Rack={getattr(self.client, 'rack', '未知')} "
+            f"Slot={getattr(self.client, 'slot', '未知')} "
+            f"DB={self.config.db_number} 地址={address_label} "
+            f"读取长度={length} 错误原文={exc}"
+        )
+
+    def read_point(self, key: str, flux_mode: str = "REAL") -> Dict:
+        _, address_attr, prefix, point_type, length = self._point_definition(key)
+        offset = int(getattr(self.config.addresses, address_attr))
+        address_label = f"DB{self.config.db_number}.{prefix}{offset}"
+        try:
+            if point_type == "WORD":
+                value = self.client.read_word(self.config.db_number, offset)
+                display_value = format_word(value)
+            elif flux_mode.upper() == "DWORD":
+                value = self.client.read_dword(self.config.db_number, offset)
+                display_value = str(value)
+            else:
+                value = self.client.read_real(self.config.db_number, offset)
+                display_value = f"{value:.4f}"
+            self.log(f"读取 {address_label} = {display_value}")
+            return {
+                "ok": True,
+                "key": key,
+                "value": value,
+                "address": address_label,
+                "length": length,
+                "flux_mode": flux_mode.upper(),
+            }
+        except Exception as exc:
+            failure = self._read_failure_text(address_label, length, exc)
+            self.log(failure)
+            guidance = DB_ACCESS_GUIDANCE if key == "barcode_ok" else ""
+            if key == "left_flux":
+                guidance = REAL_ACCESS_GUIDANCE
+            if guidance:
+                self.log(guidance)
+            return {
+                "ok": False,
+                "key": key,
+                "address": address_label,
+                "length": length,
+                "error": str(exc),
+                "message": guidance or failure,
+                "flux_mode": flux_mode.upper(),
+            }
+
+    def precheck_db_length(self) -> Dict:
+        address_label = f"DB{self.config.db_number}.DBB0-25"
+        try:
+            raw = self.client.read_bytes(self.config.db_number, 0, 26)
+            if len(raw) < 26:
+                raise ValueError(f"实际只读取到 {len(raw)} 字节")
+            self.log(
+                f"DB长度预检成功 PLC IP={getattr(self.client, 'ip', '未知')} "
+                f"Rack={getattr(self.client, 'rack', '未知')} "
+                f"Slot={getattr(self.client, 'slot', '未知')} "
+                f"DB={self.config.db_number} 地址={address_label} 读取长度=26"
+            )
+            return {
+                "ok": True,
+                "address": address_label,
+                "length": len(raw),
+                "message": f"DB{self.config.db_number} 长度预检成功，可读取0-25字节。",
+            }
+        except Exception as exc:
+            failure = self._read_failure_text(address_label, 26, exc)
+            self.log(failure)
+            self.log(DB_LENGTH_GUIDANCE)
+            return {
+                "ok": False,
+                "address": address_label,
+                "length": 26,
+                "error": str(exc),
+                "message": DB_LENGTH_GUIDANCE,
+            }
+
+    def read_all_diagnostic(self, flux_mode: str = "REAL") -> Dict:
+        values = {}
+        errors = {}
+        for key, _, _, _, _ in POINT_DEFINITIONS:
+            result = self.read_point(key, flux_mode)
+            if result["ok"]:
+                values[key] = result["value"]
+            else:
+                errors[key] = {
+                    "error": result["error"],
+                    "address": result["address"],
+                    "length": result["length"],
+                }
+
+        values["flux_mode"] = flux_mode.upper()
+        if "left_result" in values and "right_result" in values:
+            values["overall_result"] = evaluate_magnet_result(
+                values["left_result"],
+                values["right_result"],
+            )
+        else:
+            values["overall_result"] = "UNKNOWN"
+
+        guidance = ""
+        if "barcode_ok" in errors:
+            guidance = DB_ACCESS_GUIDANCE
+        elif "left_flux" in errors and "barcode_ok" in values:
+            guidance = REAL_ACCESS_GUIDANCE
+        if guidance:
+            self.log(guidance)
+        values["read_errors"] = errors
+        values["diagnostic_message"] = guidance
+        return values
 
     def write_one_and_verify(self, offset: int) -> Dict:
         if offset not in WRITE_ONE_OFFSETS:

@@ -35,6 +35,20 @@ Windows EXE 运行时，`config.ini` 和 `logs/plc_magnet_test.log`
 - `DBD10`、`DBD18` 默认按 Siemens REAL 读取，也可切换为 DWORD
   排查 PLC 数据类型。
 
+## DB 读取诊断
+
+“测试连接”只验证 TCP/S7 会话。“测试DBW0访问”用于确认 DB221
+可以被外部访问，“DB长度预检”会读取 `DBB0-25`，确认至少可访问
+26字节。读取表格的每一行均有独立按钮；批量读取时单个地址失败不会
+中断其他地址，错误单元格和日志会保留 PLC 返回的原始错误。
+
+S7-1200 现场需确认：
+
+- Rack=`0`、Slot=`1`
+- CPU 已开启 PUT/GET
+- DB221 已关闭 Optimized block access
+- DB221 已下载且至少包含26字节
+
 ## 独立 Windows 构建
 
 本工具使用独立工作流

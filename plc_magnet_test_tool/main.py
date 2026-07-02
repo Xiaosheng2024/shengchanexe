@@ -31,6 +31,7 @@ from PyQt5.QtWidgets import (
 )
 
 from plc_magnet_test_tool.logic import (
+    DB_LENGTH_GUIDANCE,
     MagnetAddresses,
     MagnetConfig,
     MagnetFlowController,
@@ -201,6 +202,19 @@ class MagnetTestWindow(QMainWindow):
         ("left_flux", "DBD10", "左磁通量"),
         ("right_flux", "DBD18", "右磁通量"),
     ]
+    DISPLAY_ROWS = [
+        ("barcode_ok", "DBW0", "条码校验合格 / 准备完成"),
+        ("cylinder_clamped", "DBW2", "气缸夹紧信号"),
+        ("screw_complete", "DBW4", "拧紧合格完成信号"),
+        ("magnet_complete", "DBW6", "磁通量检测完成信号"),
+        ("mes_read_done", "DBW8", "MES读取磁通量结果完成信号"),
+        ("left_flux", "DBD10", "左磁通量"),
+        ("left_polarity", "DBW14", "左极性"),
+        ("left_result", "DBW16", "左判定结果"),
+        ("right_flux", "DBD18", "右磁通量"),
+        ("right_polarity", "DBW22", "右极性"),
+        ("right_result", "DBW24", "右判定结果"),
+    ]
 
     def __init__(self):
         super().__init__()
@@ -232,6 +246,17 @@ class MagnetTestWindow(QMainWindow):
             "background:#fff7ed;padding:10px;border:1px solid #fdba74;"
         )
         layout.addWidget(notice)
+
+        s7_hint = QLabel(
+            "S7-1200固定诊断：Rack=0、Slot=1；需要开启 PUT/GET；"
+            "DB221 需要关闭 Optimized block access；DB221 至少 26 字节。"
+        )
+        s7_hint.setWordWrap(True)
+        s7_hint.setStyleSheet(
+            "font-size:14px;font-weight:700;color:#1d4ed8;"
+            "background:#eff6ff;padding:8px;border:1px solid #93c5fd;"
+        )
+        layout.addWidget(s7_hint)
 
         connection = QGroupBox("PLC连接配置")
         connection_grid = QGridLayout(connection)
@@ -267,6 +292,8 @@ class MagnetTestWindow(QMainWindow):
         self.connect_btn = QPushButton("连接PLC")
         self.disconnect_btn = QPushButton("断开PLC")
         self.test_btn = QPushButton("测试连接")
+        self.dbw0_test_btn = QPushButton("测试DBW0访问")
+        self.db_length_btn = QPushButton("DB长度预检(0-25)")
         self.read_btn = QPushButton("读取全部DB221")
         self.auto_start_btn = QPushButton("开始自动刷新")
         self.auto_stop_btn = QPushButton("停止自动刷新")
@@ -274,6 +301,8 @@ class MagnetTestWindow(QMainWindow):
             self.connect_btn,
             self.disconnect_btn,
             self.test_btn,
+            self.dbw0_test_btn,
+            self.db_length_btn,
             self.read_btn,
             self.auto_start_btn,
             self.auto_stop_btn,
@@ -316,11 +345,12 @@ class MagnetTestWindow(QMainWindow):
         self.overall_label.setStyleSheet("font-size:18px;font-weight:700;")
         mode_row.addWidget(self.overall_label)
         read_layout.addLayout(mode_row)
-        self.value_table = QTableWidget(0, 3)
-        self.value_table.setHorizontalHeaderLabels(["地址", "说明", "当前值"])
-        self.value_table.horizontalHeader().setStretchLastSection(True)
+        self.value_table = QTableWidget(0, 4)
+        self.value_table.setHorizontalHeaderLabels(
+            ["地址", "说明", "当前值", "单点读取测试"]
+        )
         self.value_items = {}
-        for key, address, description in self.WORD_ROWS + self.FLUX_ROWS:
+        for key, address, description in self.DISPLAY_ROWS:
             row = self.value_table.rowCount()
             self.value_table.insertRow(row)
             self.value_table.setItem(row, 0, QTableWidgetItem(f"DB221.{address}"))
@@ -328,6 +358,14 @@ class MagnetTestWindow(QMainWindow):
             value_item = QTableWidgetItem("未读取")
             self.value_table.setItem(row, 2, value_item)
             self.value_items[key] = value_item
+            read_point_btn = QPushButton(f"读取 {address}")
+            read_point_btn.clicked.connect(
+                lambda checked=False, point_key=key: self.read_point(point_key)
+            )
+            self.value_table.setCellWidget(row, 3, read_point_btn)
+        self.value_table.setColumnWidth(0, 125)
+        self.value_table.setColumnWidth(3, 135)
+        self.value_table.horizontalHeader().setStretchLastSection(False)
         read_layout.addWidget(self.value_table)
         content.addWidget(read_group, 3)
 
@@ -368,6 +406,10 @@ class MagnetTestWindow(QMainWindow):
         self.connect_btn.clicked.connect(self.connect_plc)
         self.disconnect_btn.clicked.connect(self.disconnect_plc)
         self.test_btn.clicked.connect(self.test_connection)
+        self.dbw0_test_btn.clicked.connect(
+            lambda: self.read_point("barcode_ok")
+        )
+        self.db_length_btn.clicked.connect(self.precheck_db_length)
         self.read_btn.clicked.connect(self.read_all)
         self.auto_start_btn.clicked.connect(self.start_auto_refresh)
         self.auto_stop_btn.clicked.connect(self.stop_auto_refresh)
@@ -490,13 +532,25 @@ class MagnetTestWindow(QMainWindow):
     def read_all(self):
         self.runner.run_controller(
             "读取全部DB221",
-            lambda controller: controller.read_all(self.flux_mode()),
+            lambda controller: controller.read_all_diagnostic(self.flux_mode()),
         )
 
     def read_results(self):
         self.runner.run_controller(
             "读取磁吸结果",
-            lambda controller: controller.read_all(self.flux_mode()),
+            lambda controller: controller.read_all_diagnostic(self.flux_mode()),
+        )
+
+    def read_point(self, key):
+        self.runner.run_controller(
+            f"单点读取:{key}",
+            lambda controller: controller.read_point(key, self.flux_mode()),
+        )
+
+    def precheck_db_length(self):
+        self.runner.run_controller(
+            "DB长度预检",
+            lambda controller: controller.precheck_db_length(),
         )
 
     def finish_if_ok(self):
@@ -543,11 +597,24 @@ class MagnetTestWindow(QMainWindow):
 
     def operation_done(self, name, result):
         if isinstance(result, dict) and result.get("error"):
-            self.error_label.setText(result["error"])
-            self.connection_label.setText("连接失败")
+            self.error_label.setText(
+                result.get("message") or result["error"]
+            )
+            if name in {"连接PLC", "测试连接"}:
+                self.connection_label.setText("连接失败")
         if name in {"读取全部DB221", "读取磁吸结果"} and isinstance(result, dict):
-            if "left_result" in result:
-                self.render_snapshot(result)
+            self.render_snapshot(result)
+            if result.get("diagnostic_message"):
+                self.error_label.setText(result["diagnostic_message"])
+        if name.startswith("单点读取:") and isinstance(result, dict):
+            self.render_point_result(result)
+        if name == "DB长度预检" and isinstance(result, dict):
+            self.error_label.setText(
+                "" if result.get("ok") else result.get(
+                    "message", DB_LENGTH_GUIDANCE
+                )
+            )
+            self.append_log(result.get("message", "DB长度预检完成"))
         if name == "一键流程测试" and isinstance(result, dict):
             values = result.get("values")
             if values:
@@ -557,8 +624,40 @@ class MagnetTestWindow(QMainWindow):
             elif result.get("stage") == "magnet_ng":
                 self.append_log("磁吸检测 NG，不通知解锁")
 
-    def render_snapshot(self, values):
-        self.last_snapshot = dict(values)
+    def render_point_result(self, result):
+        key = result.get("key")
+        if key not in self.value_items:
+            return
+        if not result.get("ok"):
+            self.value_items[key].setText(
+                f"读取失败：{result.get('error', '未知错误')}"
+            )
+            self.error_label.setText(
+                result.get("message") or result.get("error", "")
+            )
+            return
+        values = {
+            key: result["value"],
+            "flux_mode": result.get("flux_mode", self.flux_mode()),
+        }
+        if key in {"left_result", "right_result"}:
+            self.last_snapshot[key] = result["value"]
+        self.render_snapshot(values, update_overall=False)
+        self.error_label.setText("")
+
+    def render_snapshot(self, values, update_overall=True):
+        self.last_snapshot.update(
+            {
+                key: value
+                for key, value in values.items()
+                if key not in {
+                    "read_errors",
+                    "diagnostic_message",
+                    "overall_result",
+                    "flux_mode",
+                }
+            }
+        )
         for key, _, _ in self.WORD_ROWS:
             if key not in values:
                 continue
@@ -577,6 +676,13 @@ class MagnetTestWindow(QMainWindow):
                     else f"{float(values[key]):.4f}"
                 )
                 self.value_items[key].setText(text)
+        for key, error in values.get("read_errors", {}).items():
+            if key in self.value_items:
+                self.value_items[key].setText(
+                    f"读取失败：{error.get('error', '未知错误')}"
+                )
+        if not update_overall:
+            return
         result = values.get("overall_result", "UNKNOWN")
         text = {
             "OK": "磁吸判定：OK",

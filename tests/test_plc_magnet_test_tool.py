@@ -5,6 +5,9 @@ import unittest
 from pathlib import Path
 
 from plc_magnet_test_tool.logic import (
+    DB_ACCESS_GUIDANCE,
+    DB_LENGTH_GUIDANCE,
+    REAL_ACCESS_GUIDANCE,
     VERIFY_WARNING,
     MagnetConfig,
     MagnetFlowController,
@@ -25,15 +28,28 @@ ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakePlcClient:
-    def __init__(self, initial=None, read_sequences=None):
+    def __init__(
+        self,
+        initial=None,
+        read_sequences=None,
+        failures=None,
+        raw_length=26,
+    ):
+        self.ip = "192.168.111.50"
+        self.rack = 0
+        self.slot = 1
         self.values = dict(initial or {})
         self.read_sequences = {
             offset: list(values)
             for offset, values in (read_sequences or {}).items()
         }
+        self.failures = dict(failures or {})
+        self.raw_length = raw_length
         self.writes = []
 
     def read_word(self, db_number, offset):
+        if ("word", offset) in self.failures:
+            raise RuntimeError(self.failures[("word", offset)])
         sequence = self.read_sequences.get(offset)
         if sequence:
             value = sequence.pop(0)
@@ -46,10 +62,19 @@ class FakePlcClient:
         self.values[offset] = value
 
     def read_real(self, db_number, offset):
+        if ("real", offset) in self.failures:
+            raise RuntimeError(self.failures[("real", offset)])
         return {10: 123.456, 18: 122.98}.get(offset, 0.0)
 
     def read_dword(self, db_number, offset):
+        if ("dword", offset) in self.failures:
+            raise RuntimeError(self.failures[("dword", offset)])
         return {10: 123456, 18: 122980}.get(offset, 0)
+
+    def read_bytes(self, db_number, offset, length):
+        if ("bytes", offset) in self.failures:
+            raise RuntimeError(self.failures[("bytes", offset)])
+        return bytes(min(length, self.raw_length))
 
 
 class AdvancingClock:
@@ -188,6 +213,71 @@ class PlcMagnetLogicTest(unittest.TestCase):
         self.assertEqual(client.read_real(221, 10), 12.5)
         self.assertEqual(received, [bytearray])
 
+    def test_single_dbw0_failure_has_full_context_and_guidance(self):
+        messages = []
+        client = FakePlcClient(
+            failures={("word", 0): "CPU : Item not available"},
+        )
+        controller = MagnetFlowController(
+            client,
+            MagnetConfig(),
+            log=messages.append,
+        )
+        result = controller.read_point("barcode_ok")
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["message"], DB_ACCESS_GUIDANCE)
+        log_text = "\n".join(messages)
+        self.assertIn("PLC IP=192.168.111.50", log_text)
+        self.assertIn("Rack=0", log_text)
+        self.assertIn("Slot=1", log_text)
+        self.assertIn("DB=221", log_text)
+        self.assertIn("地址=DB221.DBW0", log_text)
+        self.assertIn("读取长度=2", log_text)
+        self.assertIn("错误原文=CPU : Item not available", log_text)
+
+    def test_read_all_continues_after_individual_address_failure(self):
+        client = FakePlcClient(
+            initial={0: 1, 2: 1, 4: 1, 6: 1, 8: 1, 14: 1, 16: 1, 22: 2, 24: 1},
+            failures={("word", 4): "DBW4 unavailable"},
+        )
+        result = self.make_controller(client).read_all_diagnostic()
+        self.assertIn("screw_complete", result["read_errors"])
+        self.assertEqual(result["barcode_ok"], 1)
+        self.assertEqual(result["right_result"], 1)
+        self.assertEqual(result["left_flux"], 123.456)
+
+    def test_real_failure_after_word_success_has_specific_guidance(self):
+        client = FakePlcClient(
+            initial={0: 1},
+            failures={("real", 10): "Address out of range"},
+        )
+        result = self.make_controller(client).read_all_diagnostic()
+        self.assertEqual(result["barcode_ok"], 1)
+        self.assertIn("left_flux", result["read_errors"])
+        self.assertEqual(result["diagnostic_message"], REAL_ACCESS_GUIDANCE)
+
+    def test_db_length_precheck_reports_external_access_failure(self):
+        messages = []
+        client = FakePlcClient(
+            failures={("bytes", 0): "CLI : Address out of range"},
+        )
+        controller = MagnetFlowController(
+            client,
+            MagnetConfig(),
+            log=messages.append,
+        )
+        result = controller.precheck_db_length()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["message"], DB_LENGTH_GUIDANCE)
+        self.assertIn("读取长度=26", "\n".join(messages))
+
+    def test_db_length_precheck_rejects_short_read(self):
+        result = self.make_controller(
+            FakePlcClient(raw_length=12)
+        ).precheck_db_length()
+        self.assertFalse(result["ok"])
+        self.assertEqual(result["message"], DB_LENGTH_GUIDANCE)
+
 
 class PlcMagnetToolPackagingTest(unittest.TestCase):
     def test_source_has_no_clear_or_write_zero_button(self):
@@ -215,6 +305,30 @@ class PlcMagnetToolPackagingTest(unittest.TestCase):
             ),
             button_labels,
         )
+
+    def test_ui_contains_all_single_point_read_buttons_and_s7_hints(self):
+        source = (
+            ROOT / "plc_magnet_test_tool" / "main.py"
+        ).read_text(encoding="utf-8")
+        for address in (
+            "DBW0",
+            "DBW2",
+            "DBW4",
+            "DBW6",
+            "DBW8",
+            "DBD10",
+            "DBW14",
+            "DBW16",
+            "DBD18",
+            "DBW22",
+            "DBW24",
+        ):
+            self.assertIn(f'"{address}"', source)
+        self.assertIn('QPushButton(f"读取 {address}")', source)
+        self.assertIn("测试DBW0访问", source)
+        self.assertIn("DB长度预检(0-25)", source)
+        self.assertIn("Optimized block access", source)
+        self.assertIn("DB221 至少 26 字节", source)
 
     def test_defaults_and_all_addresses_are_documented(self):
         config = (
