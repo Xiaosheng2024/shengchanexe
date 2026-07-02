@@ -3919,11 +3919,11 @@ class QualityControlWindow(QMainWindow):
             step,
             "OK",
             self.current_barcode,
-            "左右磁通判定合格，DBW8结束指令已写入并读回确认",
+            "左右磁通判定合格，DBW8结束指令已发送",
             completed=True,
         )
         self.plc_magnet_status_label.setText(
-            "PLC磁通检测状态：OK，结束指令已确认"
+            "PLC磁通检测状态：OK，结束指令已发送"
         )
         self.message_label.setText("PLC磁通检测获取完成")
         self.refresh_work_area()

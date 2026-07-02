@@ -96,10 +96,16 @@ class PlcMagnetFlowController:
             raise RuntimeError("PLC磁通检测已取消")
 
     def write_one_and_verify(self, offset: int, stage: str):
+        """
+        用于 DBW0 / DBW4：
+        MES 写 1 后必须读回确认。
+        """
         self.ensure_not_cancelled()
         self.client.write_word(self.config.plc_db, offset, 1)
         self.emit(stage, status="已写入1，正在读回确认", value=1)
+
         for attempt in range(1, self.config.write_verify_retry_count + 1):
+            self.ensure_not_cancelled()
             value = self.client.read_word(self.config.plc_db, offset)
             if value == 1:
                 self.emit(
@@ -111,8 +117,27 @@ class PlcMagnetFlowController:
                 return
             if attempt < self.config.write_verify_retry_count:
                 self.sleep(self.config.write_verify_interval_ms / 1000.0)
+
         raise RuntimeError(
             f"DBW{offset}（{stage}）写入失败或读回不是1"
+        )
+
+    def write_one_no_verify(self, offset: int, stage: str):
+        """
+        用于 DBW8：
+        只写 1，不读回确认。
+        因为 PLC 可能收到 DBW8=1 后立即复位为 0，
+        如果客户端再读回，容易误判失败。
+        """
+        self.ensure_not_cancelled()
+        self.emit(stage, status="正在写入1", value=1)
+        self.client.write_word(self.config.plc_db, offset, 1)
+        self.emit(
+            stage,
+            status="已发送1，不回读确认",
+            value=1,
+            verified=False,
+            verify_skipped=True,
         )
 
     def wait_word(self, offset: int, stage: str, timeout_message: str):
@@ -130,63 +155,98 @@ class PlcMagnetFlowController:
     def run(self):
         if not self.config.plc_enabled:
             raise RuntimeError("PLC磁通检测工序未启用")
+
         if self.config.read_block_size < 26:
             raise ValueError("DB221原始块读取长度不能小于26字节")
+
         started_at = self.monotonic()
         self.client.connect()
+
         try:
             self.emit("connection", status="已连接", ip=self.config.plc_ip)
+
+            # DBW0：条码校验合格 / 准备完成，必须写后读回确认
             self.write_one_and_verify(
                 self.config.barcode_ok_offset,
                 "barcode_ok",
             )
+
+            # DBW2：等待气缸夹紧
             self.wait_word(
                 self.config.cylinder_clamped_offset,
                 "cylinder_clamped",
                 "气缸夹紧超时，请检查 PLC / 气缸 / 夹紧信号。",
             )
+
+            # DBW4：拧紧合格完成信号，必须写后读回确认
             self.write_one_and_verify(
                 self.config.screw_complete_offset,
                 "screw_complete",
             )
+
+            # DBW6：等待磁通量检测完成
             self.wait_word(
                 self.config.magnet_complete_offset,
                 "magnet_complete",
                 "磁通量检测完成信号超时，请检查 PLC 磁通检测流程。",
             )
+
             self.ensure_not_cancelled()
+
+            # 一次读取 DB221 原始块
             raw = self.client.read_bytes(
                 self.config.plc_db,
                 self.config.read_block_start,
                 self.config.read_block_size,
             )
+
             if len(raw) < self.config.read_block_size:
                 raise RuntimeError(
                     f"DB221块长度不足：请求{self.config.read_block_size}字节，"
                     f"实际{len(raw)}字节"
                 )
+
             values = parse_plc_magnet_block(raw, self.config)
             self.emit("magnet_result", status="已读取", **values)
+
             passed = (
                 values["left_result"] == self.config.ok_value
                 and values["right_result"] == self.config.ok_value
             )
+
+            # 左右任一 NG：不写 DBW8，不完成工序
             if not passed:
+                self.emit(
+                    "mes_read_done",
+                    status="磁通判定NG，不写DBW8",
+                    value=0,
+                    sent=False,
+                )
                 return {
                     "ok": False,
                     "result": "NG",
                     "error_message": "左右磁通判定未全部合格",
+                    "mes_read_done_sent": False,
+                    "mes_read_done_verified": False,
+                    "mes_read_done_verify_skipped": True,
                     **values,
                 }
-            self.write_one_and_verify(
+
+            # 左右都 OK：写 DBW8=1，只发送，不读回
+            self.write_one_no_verify(
                 self.config.mes_read_done_offset,
                 "mes_read_done",
             )
+
             return {
                 "ok": True,
                 "result": "OK",
                 "elapsed_seconds": self.monotonic() - started_at,
+                "mes_read_done_sent": True,
+                "mes_read_done_verified": False,
+                "mes_read_done_verify_skipped": True,
                 **values,
             }
+
         finally:
             self.client.disconnect()
