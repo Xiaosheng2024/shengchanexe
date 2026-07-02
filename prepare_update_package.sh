@@ -95,7 +95,7 @@ tar -czf "${DIST_DIR}/offline_wheels.tar.gz" \
 printf '%s\n' "${DEPLOY_COMMIT}" > "${DIST_DIR}/deploy_commit.txt"
 cat > "${DIST_DIR}/DEPLOY_NOTES.txt" <<EOF
 commit=${DEPLOY_COMMIT}
-version=v0.9.3-rc3
+version=v0.9.3-rc4
 database_migration=steps.plc_magnet_config, plc_magnet_logs
 server_restart=mes-web
 windows_artifacts=QualityControlSystem.exe, QualityControlSystem_Debug.exe

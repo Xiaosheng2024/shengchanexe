@@ -871,6 +871,10 @@ def migrate_sqlite_db(conn):
         if column not in columns:
             conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
             columns.append(column)
+    conn.execute(
+        "UPDATE steps SET type = 'plc_magnet_check' "
+        "WHERE type = 'PLC磁通检测获取'"
+    )
     dependency_columns = {
         row["name"]
         for row in conn.execute("PRAGMA table_info(station_dependencies)").fetchall()
@@ -995,6 +999,10 @@ def migrate_postgresql_db(conn):
             pg_definition = definition
         conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {pg_definition}")
         columns.add(column)
+    conn.execute(
+        "UPDATE steps SET type = 'plc_magnet_check' "
+        "WHERE type = 'PLC磁通检测获取'"
+    )
     dependency_rows = conn.execute(
         """
         SELECT column_name FROM information_schema.columns

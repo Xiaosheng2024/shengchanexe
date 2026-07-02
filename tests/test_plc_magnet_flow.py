@@ -194,7 +194,7 @@ class PlcMagnetAdminConfigTest(unittest.TestCase):
             {
                 "station_id": self.station["id"],
                 "name": "PLC磁通检测获取",
-                "type": "PLC磁通检测获取",
+                "type": "plc_magnet_check",
                 "step_order": 2,
                 "plc_magnet_config": {
                     "plc_ip": "192.168.111.50",
@@ -208,9 +208,34 @@ class PlcMagnetAdminConfigTest(unittest.TestCase):
             for item in services.list_steps(self.station["id"])
             if item["id"] == result["id"]
         )
-        self.assertEqual(step["type"], "PLC磁通检测获取")
-        self.assertEqual(step["plc_magnet_config"]["plc_db"], 221)
-        self.assertEqual(step["plc_magnet_config"]["read_block_size"], 26)
+        self.assertEqual(step["type"], "plc_magnet_check")
+        magnet_config = step["plc_magnet_config"]
+        expected_defaults = {
+            "plc_ip": "192.168.111.50",
+            "plc_rack": 0,
+            "plc_slot": 1,
+            "plc_db": 221,
+            "plc_poll_interval_ms": 300,
+            "plc_timeout_seconds": 30,
+            "barcode_ok_offset": 0,
+            "cylinder_clamped_offset": 2,
+            "screw_complete_offset": 4,
+            "magnet_complete_offset": 6,
+            "mes_read_done_offset": 8,
+            "left_flux_offset": 10,
+            "left_polarity_offset": 14,
+            "left_result_offset": 16,
+            "right_flux_offset": 18,
+            "right_polarity_offset": 22,
+            "right_result_offset": 24,
+            "read_block_start": 0,
+            "read_block_size": 26,
+            "ok_value": 1,
+            "write_verify_retry_count": 3,
+            "write_verify_interval_ms": 100,
+        }
+        for key, expected in expected_defaults.items():
+            self.assertEqual(magnet_config[key], expected, key)
         config = services.get_station_config_by_ids(
             services.list_projects_full()[0]["id"],
             self.station["id"],
@@ -218,6 +243,7 @@ class PlcMagnetAdminConfigTest(unittest.TestCase):
         exported = next(
             item for item in config["steps"] if item["id"] == result["id"]
         )
+        self.assertEqual(exported["type"], "plc_magnet_check")
         self.assertEqual(
             exported["plc_magnet_config"]["right_result_offset"],
             24,
@@ -253,6 +279,10 @@ class PlcMagnetAdminConfigTest(unittest.TestCase):
 
     def test_admin_page_contains_magnet_type_and_all_offsets(self):
         self.assertIn("PLC磁通检测获取", HTML)
+        self.assertIn(
+            '<option value="plc_magnet_check">PLC磁通检测获取</option>',
+            HTML,
+        )
         for element_id in (
             "magnetBarcodeOkOffset",
             "magnetCylinderOffset",
@@ -267,6 +297,22 @@ class PlcMagnetAdminConfigTest(unittest.TestCase):
             "magnetRightResultOffset",
         ):
             self.assertIn(f'id="{element_id}"', HTML)
+
+    def test_legacy_magnet_type_is_normalized_to_canonical_code(self):
+        result = services.add_step(
+            {
+                "station_id": self.station["id"],
+                "name": "旧值兼容",
+                "type": "PLC磁通检测获取",
+                "step_order": 2,
+            }
+        )
+        step = next(
+            item
+            for item in services.list_steps(self.station["id"])
+            if item["id"] == result["id"]
+        )
+        self.assertEqual(step["type"], "plc_magnet_check")
 
 
 if __name__ == "__main__":

@@ -40,7 +40,8 @@ def table_time_column(table):
 SCAN_TYPE = "扫码"
 SCREW_TYPE = "螺丝"
 PLC_TYPE = "PLC接收"
-PLC_MAGNET_TYPE = "PLC磁通检测获取"
+PLC_MAGNET_TYPE = "plc_magnet_check"
+PLC_MAGNET_LEGACY_TYPE = "PLC磁通检测获取"
 BARCODE_SWITCH_TYPE = "主条码切换"
 MATERIAL_BIND_TYPE = "子物料绑定"
 STATION_ROLES = {
@@ -97,7 +98,7 @@ PLC_MAGNET_DEFAULTS = {
     "plc_rack": 0,
     "plc_slot": 1,
     "plc_db": 221,
-    "plc_poll_interval_ms": 500,
+    "plc_poll_interval_ms": 300,
     "plc_timeout_seconds": 30,
     "barcode_ok_offset": 0,
     "cylinder_clamped_offset": 2,
@@ -123,6 +124,12 @@ class ClientValidationError(ValueError):
     def __init__(self, message, details=None):
         super().__init__(message)
         self.details = details or {}
+
+
+def normalize_step_type(value):
+    if value == PLC_MAGNET_LEGACY_TYPE:
+        return PLC_MAGNET_TYPE
+    return value
 
 
 def pagination(query):
@@ -963,7 +970,7 @@ def delete_step(step_id):
 def add_step(payload):
     station_id = int(payload.get("station_id", 0))
     name = payload.get("name", "").strip()
-    step_type = payload.get("type", "扫码")
+    step_type = normalize_step_type(payload.get("type", "扫码"))
     is_main_barcode = normalize_main_barcode(payload, step_type)
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
@@ -1008,7 +1015,7 @@ def add_step(payload):
 
 def update_step(step_id, payload):
     name = payload.get("name", "").strip()
-    step_type = payload.get("type", "扫码")
+    step_type = normalize_step_type(payload.get("type", "扫码"))
     station_id = int(payload.get("station_id", 0))
     is_main_barcode = normalize_main_barcode(payload, step_type)
     if not station_id or not name:
@@ -1067,6 +1074,7 @@ def list_steps(station_id):
             )
         ]
     for step in steps:
+        step["type"] = normalize_step_type(step.get("type", SCAN_TYPE))
         step["is_main_barcode"] = bool(step.get("is_main_barcode"))
         step["bind_required_station_ids"] = product_flow.int_list(
             step.get("bind_required_station_ids")
@@ -1080,7 +1088,7 @@ def station_config_step(step):
         "id": step.get("id"),
         "step_order": step.get("step_order") or 1,
         "name": step.get("name", "未命名工序"),
-        "type": step.get("type", SCAN_TYPE),
+        "type": normalize_step_type(step.get("type", SCAN_TYPE)),
         "required_count": step.get("required_count") or 0,
         "barcode_start": step.get("barcode_start") or 1,
         "barcode_end": step.get("barcode_end") or 7,

@@ -5,9 +5,16 @@ from typing import List, Optional
 SCAN = "扫码"
 SCREW = "螺丝"
 PLC = "PLC接收"
-PLC_MAGNET = "PLC磁通检测获取"
+PLC_MAGNET = "plc_magnet_check"
+PLC_MAGNET_LEGACY = "PLC磁通检测获取"
 BARCODE_SWITCH = "主条码切换"
 MATERIAL_BIND = "子物料绑定"
+
+
+def normalize_step_type(value: str) -> str:
+    if value == PLC_MAGNET_LEGACY:
+        return PLC_MAGNET
+    return value
 
 
 @dataclass
@@ -60,6 +67,7 @@ class ProcessStep:
     done: bool = False
 
     def __post_init__(self):
+        self.step_type = normalize_step_type(self.step_type)
         if self.plc_barcode1_db is not None:
             self.plc_barcode_db = self.plc_barcode1_db
         if self.plc_barcode1_offset is not None:

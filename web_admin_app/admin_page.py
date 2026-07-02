@@ -187,7 +187,7 @@ HTML = r"""<!doctype html>
               <option value="扫码">条码扫描</option>
               <option value="螺丝">螺丝数量</option>
               <option value="PLC接收">PLC接收</option>
-              <option value="PLC磁通检测获取">PLC磁通检测获取</option>
+              <option value="plc_magnet_check">PLC磁通检测获取</option>
               <option value="主条码切换">主条码切换</option>
               <option value="子物料绑定">子物料绑定</option>
             </select>
@@ -245,7 +245,7 @@ HTML = r"""<!doctype html>
               <label>DB</label><input id="magnetPlcDb" type="number" value="221">
             </div>
             <div class="toolbar">
-              <label>轮询ms</label><input id="magnetPollMs" type="number" value="500">
+              <label>轮询ms</label><input id="magnetPollMs" type="number" value="300">
               <label>超时秒</label><input id="magnetTimeoutSeconds" type="number" value="30">
               <label>块起始</label><input id="magnetBlockStart" type="number" value="0">
               <label>块长度</label><input id="magnetBlockSize" type="number" min="26" value="26">
@@ -577,6 +577,13 @@ HTML = r"""<!doctype html>
       }[ch]));
     }
 
+    function stepTypeLabel(value) {
+      if (value === "plc_magnet_check" || value === "PLC磁通检测获取") {
+        return "PLC磁通检测获取";
+      }
+      return value || "";
+    }
+
     document.querySelectorAll(".tab").forEach(btn => {
       btn.addEventListener("click", () => {
         document.querySelectorAll(".tab").forEach(item => item.classList.remove("active"));
@@ -682,7 +689,7 @@ HTML = r"""<!doctype html>
 
       const steps = station ? (station.steps || []) : [];
       document.getElementById("routeRuleRows").innerHTML = steps.map(step =>
-        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${htmlEscape(step.type)}</td><td>${step.is_main_barcode ? "是" : "否"}</td><td><button class="secondary" onclick="selectStep(${project.id}, ${station.id}, ${step.id})">编辑</button></td></tr>`
+        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${htmlEscape(stepTypeLabel(step.type))}</td><td>${step.is_main_barcode ? "是" : "否"}</td><td><button class="secondary" onclick="selectStep(${project.id}, ${station.id}, ${step.id})">编辑</button></td></tr>`
       ).join("") || `<tr><td colspan="5">当前工位暂无规则</td></tr>`;
 
       const bindings = steps.filter(step => step.type === "子物料绑定");
@@ -1115,7 +1122,7 @@ HTML = r"""<!doctype html>
       const type = document.getElementById("stepType").value;
       const isScrew = type === "螺丝";
       const isPlc = type === "PLC接收";
-      const isMagnet = type === "PLC磁通检测获取";
+      const isMagnet = type === "plc_magnet_check";
       const isScan = type === "扫码";
       const isSwitch = type === "主条码切换";
       const isBind = type === "子物料绑定";
@@ -1190,7 +1197,7 @@ HTML = r"""<!doctype html>
           plc_rack: Number(document.getElementById("magnetPlcRack").value || 0),
           plc_slot: Number(document.getElementById("magnetPlcSlot").value || 1),
           plc_db: Number(document.getElementById("magnetPlcDb").value || 221),
-          plc_poll_interval_ms: Number(document.getElementById("magnetPollMs").value || 500),
+          plc_poll_interval_ms: Number(document.getElementById("magnetPollMs").value || 300),
           plc_timeout_seconds: Number(document.getElementById("magnetTimeoutSeconds").value || 30),
           barcode_ok_offset: Number(document.getElementById("magnetBarcodeOkOffset").value || 0),
           cylinder_clamped_offset: Number(document.getElementById("magnetCylinderOffset").value || 2),
@@ -1227,7 +1234,8 @@ HTML = r"""<!doctype html>
     function fillStepForm(step) {
       document.getElementById("stepId").value = step.id || "";
       document.getElementById("stepName").value = step.name || "";
-      document.getElementById("stepType").value = step.type || "扫码";
+      document.getElementById("stepType").value =
+        step.type === "PLC磁通检测获取" ? "plc_magnet_check" : (step.type || "扫码");
       document.getElementById("stepOrder").value = step.step_order || 1;
       document.getElementById("requiredCount").value = step.required_count || 10;
       document.getElementById("barcodeStart").value = step.barcode_start || 1;
@@ -1259,7 +1267,7 @@ HTML = r"""<!doctype html>
       document.getElementById("magnetPlcRack").value = magnet.plc_rack ?? 0;
       document.getElementById("magnetPlcSlot").value = magnet.plc_slot ?? 1;
       document.getElementById("magnetPlcDb").value = magnet.plc_db ?? 221;
-      document.getElementById("magnetPollMs").value = magnet.plc_poll_interval_ms ?? 500;
+      document.getElementById("magnetPollMs").value = magnet.plc_poll_interval_ms ?? 300;
       document.getElementById("magnetTimeoutSeconds").value = magnet.plc_timeout_seconds ?? 30;
       document.getElementById("magnetBarcodeOkOffset").value = magnet.barcode_ok_offset ?? 0;
       document.getElementById("magnetCylinderOffset").value = magnet.cylinder_clamped_offset ?? 2;
@@ -1333,7 +1341,7 @@ HTML = r"""<!doctype html>
       }
       const data = await api(`/api/stations/${stationId}/steps`);
       document.getElementById("stepRows").innerHTML = data.steps.map(step =>
-        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${step.type}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${htmlEscape(step.expected_content || "")}</td><td>${step.is_main_barcode ? "是" : "否"}</td><td><button class="secondary" onclick="editStep(${step.id})">编辑</button> <button class="danger" onclick="deleteStep(${step.id})">删除</button></td></tr>`
+        `<tr><td>${step.step_order}</td><td>${htmlEscape(step.name)}</td><td>${htmlEscape(stepTypeLabel(step.type))}</td><td>${step.required_count || ""}</td><td>${step.barcode_start}-${step.barcode_end}</td><td>${htmlEscape(step.expected_content || "")}</td><td>${step.is_main_barcode ? "是" : "否"}</td><td><button class="secondary" onclick="editStep(${step.id})">编辑</button> <button class="danger" onclick="deleteStep(${step.id})">删除</button></td></tr>`
       ).join("") || `<tr><td colspan="8">暂无工序</td></tr>`;
     }
 

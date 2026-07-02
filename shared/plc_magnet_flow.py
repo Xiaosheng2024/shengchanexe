@@ -11,7 +11,7 @@ class PlcMagnetConfig:
     plc_rack: int = 0
     plc_slot: int = 1
     plc_db: int = 221
-    plc_poll_interval_ms: int = 500
+    plc_poll_interval_ms: int = 300
     plc_timeout_seconds: int = 30
     barcode_ok_offset: int = 0
     cylinder_clamped_offset: int = 2

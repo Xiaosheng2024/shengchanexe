@@ -53,6 +53,7 @@ from shared.models import (
     MATERIAL_BIND,
     PLC,
     PLC_MAGNET,
+    normalize_step_type,
     SCAN,
     SCREW,
     ProcessStep,
@@ -62,7 +63,7 @@ from shared.models import (
 )
 
 
-APP_VERSION = "v0.9.3-rc3"
+APP_VERSION = "v0.9.3-rc4"
 SYSTEM_NAME = "关键工位防错追溯系统"
 DEFAULT_MES_SERVER_URL = "http://10.162.70.53:8000"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
@@ -1236,7 +1237,7 @@ class QualityControlWindow(QMainWindow):
     def product_from_api(self, data: dict) -> ProductConfig:
         steps = []
         for item in data.get("steps", []):
-            step_type = item.get("type", SCAN)
+            step_type = normalize_step_type(item.get("type", SCAN))
             steps.append(
                 ProcessStep(
                     name=item.get("name", "未命名工序"),
