@@ -24,6 +24,7 @@ from shared.models import (
     BARCODE_SWITCH,
     MATERIAL_BIND,
     PLC,
+    PLC_MAGNET,
     SCAN,
     SCREW,
     ProcessStep,
@@ -113,6 +114,89 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.advance_step()
         self.assertEqual(window.current_barcode, "")
         self.assertEqual(window.main_barcode_label.text(), "当前主条码：未扫描")
+        self.assertEqual(window.current_step_index, 0)
+
+    def test_downloaded_plc_magnet_step_keeps_configuration(self):
+        window = self.make_window()
+        product = window.product_from_api(
+            {
+                "product_name": "磁通测试",
+                "steps": [
+                    {
+                        "id": 99,
+                        "name": "PLC磁通检测获取",
+                        "type": PLC_MAGNET,
+                        "plc_magnet_config": {
+                            "plc_ip": "192.168.111.50",
+                            "plc_db": 221,
+                            "read_block_size": 26,
+                        },
+                    }
+                ],
+            }
+        )
+        step = product.steps[0]
+        self.assertEqual(step.step_type, PLC_MAGNET)
+        self.assertEqual(step.plc_magnet_config["plc_db"], 221)
+        self.assertEqual(step.plc_magnet_config["read_block_size"], 26)
+
+    def test_plc_magnet_ok_completes_only_current_step(self):
+        window = self.make_window()
+        magnet = ProcessStep(
+            "PLC磁通检测获取",
+            PLC_MAGNET,
+            step_id=99,
+            plc_magnet_config={"plc_ip": "192.168.111.50"},
+        )
+        following = ProcessStep("扫码下一步", SCAN)
+        window.current_product = ProductConfig(
+            "磁通测试",
+            [magnet, following],
+        )
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.current_barcode = "B001"
+        window.online_mode = False
+        window.schedule_callback = lambda delay, callback: callback()
+
+        window.on_plc_magnet_completed(
+            window.plc_magnet_generation,
+            {
+                "ok": True,
+                "result": "OK",
+                "left_result": 1,
+                "right_result": 1,
+            },
+        )
+
+        self.assertTrue(magnet.done)
+        self.assertEqual(window.current_step_index, 1)
+        self.assertFalse(following.done)
+
+    def test_plc_magnet_ng_does_not_advance(self):
+        window = self.make_window()
+        magnet = ProcessStep(
+            "PLC磁通检测获取",
+            PLC_MAGNET,
+            step_id=99,
+            plc_magnet_config={"plc_ip": "192.168.111.50"},
+        )
+        window.current_product = ProductConfig("磁通测试", [magnet])
+        window.current_station.product = window.current_product
+        window.current_step_index = 0
+        window.current_barcode = "B001"
+        window.online_mode = False
+
+        window.on_plc_magnet_completed(
+            window.plc_magnet_generation,
+            {
+                "ok": False,
+                "result": "NG",
+                "error_message": "左右磁通判定未全部合格",
+            },
+        )
+
+        self.assertFalse(magnet.done)
         self.assertEqual(window.current_step_index, 0)
 
     def test_global_scanner_capture_handles_fast_barcode_once(self):
@@ -878,7 +962,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             )
             self.assertEqual(
                 generated.getint("TOOL", "fast_capture_poll_ms"),
-                50,
+                100,
             )
 
     def test_restore_defaults_uses_new_direction_protocol(self):
@@ -896,9 +980,9 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_reverse_value_input.value(), 2)
         self.assertEqual(window.tool_command_delay_input.value(), 50)
         self.assertEqual(window.tool_poll_interval_input.value(), 800)
-        self.assertEqual(window.tool_pending_status_values, {1})
-        self.assertEqual(window.tool_final_status_wait_ms, 1000)
-        self.assertEqual(window.tool_final_status_poll_ms, 50)
+        self.assertEqual(window.tool_pending_status_values, {1, 4})
+        self.assertEqual(window.tool_final_status_wait_ms, 3000)
+        self.assertEqual(window.tool_final_status_poll_ms, 100)
         self.assertEqual(window.tool_active_poll_interval_ms, 100)
         self.assertEqual(window.tool_direction_stable_reads, 2)
 
@@ -916,9 +1000,9 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(window.tool_forward_value_input.value(), 9)
             self.assertEqual(window.tool_reverse_value_input.value(), 8)
             self.assertEqual(window.tool_command_delay_input.value(), 50)
-            self.assertEqual(window.tool_pending_status_values, {1})
-            self.assertEqual(window.tool_final_status_wait_ms, 1000)
-            self.assertEqual(window.tool_final_status_poll_ms, 50)
+            self.assertEqual(window.tool_pending_status_values, {1, 4})
+            self.assertEqual(window.tool_final_status_wait_ms, 3000)
+            self.assertEqual(window.tool_final_status_poll_ms, 100)
             self.assertEqual(window.tool_active_poll_interval_ms, 100)
             self.assertEqual(window.tool_direction_stable_reads, 2)
             updated = configparser.ConfigParser()
@@ -968,8 +1052,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(loaded.tool_port_input.value(), 1502)
             self.assertEqual(loaded.tool_unit_input.value(), 2)
             self.assertEqual(loaded.tool_status_register_input.value(), 101)
-            self.assertEqual(loaded.tool_ok_value_input.value(), 20)
-            self.assertEqual(loaded.tool_ng_value_input.value(), 30)
+            self.assertEqual(loaded.tool_ok_value_input.value(), 2)
+            self.assertEqual(loaded.tool_ng_value_input.value(), 3)
             self.assertEqual(loaded.tool_trigger_register_input.value(), 54)
             self.assertEqual(loaded.tool_trigger_value_input.value(), 9)
             self.assertEqual(loaded.tool_trigger_reset_value_input.value(), 8)
@@ -980,7 +1064,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(loaded.tool_forward_value_input.value(), 10)
             self.assertEqual(loaded.tool_reverse_value_input.value(), 11)
             self.assertEqual(loaded.tool_command_delay_input.value(), 75)
-            self.assertEqual(loaded.tool_pending_status_values, {1, 5})
+            self.assertEqual(loaded.tool_pending_status_values, {1, 4, 5})
             self.assertEqual(loaded.tool_final_status_wait_ms, 1800)
             self.assertEqual(loaded.tool_final_status_poll_ms, 150)
             self.assertEqual(loaded.tool_active_poll_interval_ms, 250)
@@ -1197,9 +1281,39 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertFalse(window.tool_ng_locked)
         self.assertNotIn((4, 2), writes)
         self.assertIn(
-            "status=4残留，trigger=0，忽略，不判NG",
+            "status=4-暂停/待确认残留，trigger=0，忽略，不处理",
             "\n".join(captured.output),
         )
+
+    def test_trigger_zero_ignores_all_result_residue(self):
+        for status in (2, 3, 4):
+            with self.subTest(status=status):
+                window = self.make_window()
+                self.set_current_step_to_screw(window)
+                calls = {"ok": 0, "dialog": 0, "writes": []}
+                window.handle_screw_ok = lambda: calls.__setitem__(
+                    "ok", calls["ok"] + 1
+                )
+                window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+                    "dialog", calls["dialog"] + 1
+                )
+                window.write_tool_register = (
+                    lambda register, value: calls["writes"].append(
+                        (register, value)
+                    )
+                    or True
+                )
+
+                window.process_tool_poll_result(
+                    status=status,
+                    trigger=0,
+                    direction=3,
+                )
+
+                self.assertEqual(calls["ok"], 0)
+                self.assertEqual(calls["dialog"], 0)
+                self.assertFalse(window.tool_ng_locked)
+                self.assertNotIn((4, 2), calls["writes"])
 
     def test_running_direction_never_locks_without_trigger(self):
         window = self.make_window()
@@ -1291,7 +1405,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             direction=1,
         )
         window.process_tool_poll_result(
-            status=4,
+            status=3,
             trigger=1,
             direction=3,
         )
@@ -1301,7 +1415,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
 
-    def test_running_trigger_timeout_locks_and_clears(self):
+    def test_running_trigger_timeout_clears_without_admin_lock(self):
         window = self.make_window()
         self.set_current_step_to_screw(window)
         window.tool_final_status_wait_ms = 1000
@@ -1329,9 +1443,9 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             direction=1,
         )
 
-        self.assertTrue(window.manual_lock_active)
-        self.assertEqual(calls["dialog"], 1)
-        self.assertIn((4, 2), calls["writes"])
+        self.assertFalse(window.manual_lock_active)
+        self.assertEqual(calls["dialog"], 0)
+        self.assertNotIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
 
     def test_degraded_mode_ignores_direction_changes(self):
@@ -1379,7 +1493,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
 
-    def test_forward_direction_status_four_is_also_ng(self):
+    def test_forward_direction_status_four_waits_without_ng(self):
         window = self.make_window()
         self.set_current_step_to_screw(window)
         calls = {"dialog": 0, "writes": []}
@@ -1393,10 +1507,91 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
         window.process_tool_poll_result(status=4, trigger=1, direction=3)
 
+        self.assertFalse(window.tool_ng_locked)
+        self.assertEqual(calls["dialog"], 0)
+        self.assertNotIn((4, 2), calls["writes"])
+        self.assertNotIn((53, 0), calls["writes"])
+        self.assertTrue(window.tool_pending_result_active)
+        self.assertEqual(
+            window.tightening_status_text(4),
+            "暂停/待确认",
+        )
+
+    def test_pause_status_then_ok_counts_and_clears(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"ok": 0, "dialog": 0, "writes": []}
+        window.handle_screw_ok = lambda: calls.__setitem__(
+            "ok", calls["ok"] + 1
+        )
+        window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+            "dialog", calls["dialog"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 1100.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        window.process_tool_poll_result(status=4, trigger=1, direction=3)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+
+        self.assertEqual(calls["ok"], 1)
+        self.assertEqual(calls["dialog"], 0)
+        self.assertIn((53, 0), calls["writes"])
+
+    def test_pause_status_then_ng_locks_and_prompts(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"dialog": 0, "writes": []}
+        window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+            "dialog", calls["dialog"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 1100.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        window.process_tool_poll_result(status=4, trigger=1, direction=3)
+        window.process_tool_poll_result(status=3, trigger=1, direction=3)
+
         self.assertTrue(window.tool_ng_locked)
         self.assertEqual(calls["dialog"], 1)
         self.assertIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
+
+    def test_pause_timeout_can_keep_trigger_without_admin(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.tool_final_status_wait_ms = 1000
+        window.clear_trigger_on_pause_timeout = False
+        calls = {"dialog": 0, "writes": []}
+        window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+            "dialog", calls["dialog"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 2001.0, 2001.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        window.process_tool_poll_result(status=4, trigger=1, direction=3)
+        window.process_tool_poll_result(status=4, trigger=1, direction=3)
+
+        self.assertFalse(window.tool_ng_locked)
+        self.assertFalse(window.manual_lock_active)
+        self.assertEqual(calls["dialog"], 0)
+        self.assertNotIn((53, 0), calls["writes"])
 
     def test_pending_status_then_ok_counts_and_only_then_clears_trigger(self):
         window = self.make_window()
@@ -1425,8 +1620,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(calls["ok"], 1)
         self.assertIn((53, 0), calls["writes"])
 
-    def test_pending_status_then_each_ng_value_locks_and_clears(self):
-        for final_status in (3, 4):
+    def test_pending_status_then_ng_locks_and_clears(self):
+        for final_status in (3,):
             with self.subTest(final_status=final_status):
                 window = self.make_window()
                 self.set_current_step_to_screw(window)
@@ -1460,7 +1655,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
                 self.assertIn((4, 2), calls["writes"])
                 self.assertIn((53, 0), calls["writes"])
 
-    def test_pending_status_timeout_locks_and_requires_admin(self):
+    def test_pending_status_timeout_clears_without_admin(self):
         window = self.make_window()
         self.set_current_step_to_screw(window)
         calls = {"dialog": 0, "writes": []}
@@ -1490,12 +1685,12 @@ class DesktopMainBarcodeTest(unittest.TestCase):
                 direction=3,
             )
 
-        self.assertTrue(window.manual_lock_active)
+        self.assertFalse(window.manual_lock_active)
         self.assertFalse(window.tool_pending_result_active)
-        self.assertEqual(calls["dialog"], 1)
-        self.assertIn((4, 2), calls["writes"])
+        self.assertEqual(calls["dialog"], 0)
+        self.assertNotIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
-        self.assertIn("结果状态未确认", window.message_label.text())
+        self.assertIn("暂停/结果未完成", window.message_label.text())
         self.assertIn("进入快速等待最终结果", "\n".join(captured.output))
 
     def test_reverse_direction_blocks_admin_unlock(self):

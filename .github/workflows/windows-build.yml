@@ -27,6 +27,12 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -r requirements-client.txt -r requirements-dev.txt
 
+      - name: Run critical production tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          python -m unittest tests.test_tool_worker tests.test_plc_magnet_flow tests.test_desktop_main_barcode
+
       - name: Build quality control exe
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed --name QualityControlSystem main.py

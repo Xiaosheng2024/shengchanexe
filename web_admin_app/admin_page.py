@@ -187,6 +187,7 @@ HTML = r"""<!doctype html>
               <option value="扫码">条码扫描</option>
               <option value="螺丝">螺丝数量</option>
               <option value="PLC接收">PLC接收</option>
+              <option value="PLC磁通检测获取">PLC磁通检测获取</option>
               <option value="主条码切换">主条码切换</option>
               <option value="子物料绑定">子物料绑定</option>
             </select>
@@ -234,6 +235,42 @@ HTML = r"""<!doctype html>
               <label>超时秒</label><input id="plcTimeoutSeconds" type="number" value="3">
               <label>等待OK秒</label><input id="plcBarcodeWaitOkTimeoutSeconds" type="number" value="30">
             </div>
+          </div>
+          <div id="plcMagnetFields" style="display:none">
+            <div class="toolbar">
+              <label class="checkbox-label"><input id="magnetPlcEnabled" type="checkbox" checked> 启用PLC</label>
+              <label>PLC IP</label><input id="magnetPlcIp" value="192.168.111.50">
+              <label>Rack</label><input id="magnetPlcRack" type="number" value="0">
+              <label>Slot</label><input id="magnetPlcSlot" type="number" value="1">
+              <label>DB</label><input id="magnetPlcDb" type="number" value="221">
+            </div>
+            <div class="toolbar">
+              <label>轮询ms</label><input id="magnetPollMs" type="number" value="500">
+              <label>超时秒</label><input id="magnetTimeoutSeconds" type="number" value="30">
+              <label>块起始</label><input id="magnetBlockStart" type="number" value="0">
+              <label>块长度</label><input id="magnetBlockSize" type="number" min="26" value="26">
+              <label>OK值</label><input id="magnetOkValue" type="number" value="1">
+            </div>
+            <div class="toolbar">
+              <label>DBW0准备</label><input id="magnetBarcodeOkOffset" type="number" value="0">
+              <label>DBW2夹紧</label><input id="magnetCylinderOffset" type="number" value="2">
+              <label>DBW4拧紧</label><input id="magnetScrewOffset" type="number" value="4">
+              <label>DBW6检测完成</label><input id="magnetCompleteOffset" type="number" value="6">
+              <label>DBW8结束</label><input id="magnetReadDoneOffset" type="number" value="8">
+            </div>
+            <div class="toolbar">
+              <label>DBD10左磁通</label><input id="magnetLeftFluxOffset" type="number" value="10">
+              <label>DBW14左极性</label><input id="magnetLeftPolarityOffset" type="number" value="14">
+              <label>DBW16左判定</label><input id="magnetLeftResultOffset" type="number" value="16">
+              <label>DBD18右磁通</label><input id="magnetRightFluxOffset" type="number" value="18">
+              <label>DBW22右极性</label><input id="magnetRightPolarityOffset" type="number" value="22">
+              <label>DBW24右判定</label><input id="magnetRightResultOffset" type="number" value="24">
+            </div>
+            <div class="toolbar">
+              <label>写入读回次数</label><input id="magnetVerifyRetries" type="number" min="1" value="3">
+              <label>读回间隔ms</label><input id="magnetVerifyInterval" type="number" value="100">
+            </div>
+            <p class="hint">MES只写整数1且必须读回确认；DBW0、DBW4、DBW8由PLC复位，原始块最少读取26字节。</p>
           </div>
           <div id="switchFields" style="display:none">
             <div class="toolbar">
@@ -1078,12 +1115,14 @@ HTML = r"""<!doctype html>
       const type = document.getElementById("stepType").value;
       const isScrew = type === "螺丝";
       const isPlc = type === "PLC接收";
+      const isMagnet = type === "PLC磁通检测获取";
       const isScan = type === "扫码";
       const isSwitch = type === "主条码切换";
       const isBind = type === "子物料绑定";
       document.getElementById("barcodeFields").style.display = isScan ? "flex" : "none";
       document.getElementById("screwFields").style.display = isScrew ? "flex" : "none";
       document.getElementById("plcFields").style.display = isPlc ? "block" : "none";
+      document.getElementById("plcMagnetFields").style.display = isMagnet ? "block" : "none";
       document.getElementById("switchFields").style.display = isSwitch ? "block" : "none";
       document.getElementById("bindFields").style.display = isBind ? "block" : "none";
       const mainBarcode = document.getElementById("isMainBarcode");
@@ -1145,6 +1184,31 @@ HTML = r"""<!doctype html>
         plc_timeout_seconds: Number(document.getElementById("plcTimeoutSeconds").value || 3),
         plc_poll_interval_ms: Number(document.getElementById("plcPollIntervalMs").value || 500),
         plc_barcode_wait_ok_timeout_seconds: Number(document.getElementById("plcBarcodeWaitOkTimeoutSeconds").value || 30),
+        plc_magnet_config: {
+          plc_enabled: document.getElementById("magnetPlcEnabled").checked,
+          plc_ip: document.getElementById("magnetPlcIp").value.trim(),
+          plc_rack: Number(document.getElementById("magnetPlcRack").value || 0),
+          plc_slot: Number(document.getElementById("magnetPlcSlot").value || 1),
+          plc_db: Number(document.getElementById("magnetPlcDb").value || 221),
+          plc_poll_interval_ms: Number(document.getElementById("magnetPollMs").value || 500),
+          plc_timeout_seconds: Number(document.getElementById("magnetTimeoutSeconds").value || 30),
+          barcode_ok_offset: Number(document.getElementById("magnetBarcodeOkOffset").value || 0),
+          cylinder_clamped_offset: Number(document.getElementById("magnetCylinderOffset").value || 2),
+          screw_complete_offset: Number(document.getElementById("magnetScrewOffset").value || 4),
+          magnet_complete_offset: Number(document.getElementById("magnetCompleteOffset").value || 6),
+          mes_read_done_offset: Number(document.getElementById("magnetReadDoneOffset").value || 8),
+          left_flux_offset: Number(document.getElementById("magnetLeftFluxOffset").value || 10),
+          left_polarity_offset: Number(document.getElementById("magnetLeftPolarityOffset").value || 14),
+          left_result_offset: Number(document.getElementById("magnetLeftResultOffset").value || 16),
+          right_flux_offset: Number(document.getElementById("magnetRightFluxOffset").value || 18),
+          right_polarity_offset: Number(document.getElementById("magnetRightPolarityOffset").value || 22),
+          right_result_offset: Number(document.getElementById("magnetRightResultOffset").value || 24),
+          ok_value: Number(document.getElementById("magnetOkValue").value || 1),
+          read_block_start: Number(document.getElementById("magnetBlockStart").value || 0),
+          read_block_size: Number(document.getElementById("magnetBlockSize").value || 26),
+          write_verify_retry_count: Number(document.getElementById("magnetVerifyRetries").value || 3),
+          write_verify_interval_ms: Number(document.getElementById("magnetVerifyInterval").value || 100)
+        },
         switch_require_old: document.getElementById("switchRequireOld").checked,
         switch_require_new: document.getElementById("switchRequireNew").checked,
         switch_set_current: document.getElementById("switchSetCurrent").checked,
@@ -1189,6 +1253,30 @@ HTML = r"""<!doctype html>
       document.getElementById("plcPollIntervalMs").value = step.plc_poll_interval_ms ?? 500;
       document.getElementById("plcTimeoutSeconds").value = step.plc_timeout_seconds ?? 3;
       document.getElementById("plcBarcodeWaitOkTimeoutSeconds").value = step.plc_barcode_wait_ok_timeout_seconds ?? 30;
+      const magnet = step.plc_magnet_config || {};
+      document.getElementById("magnetPlcEnabled").checked = magnet.plc_enabled ?? true;
+      document.getElementById("magnetPlcIp").value = magnet.plc_ip || "192.168.111.50";
+      document.getElementById("magnetPlcRack").value = magnet.plc_rack ?? 0;
+      document.getElementById("magnetPlcSlot").value = magnet.plc_slot ?? 1;
+      document.getElementById("magnetPlcDb").value = magnet.plc_db ?? 221;
+      document.getElementById("magnetPollMs").value = magnet.plc_poll_interval_ms ?? 500;
+      document.getElementById("magnetTimeoutSeconds").value = magnet.plc_timeout_seconds ?? 30;
+      document.getElementById("magnetBarcodeOkOffset").value = magnet.barcode_ok_offset ?? 0;
+      document.getElementById("magnetCylinderOffset").value = magnet.cylinder_clamped_offset ?? 2;
+      document.getElementById("magnetScrewOffset").value = magnet.screw_complete_offset ?? 4;
+      document.getElementById("magnetCompleteOffset").value = magnet.magnet_complete_offset ?? 6;
+      document.getElementById("magnetReadDoneOffset").value = magnet.mes_read_done_offset ?? 8;
+      document.getElementById("magnetLeftFluxOffset").value = magnet.left_flux_offset ?? 10;
+      document.getElementById("magnetLeftPolarityOffset").value = magnet.left_polarity_offset ?? 14;
+      document.getElementById("magnetLeftResultOffset").value = magnet.left_result_offset ?? 16;
+      document.getElementById("magnetRightFluxOffset").value = magnet.right_flux_offset ?? 18;
+      document.getElementById("magnetRightPolarityOffset").value = magnet.right_polarity_offset ?? 22;
+      document.getElementById("magnetRightResultOffset").value = magnet.right_result_offset ?? 24;
+      document.getElementById("magnetOkValue").value = magnet.ok_value ?? 1;
+      document.getElementById("magnetBlockStart").value = magnet.read_block_start ?? 0;
+      document.getElementById("magnetBlockSize").value = magnet.read_block_size ?? 26;
+      document.getElementById("magnetVerifyRetries").value = magnet.write_verify_retry_count ?? 3;
+      document.getElementById("magnetVerifyInterval").value = magnet.write_verify_interval_ms ?? 100;
       document.getElementById("switchRequireOld").checked = step.switch_require_old ?? true;
       document.getElementById("switchRequireNew").checked = step.switch_require_new ?? true;
       document.getElementById("switchSetCurrent").checked = step.switch_set_current ?? true;

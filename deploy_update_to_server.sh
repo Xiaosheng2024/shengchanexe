@@ -24,6 +24,7 @@ for required_file in \
   "${DIST_DIR}/mes_update.tar.gz" \
   "${DIST_DIR}/offline_wheels.tar.gz" \
   "${DIST_DIR}/deploy_commit.txt" \
+  "${DIST_DIR}/DEPLOY_NOTES.txt" \
   "${DIST_DIR}/SHA256SUMS"; do
   if [ ! -f "${required_file}" ]; then
     echo "错误：缺少 ${required_file}，请先在外网执行 prepare_update_package.sh。" >&2
@@ -153,6 +154,49 @@ echo "== 执行数据库初始化/迁移 =="
 sudo "${VIRTUAL_ENV}/bin/python" -c \
   "from web_admin_app.database import init_db; init_db()"
 
+echo "== 验证 PLC磁通数据库迁移 =="
+sudo "${VIRTUAL_ENV}/bin/python" - <<'PY'
+from web_admin_app.database import get_conn, get_database_type
+
+with get_conn() as conn:
+    if get_database_type() == "postgresql":
+        columns = {
+            row["column_name"]
+            for row in conn.execute(
+                """
+                SELECT column_name
+                FROM information_schema.columns
+                WHERE table_name = 'steps'
+                """
+            ).fetchall()
+        }
+        tables = {
+            row["table_name"]
+            for row in conn.execute(
+                """
+                SELECT table_name
+                FROM information_schema.tables
+                WHERE table_schema = 'public'
+                """
+            ).fetchall()
+        }
+    else:
+        columns = {
+            row["name"]
+            for row in conn.execute("PRAGMA table_info(steps)").fetchall()
+        }
+        tables = {
+            row["name"]
+            for row in conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table'"
+            ).fetchall()
+        }
+
+assert "plc_magnet_config" in columns, "steps.plc_magnet_config 迁移失败"
+assert "plc_magnet_logs" in tables, "plc_magnet_logs 建表失败"
+print("PLC_MAGNET_MIGRATION_OK")
+PY
+
 echo "== 启动并验证服务 =="
 sudo systemctl start "${MES_SERVICE}"
 sleep 3
@@ -179,4 +223,5 @@ echo "数据库备份路径：${DB_BACKUP}"
 echo "代码备份路径：${CODE_BACKUP}"
 echo "mes-web 状态：$(sudo systemctl is-active "${MES_SERVICE}")"
 echo "Web 访问地址：http://10.162.70.53:8000"
+echo "数据库迁移：PLC_MAGNET_MIGRATION_OK"
 REMOTE_SCRIPT

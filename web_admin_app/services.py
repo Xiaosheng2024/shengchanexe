@@ -25,7 +25,14 @@ RELEASES_DIR = Path("/opt/mes/releases") if Path("/opt/mes").exists() else ROOT_
 CLIENT_UPDATES_DIR = RELEASES_DIR / "client_updates"
 UPLOADS_DIR = Path("/opt/mes/uploads") if Path("/opt/mes").exists() else ROOT_DIR / "uploads"
 MAX_CLIENT_UPDATE_FILE_BYTES = 220 * 1024 * 1024
-MAINTENANCE_TABLES = ["scan_records", "station_work_records", "step_work_records", "screw_action_records", "station_session_logs"]
+MAINTENANCE_TABLES = [
+    "scan_records",
+    "station_work_records",
+    "step_work_records",
+    "screw_action_records",
+    "plc_magnet_logs",
+    "station_session_logs",
+]
 
 
 def table_time_column(table):
@@ -33,6 +40,7 @@ def table_time_column(table):
 SCAN_TYPE = "扫码"
 SCREW_TYPE = "螺丝"
 PLC_TYPE = "PLC接收"
+PLC_MAGNET_TYPE = "PLC磁通检测获取"
 BARCODE_SWITCH_TYPE = "主条码切换"
 MATERIAL_BIND_TYPE = "子物料绑定"
 STATION_ROLES = {
@@ -51,6 +59,7 @@ STEP_TYPES = (
     SCAN_TYPE,
     SCREW_TYPE,
     PLC_TYPE,
+    PLC_MAGNET_TYPE,
     BARCODE_SWITCH_TYPE,
     MATERIAL_BIND_TYPE,
 )
@@ -81,6 +90,31 @@ PLC_DEFAULTS = {
     "plc_timeout_seconds": 3,
     "plc_poll_interval_ms": 500,
     "plc_barcode_wait_ok_timeout_seconds": 30,
+}
+PLC_MAGNET_DEFAULTS = {
+    "plc_enabled": True,
+    "plc_ip": "192.168.111.50",
+    "plc_rack": 0,
+    "plc_slot": 1,
+    "plc_db": 221,
+    "plc_poll_interval_ms": 500,
+    "plc_timeout_seconds": 30,
+    "barcode_ok_offset": 0,
+    "cylinder_clamped_offset": 2,
+    "screw_complete_offset": 4,
+    "magnet_complete_offset": 6,
+    "mes_read_done_offset": 8,
+    "left_flux_offset": 10,
+    "left_polarity_offset": 14,
+    "left_result_offset": 16,
+    "right_flux_offset": 18,
+    "right_polarity_offset": 22,
+    "right_result_offset": 24,
+    "ok_value": 1,
+    "read_block_start": 0,
+    "read_block_size": 26,
+    "write_verify_retry_count": 3,
+    "write_verify_interval_ms": 100,
 }
 STATION_SESSION_TIMEOUT_SECONDS = 120
 
@@ -910,6 +944,7 @@ def delete_station_with_conn(conn, station_id):
     conn.execute("DELETE FROM scan_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM station_completions WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM screw_action_records WHERE station_id = ?", (station_id,))
+    conn.execute("DELETE FROM plc_magnet_logs WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM step_work_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM station_work_records WHERE station_id = ?", (station_id,))
     conn.execute("DELETE FROM station_session_logs WHERE station_id = ?", (station_id,))
@@ -933,7 +968,7 @@ def add_step(payload):
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
     if step_type not in STEP_TYPES:
-        raise ValueError("功能只能是扫码、螺丝、PLC接收、主条码切换或子物料绑定")
+        raise ValueError("功能只能是扫码、螺丝、PLC接收、PLC磁通检测获取、主条码切换或子物料绑定")
     with get_conn() as conn:
         validate_flow_step_payload(conn, payload, step_type)
         if is_main_barcode:
@@ -966,6 +1001,7 @@ def add_step(payload):
             ),
         )
         update_step_flow_config(conn, cursor.lastrowid, payload)
+        update_step_magnet_config(conn, cursor.lastrowid, payload, step_type)
         validate_station_main_barcode(conn, station_id)
         return {"id": cursor.lastrowid}
 
@@ -978,7 +1014,7 @@ def update_step(step_id, payload):
     if not station_id or not name:
         raise ValueError("工位和工序名称不能为空")
     if step_type not in STEP_TYPES:
-        raise ValueError("功能只能是扫码、螺丝、PLC接收、主条码切换或子物料绑定")
+        raise ValueError("功能只能是扫码、螺丝、PLC接收、PLC磁通检测获取、主条码切换或子物料绑定")
     with get_conn() as conn:
         validate_flow_step_payload(conn, payload, step_type)
         old_row = conn.execute("SELECT station_id FROM steps WHERE id = ?", (step_id,)).fetchone()
@@ -1014,6 +1050,7 @@ def update_step(step_id, payload):
             ),
         )
         update_step_flow_config(conn, step_id, payload)
+        update_step_magnet_config(conn, step_id, payload, step_type)
         if old_row and old_row["station_id"] != station_id:
             validate_station_main_barcode(conn, old_row["station_id"])
         validate_station_main_barcode(conn, station_id)
@@ -1034,6 +1071,7 @@ def list_steps(station_id):
         step["bind_required_station_ids"] = product_flow.int_list(
             step.get("bind_required_station_ids")
         )
+        step["plc_magnet_config"] = magnet_step_config(step)
     return steps
 
 
@@ -1050,6 +1088,7 @@ def station_config_step(step):
         "is_main_barcode": bool(step.get("is_main_barcode", False)),
         **flow_step_config(step),
         **plc_step_config(step),
+        "plc_magnet_config": magnet_step_config(step),
     }
 
 
@@ -1164,6 +1203,55 @@ def update_step_flow_config(conn, step_id, payload):
             step_id,
         ),
     )
+
+
+def normalized_magnet_config(payload):
+    source = payload.get("plc_magnet_config") or {}
+    if isinstance(source, str):
+        try:
+            source = json.loads(source)
+        except (TypeError, ValueError):
+            source = {}
+    values = dict(PLC_MAGNET_DEFAULTS)
+    for key in values:
+        if key in source and source[key] not in ("", None):
+            values[key] = source[key]
+        elif key in payload and payload[key] not in ("", None):
+            values[key] = payload[key]
+    bool_keys = {"plc_enabled"}
+    int_keys = set(values) - {"plc_ip"} - bool_keys
+    for key in bool_keys:
+        values[key] = bool(values[key])
+    for key in int_keys:
+        values[key] = int(values[key])
+    if values["read_block_size"] < 26:
+        raise ValueError("PLC磁通检测原始块读取长度不能小于26字节")
+    if values["write_verify_retry_count"] < 1:
+        raise ValueError("PLC磁通检测写入读回次数至少为1")
+    return values
+
+
+def update_step_magnet_config(conn, step_id, payload, step_type):
+    config = (
+        normalized_magnet_config(payload)
+        if step_type == PLC_MAGNET_TYPE
+        else {}
+    )
+    conn.execute(
+        "UPDATE steps SET plc_magnet_config = ? WHERE id = ?",
+        (json.dumps(config, ensure_ascii=False), step_id),
+    )
+
+
+def magnet_step_config(step):
+    keys = step.keys() if hasattr(step, "keys") else []
+    raw = step["plc_magnet_config"] if "plc_magnet_config" in keys else {}
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except (TypeError, ValueError):
+            raw = {}
+    return normalized_magnet_config({"plc_magnet_config": raw})
 
 
 def validate_flow_step_payload(conn, payload, step_type):
@@ -2236,6 +2324,42 @@ def add_screw_record(payload):
                 payload.get("result", ""),
                 bool(payload.get("is_counted", False)),
                 payload.get("ng_reason", ""),
+            ),
+        )
+    return {"id": cursor.lastrowid}
+
+
+def add_plc_magnet_log(payload):
+    with get_conn() as conn:
+        project_id, station_id = record_project_station_ids(conn, payload)
+        cursor = conn.execute(
+            """
+            INSERT INTO plc_magnet_logs
+            (project_id, station_id, step_id, product_barcode,
+             plc_ip, plc_db, left_flux, left_polarity, left_result,
+             right_flux, right_polarity, right_result, raw_hex,
+             started_at, finished_at, result, error_message)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                project_id,
+                station_id,
+                int(payload.get("step_id") or 0) or None,
+                payload.get("product_barcode")
+                or payload.get("main_barcode", ""),
+                payload.get("plc_ip", ""),
+                int(payload.get("plc_db") or 221),
+                payload.get("left_flux"),
+                payload.get("left_polarity"),
+                payload.get("left_result"),
+                payload.get("right_flux"),
+                payload.get("right_polarity"),
+                payload.get("right_result"),
+                payload.get("raw_hex", ""),
+                payload.get("started_at") or now_text(),
+                payload.get("finished_at") or now_text(),
+                payload.get("result", "ERROR"),
+                payload.get("error_message", ""),
             ),
         )
     return {"id": cursor.lastrowid}

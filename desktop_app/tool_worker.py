@@ -23,9 +23,9 @@ class ToolPollConfig:
     unlock_value: int = 1
     command_delay_ms: int = 50
     reconnect_interval_seconds: float = 2.0
-    pending_status_values: Tuple[int, ...] = (1,)
-    final_status_values: Tuple[int, ...] = (2, 3, 4)
-    final_status_poll_ms: int = 50
+    pending_status_values: Tuple[int, ...] = (1, 4)
+    final_status_values: Tuple[int, ...] = (2, 3)
+    final_status_poll_ms: int = 100
     active_poll_interval_ms: int = 100
     transitional_direction_values: Tuple[int, ...] = (1,)
 
@@ -139,18 +139,20 @@ class ToolPollWorker(QObject):
             transitional_directions = set(
                 self.config.transitional_direction_values
             )
+            final_statuses = set(self.config.final_status_values)
             if (
                 trigger == 1
                 and (
                     status in set(self.config.pending_status_values)
                     or direction in transitional_directions
+                    or status not in final_statuses
                 )
             ):
                 self.pending_result_active = True
             elif (
                 trigger != 1
                 or (
-                    status in set(self.config.final_status_values)
+                    status in final_statuses
                     and direction not in transitional_directions
                 )
             ):

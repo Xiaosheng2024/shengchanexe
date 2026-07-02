@@ -60,6 +60,17 @@ if tar -tzf "${DIST_DIR}/mes_update.tar.gz" \
   echo "错误：源码更新包包含禁止部署的文件。" >&2
   exit 1
 fi
+for required_path in \
+  "./shared/plc_magnet_flow.py" \
+  "./desktop_app/plc_magnet_worker.py" \
+  "./web_admin_app/database.py" \
+  "./web_admin_app/admin_page.py"; do
+  if ! tar -tzf "${DIST_DIR}/mes_update.tar.gz" \
+    | grep -Fxq "${required_path}"; then
+    echo "错误：源码更新包缺少 ${required_path}。" >&2
+    exit 1
+  fi
+done
 
 echo "== 准备服务端离线依赖 =="
 # 保留调用者要求的当前 Mac/Python 下载结果。
@@ -82,6 +93,13 @@ tar -czf "${DIST_DIR}/offline_wheels.tar.gz" \
   .
 
 printf '%s\n' "${DEPLOY_COMMIT}" > "${DIST_DIR}/deploy_commit.txt"
+cat > "${DIST_DIR}/DEPLOY_NOTES.txt" <<EOF
+commit=${DEPLOY_COMMIT}
+version=v0.9.3-rc3
+database_migration=steps.plc_magnet_config, plc_magnet_logs
+server_restart=mes-web
+windows_artifacts=QualityControlSystem.exe, QualityControlSystem_Debug.exe
+EOF
 
 {
   sha256_file "${DIST_DIR}/mes_update.tar.gz"
@@ -93,4 +111,5 @@ echo "更新包准备完成："
 echo "  ${DIST_DIR}/mes_update.tar.gz"
 echo "  ${DIST_DIR}/offline_wheels.tar.gz"
 echo "  ${DIST_DIR}/SHA256SUMS"
+echo "  ${DIST_DIR}/DEPLOY_NOTES.txt"
 echo "  commit=${DEPLOY_COMMIT}"

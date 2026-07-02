@@ -5,6 +5,7 @@ from typing import List, Optional
 SCAN = "扫码"
 SCREW = "螺丝"
 PLC = "PLC接收"
+PLC_MAGNET = "PLC磁通检测获取"
 BARCODE_SWITCH = "主条码切换"
 MATERIAL_BIND = "子物料绑定"
 
@@ -41,6 +42,7 @@ class ProcessStep:
     plc_timeout_seconds: int = 3
     plc_poll_interval_ms: int = 500
     plc_barcode_wait_ok_timeout_seconds: int = 30
+    plc_magnet_config: dict = field(default_factory=dict)
     step_id: Optional[int] = None
     switch_require_old: bool = True
     switch_require_new: bool = True

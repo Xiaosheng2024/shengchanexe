@@ -378,6 +378,24 @@ class WebAdminAuthTest(unittest.TestCase):
         self.assertEqual(status, 200)
         self.assertTrue(degraded["ok"])
 
+        status, magnet = self.json_request(
+            self.opener(),
+            "/api/client/plc-magnet/log",
+            method="POST",
+            payload=dict(
+                session_payload,
+                step_id=1,
+                product_barcode="MAGNET-001",
+                plc_ip="192.168.111.50",
+                plc_db=221,
+                left_result=1,
+                right_result=1,
+                result="OK",
+            ),
+        )
+        self.assertEqual(status, 200)
+        self.assertGreater(magnet["id"], 0)
+
     def test_station_session_rejects_mismatched_station_without_web_401(self):
         project = database.fetch_one(
             "SELECT id FROM projects ORDER BY id LIMIT 1"

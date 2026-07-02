@@ -46,10 +46,13 @@ from PyQt5.QtWidgets import (
 
 from desktop_app.tool_worker import ToolPollConfig, ToolPollWorker
 from desktop_app.plc_worker import PlcPollConfig, PlcPollWorker
+from desktop_app.plc_magnet_worker import PlcMagnetWorker
+from shared.plc_magnet_flow import PlcMagnetConfig
 from shared.models import (
     BARCODE_SWITCH,
     MATERIAL_BIND,
     PLC,
+    PLC_MAGNET,
     SCAN,
     SCREW,
     ProcessStep,
@@ -59,7 +62,7 @@ from shared.models import (
 )
 
 
-APP_VERSION = "v0.9.3-rc2"
+APP_VERSION = "v0.9.3-rc3"
 SYSTEM_NAME = "关键工位防错追溯系统"
 DEFAULT_MES_SERVER_URL = "http://10.162.70.53:8000"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
@@ -68,8 +71,8 @@ DEFAULT_TOOL_REVERSE_VALUE = 2
 DEFAULT_TOOL_COMMAND_DELAY_MS = 50
 DEFAULT_TOOL_POLL_INTERVAL_MS = 800
 DEFAULT_TOOL_ACTIVE_POLL_INTERVAL_MS = 100
-DEFAULT_TOOL_FAST_CAPTURE_POLL_MS = 50
-DEFAULT_TOOL_FINAL_RESULT_WAIT_MS = 1000
+DEFAULT_TOOL_FAST_CAPTURE_POLL_MS = 100
+DEFAULT_TOOL_FINAL_RESULT_WAIT_MS = 3000
 DEFAULT_TOOL_RUNNING_DIRECTION_VALUE = 1
 CLIENT_SESSION_API_PATHS = {
     "/api/station-completions",
@@ -84,6 +87,7 @@ CLIENT_SESSION_API_PATHS = {
     "/api/client/barcode/validate",
     "/api/client/barcode/cancel",
     "/api/client/tool/degrade-mode/report",
+    "/api/client/plc-magnet/log",
 }
 CLIENT_SESSION_GET_PATHS = {
     "/api/station-completions/check",
@@ -353,6 +357,11 @@ class QualityControlWindow(QMainWindow):
         self.tool_worker: Optional[ToolPollWorker] = None
         self.plc_thread: Optional[QThread] = None
         self.plc_worker: Optional[PlcPollWorker] = None
+        self.plc_magnet_thread: Optional[QThread] = None
+        self.plc_magnet_worker: Optional[PlcMagnetWorker] = None
+        self.plc_magnet_generation = 0
+        self.plc_magnet_started_at: Optional[datetime] = None
+        self.plc_magnet_stage_status = {}
         self.plc_worker_generation = 0
         self.tool_worker_generation = 0
         self.client_version = self.load_local_version()
@@ -380,8 +389,11 @@ class QualityControlWindow(QMainWindow):
         self.tool_direction_candidate = None
         self.tool_direction_candidate_reads = 0
         self.tool_direction_stable_reads = 2
-        self.tool_ng_status_values = {3, 4}
-        self.tool_pending_status_values = {1}
+        self.tool_ng_status_values = {3}
+        self.tool_pause_status_values = {4}
+        self.tool_running_status_values = {1}
+        self.tool_pending_status_values = {1, 4}
+        self.clear_trigger_on_pause_timeout = True
         self.tool_final_status_wait_ms = DEFAULT_TOOL_FINAL_RESULT_WAIT_MS
         self.tool_final_status_poll_ms = DEFAULT_TOOL_FAST_CAPTURE_POLL_MS
         self.tool_active_poll_interval_ms = (
@@ -589,6 +601,14 @@ class QualityControlWindow(QMainWindow):
         )
         self.flow_scan_status_label.setWordWrap(True)
         right_layout.addWidget(self.flow_scan_status_label)
+        self.plc_magnet_status_label = QLabel("")
+        self.plc_magnet_status_label.setWordWrap(True)
+        self.plc_magnet_status_label.setStyleSheet(
+            "font-size: 13px; color: #1d4ed8; padding: 6px;"
+            "background: #eff6ff; border: 1px solid #bfdbfe;"
+        )
+        self.plc_magnet_status_label.hide()
+        right_layout.addWidget(self.plc_magnet_status_label)
 
         self.screw_box = QGroupBox("螺丝数量提示")
         self.screw_grid = QGridLayout(self.screw_box)
@@ -700,7 +720,7 @@ class QualityControlWindow(QMainWindow):
         self.tool_command_delay_input.setValue(DEFAULT_TOOL_COMMAND_DELAY_MS)
         self.tool_command_delay_input.setSuffix(" ms")
         self.tool_command_delay_input.setFixedWidth(90)
-        self.tool_pending_status_input = QLineEdit("1")
+        self.tool_pending_status_input = QLineEdit("1,4")
         self.tool_pending_status_input.setFixedWidth(90)
         self.tool_final_status_wait_input = QSpinBox()
         self.tool_final_status_wait_input.setRange(100, 10000)
@@ -896,6 +916,7 @@ class QualityControlWindow(QMainWindow):
                 return
         if enabled:
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.degraded_mode_checkbox.setStyleSheet(
                 "color:#dc2626;font-weight:700;background:#fef2f2;padding:5px;"
             )
@@ -1001,6 +1022,7 @@ class QualityControlWindow(QMainWindow):
 
             start = monotonic()
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.log_step_duration("停止 PLC worker", start)
 
             start = monotonic()
@@ -1241,6 +1263,9 @@ class QualityControlWindow(QMainWindow):
                     plc_timeout_seconds=int(item.get("plc_timeout_seconds", 3)),
                     plc_poll_interval_ms=int(item.get("plc_poll_interval_ms", 500)),
                     plc_barcode_wait_ok_timeout_seconds=int(item.get("plc_barcode_wait_ok_timeout_seconds", 30)),
+                    plc_magnet_config=dict(
+                        item.get("plc_magnet_config") or {}
+                    ),
                     step_id=as_optional_int(item.get("id")),
                     switch_require_old=as_bool(item.get("switch_require_old", True), True),
                     switch_require_new=as_bool(item.get("switch_require_new", True), True),
@@ -1486,8 +1511,12 @@ class QualityControlWindow(QMainWindow):
             "fast_capture_poll_ms": str(
                 DEFAULT_TOOL_FAST_CAPTURE_POLL_MS
             ),
-            "ng_status_values": "3,4",
-            "tool_pending_status_values": "1",
+            "ng_status_values": "3",
+            "tool_ng_status_values": "3",
+            "tool_pause_status_values": "4",
+            "tool_running_status_values": "1",
+            "tool_pending_status_values": "1,4",
+            "tool_ok_status": "2",
             "tool_final_status_wait_ms": str(
                 DEFAULT_TOOL_FINAL_RESULT_WAIT_MS
             ),
@@ -1497,6 +1526,7 @@ class QualityControlWindow(QMainWindow):
             "tool_final_status_poll_ms": str(
                 DEFAULT_TOOL_FAST_CAPTURE_POLL_MS
             ),
+            "clear_trigger_on_pause_timeout": "true",
             "direction_stable_reads": "2",
             "reverse_lock_enabled": "true",
             "degrade_mode_requires_admin": "true",
@@ -1586,6 +1616,7 @@ class QualityControlWindow(QMainWindow):
         self.station_session_acquired = False
         self.recompute_production_enabled()
         self.stop_plc_worker()
+        self.stop_plc_magnet_worker()
         self.lock_tool()
         self.stop_tool_worker()
         self.barcode_input.setEnabled(False)
@@ -1889,6 +1920,7 @@ class QualityControlWindow(QMainWindow):
         self.recompute_production_enabled()
         self.stop_station_heartbeat()
         self.stop_plc_worker()
+        self.stop_plc_magnet_worker()
         self.stop_tool_worker()
         self.lock_tool()
         message = "当前工位占用已失效或被其他电脑接管，已停止生产"
@@ -2114,7 +2146,7 @@ class QualityControlWindow(QMainWindow):
         )
         self.tool_timeout_input.setValue(1)
         self.tool_command_delay_input.setValue(DEFAULT_TOOL_COMMAND_DELAY_MS)
-        self.tool_pending_status_input.setText("1")
+        self.tool_pending_status_input.setText("1,4")
         self.tool_final_status_wait_input.setValue(
             DEFAULT_TOOL_FINAL_RESULT_WAIT_MS
         )
@@ -2122,7 +2154,11 @@ class QualityControlWindow(QMainWindow):
             DEFAULT_TOOL_FAST_CAPTURE_POLL_MS
         )
         self.tool_direction_stable_reads_input.setValue(2)
-        self.tool_pending_status_values = {1}
+        self.tool_ng_status_values = {3}
+        self.tool_pause_status_values = {4}
+        self.tool_running_status_values = {1}
+        self.tool_pending_status_values = {1, 4}
+        self.clear_trigger_on_pause_timeout = True
         self.tool_final_status_wait_ms = DEFAULT_TOOL_FINAL_RESULT_WAIT_MS
         self.tool_final_status_poll_ms = DEFAULT_TOOL_FAST_CAPTURE_POLL_MS
         self.tool_active_poll_interval_ms = (
@@ -2145,23 +2181,13 @@ class QualityControlWindow(QMainWindow):
         self.tool_port_input.setValue(tool.getint("port", fallback=self.tool_port_input.value()))
         self.tool_unit_input.setValue(tool.getint("unit_id", fallback=self.tool_unit_input.value()))
         self.tool_status_register_input.setValue(tool.getint("status_address", fallback=self.tool_status_register_input.value()))
-        self.tool_ok_value_input.setValue(tool.getint("ok_value", fallback=self.tool_ok_value_input.value()))
+        self.tool_ok_value_input.setValue(2)
         self.tool_ng_value_input.setValue(tool.getint("ng_value", fallback=self.tool_ng_value_input.value()))
-        ng_values_text = tool.get(
-            "ng_status_values",
-            tool.get(
-                "tool_ng_status_values",
-                tool.get("tool_ng_status", tool.get("ng_value", "3")),
-            ),
-        )
-        try:
-            self.tool_ng_status_values = {
-                int(value.strip())
-                for value in ng_values_text.split(",")
-                if value.strip()
-            } or {3}
-        except ValueError:
-            self.tool_ng_status_values = {3, 4}
+        self.tool_ng_value_input.setValue(3)
+        self.tool_ok_value_input.setValue(2)
+        self.tool_ng_status_values = {3}
+        self.tool_pause_status_values = {4}
+        self.tool_running_status_values = {1}
         self.tool_trigger_register_input.setValue(tool.getint("trigger_address", fallback=self.tool_trigger_register_input.value()))
         self.tool_trigger_value_input.setValue(tool.getint("trigger_value", fallback=self.tool_trigger_value_input.value()))
         self.tool_trigger_reset_value_input.setValue(tool.getint("trigger_reset_value", fallback=self.tool_trigger_reset_value_input.value()))
@@ -2197,16 +2223,17 @@ class QualityControlWindow(QMainWindow):
         )
         pending_values_text = tool.get(
             "tool_pending_status_values",
-            tool.get("pending_status_values", "1"),
+            tool.get("pending_status_values", "1,4"),
         )
         try:
             self.tool_pending_status_values = {
                 int(value.strip())
                 for value in pending_values_text.split(",")
                 if value.strip()
-            } or {1}
+            } or {1, 4}
         except ValueError:
-            self.tool_pending_status_values = {1}
+            self.tool_pending_status_values = {1, 4}
+        self.tool_pending_status_values.update({1, 4})
         self.tool_pending_status_input.setText(
             ",".join(
                 str(value)
@@ -2249,6 +2276,10 @@ class QualityControlWindow(QMainWindow):
         self.degrade_mode_requires_admin = tool.getboolean(
             "degrade_mode_requires_admin", fallback=True
         )
+        self.clear_trigger_on_pause_timeout = tool.getboolean(
+            "clear_trigger_on_pause_timeout",
+            fallback=True,
+        )
 
     def save_tool_settings(self):
         config = configparser.ConfigParser()
@@ -2256,16 +2287,18 @@ class QualityControlWindow(QMainWindow):
             config.read(self.app_config_path, encoding="utf-8")
         if "TOOL" not in config:
             config["TOOL"] = {}
-        self.tool_ng_status_values.add(self.tool_ng_value_input.value())
+        self.tool_ng_value_input.setValue(3)
+        self.tool_ng_status_values = {3}
         try:
             self.tool_pending_status_values = {
                 int(value.strip())
                 for value in self.tool_pending_status_input.text().split(",")
                 if value.strip()
-            } or {1}
+            } or {1, 4}
         except ValueError:
-            self.tool_pending_status_values = {1}
-            self.tool_pending_status_input.setText("1")
+            self.tool_pending_status_values = {1, 4}
+        self.tool_pending_status_values.update({1, 4})
+        self.tool_pending_status_input.setText("1,4")
         self.tool_final_status_wait_ms = (
             self.tool_final_status_wait_input.value()
         )
@@ -2284,11 +2317,15 @@ class QualityControlWindow(QMainWindow):
                 "port": str(self.tool_port_input.value()),
                 "unit_id": str(self.tool_unit_input.value()),
                 "status_address": str(self.tool_status_register_input.value()),
-                "ok_value": str(self.tool_ok_value_input.value()),
+                "ok_value": "2",
                 "ng_value": str(self.tool_ng_value_input.value()),
                 "ng_status_values": ",".join(
                     str(value) for value in sorted(self.tool_ng_status_values)
                 ),
+                "tool_ng_status_values": "3",
+                "tool_pause_status_values": "4",
+                "tool_running_status_values": "1",
+                "tool_ok_status": "2",
                 "trigger_address": str(self.tool_trigger_register_input.value()),
                 "trigger_value": str(self.tool_trigger_value_input.value()),
                 "trigger_reset_value": str(self.tool_trigger_reset_value_input.value()),
@@ -2327,6 +2364,9 @@ class QualityControlWindow(QMainWindow):
                 "tool_final_status_poll_ms": str(
                     self.tool_final_status_poll_ms
                 ),
+                "clear_trigger_on_pause_timeout": str(
+                    self.clear_trigger_on_pause_timeout
+                ).lower(),
                 "direction_stable_reads": str(
                     self.tool_direction_stable_reads
                 ),
@@ -2671,6 +2711,18 @@ class QualityControlWindow(QMainWindow):
         self.finished_count_label.setText(f"已生成零件数：{self.finished_part_count}")
         self.scan_error_count_label.setText(f"扫码错误总数：{self.scan_error_count}")
         current_step = self.current_step()
+        self.plc_magnet_status_label.setVisible(
+            current_step is not None
+            and current_step.step_type == PLC_MAGNET
+        )
+        if (
+            current_step is not None
+            and current_step.step_type == PLC_MAGNET
+            and not self.plc_magnet_status_label.text()
+        ):
+            self.plc_magnet_status_label.setText(
+                "PLC磁通检测状态：等待启动"
+            )
         if current_step is None:
             self.current_step_label.setText("全部工序已完成，等待再次第1工序条码进入")
             self.screw_ok_btn.setEnabled(False)
@@ -3676,6 +3728,217 @@ class QualityControlWindow(QMainWindow):
         self.cleanup_plc_worker()
         self.plc_worker_generation += 1
 
+    def start_plc_magnet_worker(self, step: ProcessStep):
+        if not self.ensure_station_session_for_production():
+            return
+        if (
+            self.plc_magnet_thread is not None
+            and self.plc_magnet_thread.isRunning()
+        ):
+            return
+        config = PlcMagnetConfig.from_dict(step.plc_magnet_config)
+        if self.local_plc_override_checkbox.isChecked():
+            config.plc_ip = (
+                self.local_plc_ip_input.text().strip() or config.plc_ip
+            )
+        self.plc_magnet_started_at = datetime.now()
+        self.plc_magnet_stage_status = {
+            "connection": "连接中",
+            "barcode_ok": "等待",
+            "cylinder_clamped": "等待",
+            "screw_complete": "等待",
+            "magnet_complete": "等待",
+            "left_flux": "-",
+            "left_polarity": "-",
+            "left_result": "-",
+            "right_flux": "-",
+            "right_polarity": "-",
+            "right_result": "-",
+            "mes_read_done": "等待",
+        }
+        self.plc_magnet_status_label.setText(
+            f"PLC磁通检测状态：连接 {config.plc_ip}"
+        )
+        self.plc_magnet_thread = QThread(self)
+        self.plc_magnet_worker = PlcMagnetWorker(config)
+        worker = self.plc_magnet_worker
+        thread = self.plc_magnet_thread
+        generation = self.plc_magnet_generation
+        worker.moveToThread(thread)
+        thread.started.connect(worker.start)
+        worker.progress.connect(
+            lambda stage, data, gen=generation:
+            self.on_plc_magnet_progress(gen, stage, data)
+        )
+        worker.completed.connect(
+            lambda result, gen=generation:
+            self.on_plc_magnet_completed(gen, result)
+        )
+        worker.error.connect(
+            lambda message, details, gen=generation:
+            self.on_plc_magnet_error(gen, message, details)
+        )
+        worker.stopped.connect(thread.quit, Qt.DirectConnection)
+        thread.finished.connect(worker.deleteLater)
+        thread.finished.connect(
+            lambda w=worker, t=thread:
+            self.cleanup_plc_magnet_worker(w, t)
+        )
+        thread.start()
+
+    def stop_plc_magnet_worker(self):
+        worker = self.plc_magnet_worker
+        thread = self.plc_magnet_thread
+        self.plc_magnet_generation += 1
+        if worker is not None:
+            worker.cancel_event.set()
+        if thread is not None and thread.isRunning():
+            if not thread.wait(2000):
+                logging.warning("停止 PLC磁通 worker 超时，旧信号将被忽略")
+                thread.requestInterruption()
+                thread.quit()
+        self.cleanup_plc_magnet_worker(worker, thread)
+
+    def cleanup_plc_magnet_worker(self, worker=None, thread=None):
+        if worker is not None and self.plc_magnet_worker is not worker:
+            return
+        if thread is not None and self.plc_magnet_thread is not thread:
+            return
+        self.plc_magnet_worker = None
+        self.plc_magnet_thread = None
+
+    def on_plc_magnet_progress(self, generation, stage, data):
+        if generation != self.plc_magnet_generation:
+            return
+        status = data.get("status", "")
+        if stage == "magnet_result":
+            self.plc_magnet_stage_status.update(
+                {
+                    "left_flux": f"{data.get('left_flux'):.4f}",
+                    "left_polarity": str(data.get("left_polarity")),
+                    "left_result": str(data.get("left_result")),
+                    "right_flux": f"{data.get('right_flux'):.4f}",
+                    "right_polarity": str(data.get("right_polarity")),
+                    "right_result": str(data.get("right_result")),
+                }
+            )
+        else:
+            self.plc_magnet_stage_status[stage] = status
+        display_lines = [
+            "PLC磁通检测状态：",
+            f"PLC连接：{self.plc_magnet_stage_status.get('connection', '-')}",
+            f"DBW0 准备：{self.plc_magnet_stage_status.get('barcode_ok', '-')}",
+            f"DBW2 夹紧：{self.plc_magnet_stage_status.get('cylinder_clamped', '-')}",
+            f"DBW4 拧紧：{self.plc_magnet_stage_status.get('screw_complete', '-')}",
+            f"DBW6 检测：{self.plc_magnet_stage_status.get('magnet_complete', '-')}",
+            (
+                f"左：磁通={self.plc_magnet_stage_status.get('left_flux', '-')} "
+                f"极性={self.plc_magnet_stage_status.get('left_polarity', '-')} "
+                f"判定={self.plc_magnet_stage_status.get('left_result', '-')}"
+            ),
+            (
+                f"右：磁通={self.plc_magnet_stage_status.get('right_flux', '-')} "
+                f"极性={self.plc_magnet_stage_status.get('right_polarity', '-')} "
+                f"判定={self.plc_magnet_stage_status.get('right_result', '-')}"
+            ),
+            f"DBW8 结束：{self.plc_magnet_stage_status.get('mes_read_done', '-')}",
+        ]
+        self.plc_magnet_status_label.setText("\n".join(display_lines))
+        logging.info(
+            "PLC磁通流程 stage=%s data=%s",
+            stage,
+            data,
+        )
+
+    def plc_magnet_log_payload(self, step, result):
+        config = PlcMagnetConfig.from_dict(step.plc_magnet_config)
+        return {
+            "project_id": getattr(self.current_project, "id", None),
+            "station_id": getattr(self.current_station, "id", None),
+            "step_id": step.step_id,
+            "product_barcode": self.current_barcode,
+            "plc_ip": config.plc_ip,
+            "plc_db": config.plc_db,
+            "left_flux": result.get("left_flux"),
+            "left_polarity": result.get("left_polarity"),
+            "left_result": result.get("left_result"),
+            "right_flux": result.get("right_flux"),
+            "right_polarity": result.get("right_polarity"),
+            "right_result": result.get("right_result"),
+            "raw_hex": result.get("raw_hex", ""),
+            "started_at": (
+                self.plc_magnet_started_at.isoformat(timespec="seconds")
+                if self.plc_magnet_started_at else ""
+            ),
+            "finished_at": datetime.now().isoformat(timespec="seconds"),
+            "result": result.get("result", "ERROR"),
+            "error_message": result.get("error_message", ""),
+        }
+
+    def upload_plc_magnet_log(self, step, result):
+        if not self.online_mode or not self.production_enabled:
+            return
+        try:
+            self.api_post(
+                "/api/client/plc-magnet/log",
+                self.plc_magnet_log_payload(step, result),
+            )
+        except Exception as exc:
+            logging.error("上传PLC磁通检测结果失败：%s", exc)
+
+    def on_plc_magnet_completed(self, generation, result):
+        if generation != self.plc_magnet_generation:
+            return
+        step = self.current_step()
+        if step is None or step.step_type != PLC_MAGNET:
+            return
+        self.upload_plc_magnet_log(step, result)
+        if not result.get("ok"):
+            message = result.get(
+                "error_message",
+                "左右磁通判定未全部合格",
+            )
+            self.plc_magnet_status_label.setText(
+                f"PLC磁通检测状态：NG - {message}"
+            )
+            self.message_label.setText(message)
+            self.add_history_record(
+                step, "NG", self.current_barcode, message, completed=False
+            )
+            return
+        step.done = True
+        self.add_history_record(
+            step,
+            "OK",
+            self.current_barcode,
+            "左右磁通判定合格，DBW8结束指令已写入并读回确认",
+            completed=True,
+        )
+        self.plc_magnet_status_label.setText(
+            "PLC磁通检测状态：OK，结束指令已确认"
+        )
+        self.message_label.setText("PLC磁通检测获取完成")
+        self.refresh_work_area()
+        self.schedule_callback(100, self.advance_step)
+
+    def on_plc_magnet_error(self, generation, message, details):
+        if generation != self.plc_magnet_generation:
+            return
+        step = self.current_step()
+        if step is not None and step.step_type == PLC_MAGNET:
+            self.upload_plc_magnet_log(step, details)
+            self.add_history_record(
+                step,
+                "异常",
+                self.current_barcode,
+                message,
+                completed=False,
+            )
+        self.plc_magnet_status_label.setText(
+            f"PLC磁通检测状态：失败 - {message}"
+        )
+        self.message_label.setText(f"PLC磁通检测失败：{message}")
+
     def cleanup_plc_worker(self):
         self.plc_worker = None
         self.plc_thread = None
@@ -4071,24 +4334,32 @@ class QualityControlWindow(QMainWindow):
                 self.scanner_now_ms()
                 - self.tool_pending_result_started_ms
             )
-        logging.error(
-            "等待%sms后仍为100=%s，结果未确认，锁枪并清53",
+        logging.warning(
+            "等待%sms后仍为100=%s，最终结果=PAUSE_TIMEOUT，"
+            "不计数、不弹管理员",
             int(elapsed),
             status,
         )
-        self.manual_lock_active = True
-        self.tool_admin_unlock_btn.setEnabled(True)
-        self.lock_tool("最终结果等待超时")
-        self.clear_active_tool_trigger("结果状态未确认，清除触发")
-        self.tool_status_label.setText("结果未确认锁定")
+        self.tool_status_label.setText("暂停/未完成")
         self.tool_status_label.setStyleSheet(
-            "font-size: 12px; color: #dc2626;"
+            "font-size: 12px; color: #d97706;"
         )
-        message = "螺钉枪结果状态未确认，请管理员处理"
+        message = "螺钉枪暂停/结果未完成，请重新作业"
         self.message_label.setText(message)
-        self.show_auto_close_warning("螺钉枪结果未确认", message)
-        self.show_tool_ng_unlock_dialog()
-        self.clear_tool_pending_result()
+        if self.clear_trigger_on_pause_timeout:
+            logging.info(
+                "最终结果：PAUSE_TIMEOUT，按配置清53=0，"
+                "不计数，不弹管理员，允许重打"
+            )
+            self.clear_active_tool_trigger(
+                "暂停/结果未完成超时，清除触发"
+            )
+            self.clear_tool_pending_result()
+            return
+        logging.info(
+            "最终结果：PAUSE_TIMEOUT，按配置不清53，继续等待人工处理"
+        )
+        self.tool_pending_result_started_ms = self.scanner_now_ms()
 
     def process_tool_poll_result(self, status: int, trigger: int, direction: Optional[int] = None):
         if self.syncing_config or self.degraded_mode_checkbox.isChecked():
@@ -4160,10 +4431,11 @@ class QualityControlWindow(QMainWindow):
                 "direction=1，判定为运行中/过渡状态，不锁枪，等待结果"
             )
             if trigger == trigger_reset_value:
-                if status in set(self.tool_ng_status_values):
+                if status in {2, 3, 4}:
                     logging.info(
-                        "status=%s残留，trigger=0，忽略，不判NG",
+                        "status=%s-%s残留，trigger=0，忽略，不处理",
                         status,
+                        self.tightening_status_text(status),
                     )
                 self.waiting_tool_trigger_reset = False
                 self.clear_tool_pending_result()
@@ -4192,13 +4464,11 @@ class QualityControlWindow(QMainWindow):
                 self.clear_active_tool_trigger("方向未知，清除触发")
             self.message_label.setText(f"未知方向值 {direction}，不计数")
             return
-        if (
-            trigger == trigger_reset_value
-            and status in set(self.tool_ng_status_values)
-        ):
+        if trigger == trigger_reset_value and status in {2, 3, 4}:
             logging.info(
-                "status=%s残留，trigger=0，忽略，不判NG",
+                "status=%s-%s残留，trigger=0，忽略，不处理",
                 status,
+                self.tightening_status_text(status),
             )
         if direction_changed and trigger == trigger_reset_value:
             self.waiting_tool_trigger_reset = False
@@ -4279,8 +4549,18 @@ class QualityControlWindow(QMainWindow):
             return
 
         if trigger == trigger_reset_value:
+            was_waiting_for_reset = self.waiting_tool_trigger_reset
             self.waiting_tool_trigger_reset = False
             self.clear_tool_pending_result()
+            if was_waiting_for_reset:
+                allowed, reason = self.tool_unlock_permission()
+                if allowed:
+                    self.unlock_tool()
+                elif reason:
+                    logging.info(
+                        "53已读回0但保持锁定，lock_reason=%s",
+                        reason,
+                    )
             return
         if trigger != trigger_value:
             return
@@ -4297,7 +4577,20 @@ class QualityControlWindow(QMainWindow):
 
         pending_values = set(self.tool_pending_status_values)
         final_values = {ok_value} | ng_values
-        if status in pending_values and not self.tool_pending_result_active:
+        if status not in final_values and not self.tool_pending_result_active:
+            if status in self.tool_pause_status_values:
+                logging.info(
+                    "status=4-暂停/待确认，不清53，等待最终结果"
+                )
+            elif status in self.tool_running_status_values:
+                logging.info(
+                    "status=1-作业中/等待结果，不清53，等待最终结果"
+                )
+            else:
+                logging.info(
+                    "status=%s不是最终OK/NG，不清53，等待最终结果",
+                    status,
+                )
             self.wait_for_tool_final_result(status, direction)
             return
 
@@ -4357,8 +4650,10 @@ class QualityControlWindow(QMainWindow):
             )
             return
 
-        logging.warning("设备状态未计数：status不是OK%s或NG%s，实际=%s", ok_value, sorted(ng_values), status)
-        self.clear_active_tool_trigger("状态未确认，清除触发")
+        logging.info(
+            "设备状态未计数：status=%s为非最终状态，继续等待",
+            status,
+        )
 
     def write_tool_register(self, register_address: int, value: int):
         if not self.is_tool_worker_running():
@@ -4563,7 +4858,7 @@ class QualityControlWindow(QMainWindow):
             1: "作业中",
             2: "OK",
             3: "NG",
-            4: "NG",
+            4: "暂停/待确认",
             5: "正转",
             6: "反转",
         }
@@ -4720,6 +5015,7 @@ class QualityControlWindow(QMainWindow):
             self._scanner_event_filter_installed = False
         self.stop_tool_worker()
         self.stop_plc_worker()
+        self.stop_plc_magnet_worker()
         self.release_station_session()
         super().closeEvent(event)
 
@@ -4728,6 +5024,7 @@ class QualityControlWindow(QMainWindow):
             return
         if self.degraded_mode_checkbox.isChecked():
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.stop_tool_worker(lock_before_disconnect=False)
             self.message_label.setText("降级模式已开启，系统不进行防错控制。")
             self.refresh_work_area()
@@ -4743,30 +5040,45 @@ class QualityControlWindow(QMainWindow):
         self.last_voice_step_key = step_key
         if step.step_type == SCREW:
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(True)
             self.enter_tool_screw_step(step)
             self.speak(f"请打螺丝{step.required_count}颗")
         elif step.step_type == PLC:
+            self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool()
             if self.online_mode:
                 self.start_plc_worker(step)
             else:
                 self.message_label.setText("PLC接收工序需要在线模式和服务端工位占用")
+        elif step.step_type == PLC_MAGNET:
+            self.stop_plc_worker()
+            self.tool_worker_active_requested.emit(False)
+            self.lock_tool("PLC磁通检测工序")
+            if not self.current_barcode:
+                self.message_label.setText(
+                    "缺少当前主条码，不能启动PLC磁通检测"
+                )
+            else:
+                self.start_plc_magnet_worker(step)
         elif step.step_type == BARCODE_SWITCH:
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool()
             self.message_label.setText("主条码切换：请扫描旧主条码")
             self.speak("请扫描旧主条码")
         elif step.step_type == MATERIAL_BIND:
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool()
             self.message_label.setText("子物料绑定：请扫描父件主条码")
             self.speak("请扫描父件主条码")
         else:
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool()
             self.speak("请扫码")
@@ -4779,6 +5091,7 @@ class QualityControlWindow(QMainWindow):
     def sync_workers_for_station(self):
         if self.degraded_mode_checkbox.isChecked():
             self.stop_plc_worker()
+            self.stop_plc_magnet_worker()
             self.stop_tool_worker(lock_before_disconnect=False)
             return
         if self.station_has_step_type(SCREW):
@@ -4794,6 +5107,8 @@ class QualityControlWindow(QMainWindow):
             self.tool_status_label.setText("当前工位无螺钉枪工序，已断开")
         if not self.station_has_step_type(PLC):
             self.stop_plc_worker()
+        if not self.station_has_step_type(PLC_MAGNET):
+            self.stop_plc_magnet_worker()
 
     def enter_tool_screw_step(self, step: ProcessStep):
         if not self.is_tool_worker_running():

@@ -20,6 +20,7 @@ from web_admin_app.services import (
     add_scan_record,
     cancel_barcode_record,
     add_screw_record,
+    add_plc_magnet_log,
     add_station,
     add_station_completion,
     add_step_record,
@@ -77,6 +78,7 @@ CLIENT_SESSION_ENDPOINTS = {
     "/api/production-records",
     "/api/step-records",
     "/api/screw-records",
+    "/api/client/plc-magnet/log",
     "/api/product-flow/resolve-barcode",
     "/api/product-flow/verify-entry",
     "/api/product-flow/switch-barcode",
@@ -587,6 +589,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, cancel_barcode_record(payload))
         elif path == "/api/client/tool/degrade-mode/report":
             json_response(self, report_degrade_mode(payload))
+        elif path == "/api/client/plc-magnet/log":
+            json_response(self, add_plc_magnet_log(payload))
         elif path == "/api/station-session/acquire":
             json_response(self, acquire_station_session(payload))
         elif path == "/api/station-session/force-acquire":

@@ -155,6 +155,21 @@ class ToolPollWorkerTest(unittest.TestCase):
         self.assertEqual(worker.timer.interval(), 50)
         worker.stop()
 
+    def test_pause_status_with_trigger_stays_pending(self):
+        config = make_config()
+        config.active_poll_interval_ms = 800
+        config.final_status_poll_ms = 100
+        worker = ToolPollWorker(config)
+        client = FakeConnectedClient()
+        client.values.update({54: 3, 53: 1, 100: 4})
+        worker.client = client
+
+        worker.start()
+
+        self.assertTrue(worker.pending_result_active)
+        self.assertEqual(worker.timer.interval(), 100)
+        worker.stop()
+
     def test_stop_locks_tool_then_disconnects_long_connection(self):
         worker = ToolPollWorker(make_config())
         client = FakeConnectedClient()

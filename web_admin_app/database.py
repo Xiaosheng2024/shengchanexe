@@ -40,6 +40,9 @@ PLC_STEP_COLUMNS = {
     "plc_poll_interval_ms": "INTEGER NOT NULL DEFAULT 500",
     "plc_barcode_wait_ok_timeout_seconds": "INTEGER NOT NULL DEFAULT 30",
 }
+MAGNET_STEP_COLUMNS = {
+    "plc_magnet_config": "TEXT NOT NULL DEFAULT '{}'",
+}
 
 FLOW_STEP_COLUMNS = {
     "switch_require_old": "INTEGER NOT NULL DEFAULT 1",
@@ -394,6 +397,7 @@ def create_sqlite_schema(conn):
             plc_timeout_seconds INTEGER NOT NULL DEFAULT 3,
             plc_poll_interval_ms INTEGER NOT NULL DEFAULT 500,
             plc_barcode_wait_ok_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+            plc_magnet_config TEXT NOT NULL DEFAULT '{}',
             created_at TEXT NOT NULL,
             FOREIGN KEY(station_id) REFERENCES stations(id)
         );
@@ -474,6 +478,7 @@ def create_postgresql_schema(conn):
             plc_timeout_seconds INTEGER NOT NULL DEFAULT 3,
             plc_poll_interval_ms INTEGER NOT NULL DEFAULT 500,
             plc_barcode_wait_ok_timeout_seconds INTEGER NOT NULL DEFAULT 30,
+            plc_magnet_config TEXT NOT NULL DEFAULT '{}',
             created_at TIMESTAMP NOT NULL
         );
         CREATE TABLE IF NOT EXISTS station_completions (
@@ -578,6 +583,27 @@ def create_traceability_schema(conn):
             result TEXT NOT NULL,
             is_counted {bool_type},
             ng_reason TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
+        );
+        CREATE TABLE IF NOT EXISTS plc_magnet_logs (
+            id {id_type},
+            project_id INTEGER NOT NULL,
+            station_id INTEGER NOT NULL,
+            step_id INTEGER,
+            product_barcode TEXT,
+            plc_ip TEXT NOT NULL,
+            plc_db INTEGER NOT NULL,
+            left_flux REAL,
+            left_polarity INTEGER,
+            left_result INTEGER,
+            right_flux REAL,
+            right_polarity INTEGER,
+            right_result INTEGER,
+            raw_hex TEXT,
+            started_at {ts_type},
+            finished_at {ts_type},
+            result TEXT NOT NULL,
+            error_message TEXT,
             created_at {ts_type} NOT NULL DEFAULT {current_ts}
         );
         CREATE TABLE IF NOT EXISTS station_sessions (
@@ -837,6 +863,10 @@ def migrate_sqlite_db(conn):
         if column not in columns:
             conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
             columns.append(column)
+    for column, definition in MAGNET_STEP_COLUMNS.items():
+        if column not in columns:
+            conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
+            columns.append(column)
     for column, definition in FLOW_STEP_COLUMNS.items():
         if column not in columns:
             conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
@@ -949,6 +979,11 @@ def migrate_postgresql_db(conn):
             continue
         pg_definition = definition.replace("INTEGER", "INTEGER").replace("TEXT", "TEXT")
         conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {pg_definition}")
+        columns.add(column)
+    for column, definition in MAGNET_STEP_COLUMNS.items():
+        if column in columns:
+            continue
+        conn.execute(f"ALTER TABLE steps ADD COLUMN {column} {definition}")
         columns.add(column)
     for column, definition in FLOW_STEP_COLUMNS.items():
         if column in columns:
