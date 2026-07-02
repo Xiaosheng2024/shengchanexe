@@ -61,6 +61,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         window.show_auto_close_warning = lambda title, message: None
         window.disable_tool_auto_listen_checkbox.setChecked(True)
         window.station_session_id = 1
+        window.tool_direction_stable_reads = 1
+        window.tool_direction_stable_reads_input.setValue(1)
 
         def cleanup_window():
             window.close()
@@ -882,6 +884,10 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_reverse_value_input.value(), 2)
         self.assertEqual(window.tool_command_delay_input.value(), 50)
         self.assertEqual(window.tool_poll_interval_input.value(), 800)
+        self.assertEqual(window.tool_pending_status_values, {1})
+        self.assertEqual(window.tool_final_status_wait_ms, 1500)
+        self.assertEqual(window.tool_final_status_poll_ms, 100)
+        self.assertEqual(window.tool_direction_stable_reads, 2)
 
     def test_old_tool_config_gets_command_delay_without_overwriting_values(self):
         with tempfile.TemporaryDirectory() as tmp_dir:
@@ -897,6 +903,10 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(window.tool_forward_value_input.value(), 9)
             self.assertEqual(window.tool_reverse_value_input.value(), 8)
             self.assertEqual(window.tool_command_delay_input.value(), 50)
+            self.assertEqual(window.tool_pending_status_values, {1})
+            self.assertEqual(window.tool_final_status_wait_ms, 1500)
+            self.assertEqual(window.tool_final_status_poll_ms, 100)
+            self.assertEqual(window.tool_direction_stable_reads, 2)
             updated = configparser.ConfigParser()
             updated.read(config_path, encoding="utf-8")
             self.assertEqual(updated.getint("TOOL", "command_delay_ms"), 50)
@@ -924,6 +934,10 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             window.tool_forward_value_input.setValue(10)
             window.tool_reverse_value_input.setValue(11)
             window.tool_command_delay_input.setValue(75)
+            window.tool_pending_status_input.setText("1,5")
+            window.tool_final_status_wait_input.setValue(1800)
+            window.tool_final_status_poll_input.setValue(150)
+            window.tool_direction_stable_reads_input.setValue(3)
             window.tool_clear_trigger_when_reverse_checkbox.setChecked(False)
             window.tool_poll_interval_input.setValue(1200)
             window.tool_timeout_input.setValue(2)
@@ -951,6 +965,10 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(loaded.tool_forward_value_input.value(), 10)
             self.assertEqual(loaded.tool_reverse_value_input.value(), 11)
             self.assertEqual(loaded.tool_command_delay_input.value(), 75)
+            self.assertEqual(loaded.tool_pending_status_values, {1, 5})
+            self.assertEqual(loaded.tool_final_status_wait_ms, 1800)
+            self.assertEqual(loaded.tool_final_status_poll_ms, 150)
+            self.assertEqual(loaded.tool_direction_stable_reads, 3)
             self.assertFalse(loaded.tool_clear_trigger_when_reverse_checkbox.isChecked())
             self.assertEqual(loaded.tool_poll_interval_input.value(), 1200)
             self.assertEqual(loaded.tool_timeout_input.value(), 2)
@@ -1033,6 +1051,136 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(calls["dialog"], 0)
         self.assertIn((4, 2), calls["writes"])
 
+    def test_direction_debounce_confirms_reverse_then_forward_unlocks(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.tool_direction_stable_reads = 2
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value))
+            or True
+        )
+
+        with self.assertLogs(level="INFO") as captured:
+            window.process_tool_poll_result(
+                status=0, trigger=0, direction=2
+            )
+            self.assertFalse(window.reverse_lock_active)
+            self.assertNotIn((4, 2), writes)
+            window.process_tool_poll_result(
+                status=0, trigger=0, direction=2
+            )
+            self.assertTrue(window.reverse_lock_active)
+            self.assertIn((4, 2), writes)
+
+            writes_before_forward = list(writes)
+            window.process_tool_poll_result(
+                status=0, trigger=0, direction=3
+            )
+            self.assertTrue(window.reverse_lock_active)
+            self.assertEqual(writes, writes_before_forward)
+            window.process_tool_poll_result(
+                status=0, trigger=0, direction=3
+            )
+
+        self.assertFalse(window.reverse_lock_active)
+        self.assertIn((4, 1), writes)
+        self.assertEqual(
+            window.message_label.text(),
+            "螺钉枪正转状态，允许作业",
+        )
+        log_text = "\n".join(captured.output)
+        self.assertIn("方向变化：None -> 2", log_text)
+        self.assertIn("方向变化：2 -> 3", log_text)
+        self.assertIn("是否写4=1=True", log_text)
+
+    def test_forward_recovery_keeps_lock_on_non_screw_step(self):
+        window = self.make_window()
+        window.tool_direction_stable_reads = 1
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value))
+            or True
+        )
+
+        window.process_tool_poll_result(status=0, trigger=0, direction=2)
+        window.process_tool_poll_result(status=0, trigger=0, direction=3)
+
+        self.assertFalse(window.reverse_lock_active)
+        self.assertNotIn((4, 1), writes)
+        self.assertIn("当前不是螺丝工序", window.message_label.text())
+
+    def test_forward_recovery_keeps_lock_when_ng_is_active(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.tool_direction_stable_reads = 1
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value))
+            or True
+        )
+        window.process_tool_poll_result(status=0, trigger=0, direction=2)
+        window.tool_ng_locked = True
+        window.ng_lock_active = True
+
+        window.process_tool_poll_result(status=0, trigger=0, direction=3)
+
+        self.assertFalse(window.reverse_lock_active)
+        self.assertNotIn((4, 1), writes)
+        self.assertIn("NG", window.message_label.text())
+
+    def test_reverse_lock_never_requests_admin_password(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.tool_direction_stable_reads = 1
+        prompts = []
+        window.show_tool_ng_unlock_dialog = lambda: prompts.append(True)
+        window.write_tool_register = lambda register, value: True
+
+        window.process_tool_poll_result(status=3, trigger=1, direction=2)
+
+        self.assertTrue(window.reverse_lock_active)
+        self.assertFalse(window.tool_ng_locked)
+        self.assertEqual(prompts, [])
+
+    def test_direction_jitter_does_not_toggle_tool_lock(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.tool_direction_stable_reads = 2
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value))
+            or True
+        )
+
+        for direction in (2, 3, 2, 3, 2, 3):
+            window.process_tool_poll_result(
+                status=0,
+                trigger=0,
+                direction=direction,
+            )
+
+        self.assertEqual(writes, [])
+        self.assertFalse(window.reverse_lock_active)
+
+    def test_degraded_mode_ignores_direction_changes(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.degraded_mode_checkbox.blockSignals(True)
+        window.degraded_mode_checkbox.setChecked(True)
+        window.degraded_mode_checkbox.blockSignals(False)
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value))
+            or True
+        )
+
+        window.process_tool_poll_result(status=3, trigger=1, direction=2)
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+
+        self.assertEqual(writes, [])
+        self.assertFalse(window.reverse_lock_active)
+
     def test_unknown_direction_does_not_count_or_process_ng(self):
         window = self.make_window()
         self.set_current_step_to_screw(window)
@@ -1078,6 +1226,106 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(calls["dialog"], 1)
         self.assertIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
+
+    def test_pending_status_then_ok_counts_and_only_then_clears_trigger(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"ok": 0, "writes": []}
+        window.handle_screw_ok = lambda: calls.__setitem__(
+            "ok", calls["ok"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 1100.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        window.process_tool_poll_result(status=1, trigger=1, direction=3)
+        self.assertTrue(window.tool_pending_result_active)
+        self.assertFalse(window.waiting_tool_trigger_reset)
+        self.assertEqual(calls["ok"], 0)
+        self.assertNotIn((53, 0), calls["writes"])
+
+        window.process_tool_poll_result(status=2, trigger=1, direction=3)
+        self.assertFalse(window.tool_pending_result_active)
+        self.assertEqual(calls["ok"], 1)
+        self.assertIn((53, 0), calls["writes"])
+
+    def test_pending_status_then_each_ng_value_locks_and_clears(self):
+        for final_status in (3, 4):
+            with self.subTest(final_status=final_status):
+                window = self.make_window()
+                self.set_current_step_to_screw(window)
+                calls = {"dialog": 0, "writes": []}
+                window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+                    "dialog", calls["dialog"] + 1
+                )
+                window.write_tool_register = (
+                    lambda register, value: calls["writes"].append(
+                        (register, value)
+                    )
+                    or True
+                )
+                times = iter([1000.0, 1100.0])
+                window.scanner_now_ms = lambda: next(times)
+
+                window.process_tool_poll_result(
+                    status=1,
+                    trigger=1,
+                    direction=3,
+                )
+                self.assertNotIn((53, 0), calls["writes"])
+                window.process_tool_poll_result(
+                    status=final_status,
+                    trigger=1,
+                    direction=3,
+                )
+
+                self.assertTrue(window.tool_ng_locked)
+                self.assertEqual(calls["dialog"], 1)
+                self.assertIn((4, 2), calls["writes"])
+                self.assertIn((53, 0), calls["writes"])
+
+    def test_pending_status_timeout_locks_and_requires_admin(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"dialog": 0, "writes": []}
+        window.tool_final_status_wait_ms = 1500
+        window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+            "dialog", calls["dialog"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 2501.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        with self.assertLogs(level="INFO") as captured:
+            window.process_tool_poll_result(
+                status=1,
+                trigger=1,
+                direction=3,
+            )
+            self.assertNotIn((53, 0), calls["writes"])
+            window.process_tool_poll_result(
+                status=1,
+                trigger=1,
+                direction=3,
+            )
+
+        self.assertTrue(window.manual_lock_active)
+        self.assertFalse(window.tool_pending_result_active)
+        self.assertEqual(calls["dialog"], 1)
+        self.assertIn((4, 2), calls["writes"])
+        self.assertIn((53, 0), calls["writes"])
+        self.assertIn("结果状态未确认", window.message_label.text())
+        self.assertIn("进入等待最终结果", "\n".join(captured.output))
 
     def test_reverse_direction_blocks_admin_unlock(self):
         window = self.make_window()
@@ -1418,6 +1666,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
     def test_ng_correct_password_unlocks_tool(self):
         window = self.make_window()
+        self.set_current_step_to_screw(window)
         window.tool_ng_locked = True
         window.tool_lock_state = "locked"
         writes = []
@@ -1518,7 +1767,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
         window.on_tool_connection_state("connected")
         self.assertIn((53, 0), calls["writes"])
-        self.assertIn((4, 1), calls["writes"])
+        self.assertIn((4, 2), calls["writes"])
+        self.assertNotIn((4, 1), calls["writes"])
 
         window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(calls["ok"], 0)
@@ -1526,6 +1776,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
 
         window.process_tool_poll_result(status=2, trigger=0, direction=3)
         self.assertFalse(window.tool_connection_rearming)
+        self.assertIn((4, 1), calls["writes"])
         window.process_tool_poll_result(status=2, trigger=1, direction=3)
         self.assertEqual(calls["ok"], 1)
 

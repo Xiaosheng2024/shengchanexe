@@ -1,6 +1,7 @@
 import logging
 from dataclasses import dataclass
 from time import monotonic, sleep
+from typing import Tuple
 
 from PyQt5.QtCore import QObject, QTimer, pyqtSignal, pyqtSlot
 
@@ -22,6 +23,9 @@ class ToolPollConfig:
     unlock_value: int = 1
     command_delay_ms: int = 50
     reconnect_interval_seconds: float = 2.0
+    pending_status_values: Tuple[int, ...] = (1,)
+    final_status_values: Tuple[int, ...] = (2, 3, 4)
+    final_status_poll_ms: int = 100
 
 
 class ToolPollWorker(QObject):
@@ -48,6 +52,7 @@ class ToolPollWorker(QObject):
         self.next_reconnect_at = 0.0
         self.reconnecting = False
         self.bypass = False
+        self.pending_result_active = False
 
     @pyqtSlot()
     def start(self):
@@ -99,6 +104,7 @@ class ToolPollWorker(QObject):
     def _stop(self, lock_before_disconnect: bool):
         self.polling = False
         self.bypass = False
+        self.pending_result_active = False
         if self.timer is not None:
             self.timer.stop()
             self.timer.deleteLater()
@@ -127,6 +133,24 @@ class ToolPollWorker(QObject):
             direction = self.client.read_register(self.config.direction_register)
             status = self.client.read_register(self.config.status_register)
             trigger = self.client.read_register(self.config.trigger_register)
+            if (
+                trigger == 1
+                and status in set(self.config.pending_status_values)
+            ):
+                self.pending_result_active = True
+            elif (
+                trigger != 1
+                or status in set(self.config.final_status_values)
+            ):
+                self.pending_result_active = False
+            pending_result = self.pending_result_active and trigger == 1
+            if self.timer is not None:
+                interval = (
+                    self.config.final_status_poll_ms
+                    if pending_result
+                    else self.config.poll_interval_ms
+                )
+                self.timer.setInterval(max(int(interval), 50))
             if trigger == 1:
                 logging.info(
                     "螺钉枪事件快照：direction=%s status=%s trigger=%s",
