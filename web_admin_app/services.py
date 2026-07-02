@@ -24,7 +24,7 @@ ARCHIVE_DIR = Path("/opt/mes/archive") if Path("/opt/mes").exists() else ROOT_DI
 RELEASES_DIR = Path("/opt/mes/releases") if Path("/opt/mes").exists() else ROOT_DIR / "releases"
 CLIENT_UPDATES_DIR = RELEASES_DIR / "client_updates"
 UPLOADS_DIR = Path("/opt/mes/uploads") if Path("/opt/mes").exists() else ROOT_DIR / "uploads"
-MAX_CLIENT_UPDATE_FILE_BYTES = 220 * 1024 * 1024
+MAX_CLIENT_UPDATE_FILE_BYTES = 500 * 1024 * 1024
 MAINTENANCE_TABLES = [
     "scan_records",
     "station_work_records",
@@ -2680,6 +2680,13 @@ def list_client_releases():
     files_by_version = {}
     for row in file_rows:
         item = row_to_dict(row)
+        try:
+            item["release_notes"] = json.loads(
+                item.get("release_notes") or "[]"
+            )
+        except json.JSONDecodeError:
+            item["release_notes"] = []
+        item["is_active"] = bool(item.get("is_active", True))
         files_by_version.setdefault(item["version"], []).append(item)
     releases = [_release_row_to_dict(row) for row in rows]
     for release in releases:
@@ -2688,6 +2695,318 @@ def list_client_releases():
             [],
         )
     return releases
+
+
+def _release_notes(value):
+    if isinstance(value, list):
+        return [str(item).strip() for item in value if str(item).strip()]
+    text = str(value or "").strip()
+    if not text:
+        return []
+    try:
+        parsed = json.loads(text)
+        if isinstance(parsed, list):
+            return [
+                str(item).strip()
+                for item in parsed
+                if str(item).strip()
+            ]
+    except json.JSONDecodeError:
+        pass
+    return [
+        item.strip()
+        for item in text.replace("\r", "\n").split("\n")
+        if item.strip()
+    ]
+
+
+def _copy_limited_upload(file_obj, target_path):
+    file_size = 0
+    if hasattr(file_obj, "seek"):
+        file_obj.seek(0)
+    with target_path.open("wb") as target:
+        while True:
+            chunk = file_obj.read(1024 * 1024)
+            if not chunk:
+                break
+            file_size += len(chunk)
+            if file_size > MAX_CLIENT_UPDATE_FILE_BYTES:
+                raise ValueError("文件过大，请检查上传限制")
+            target.write(chunk)
+    if file_size == 0:
+        raise ValueError("上传文件为空")
+    return file_size
+
+
+def _sync_client_release(
+    conn,
+    version,
+    channel,
+    file_path,
+    sha256,
+    release_notes,
+):
+    existing = conn.execute(
+        "SELECT * FROM client_releases WHERE version = ?",
+        (version,),
+    ).fetchone()
+    now = now_text()
+    notes_json = json.dumps(release_notes, ensure_ascii=False)
+    release_path = (
+        str(file_path)
+        if channel == "stable"
+        else (existing["release_file_path"] if existing else "")
+    )
+    debug_path = (
+        str(file_path)
+        if channel == "debug"
+        else (existing["debug_file_path"] if existing else "")
+    )
+    release_sha = (
+        sha256
+        if channel == "stable"
+        else (existing["release_sha256"] if existing else "")
+    )
+    debug_sha = (
+        sha256
+        if channel == "debug"
+        else (existing["debug_sha256"] if existing else "")
+    )
+    stable = channel == "stable" or bool(existing and existing["stable"])
+    if existing:
+        conn.execute(
+            """
+            UPDATE client_releases
+            SET title = ?, release_notes = ?, release_date = ?, stable = ?,
+                release_file_path = ?, debug_file_path = ?,
+                release_sha256 = ?, debug_sha256 = ?, updated_at = ?
+            WHERE version = ?
+            """,
+            (
+                f"{version} {channel}",
+                notes_json,
+                now,
+                stable,
+                release_path,
+                debug_path,
+                release_sha,
+                debug_sha,
+                now,
+                version,
+            ),
+        )
+    else:
+        conn.execute(
+            """
+            INSERT INTO client_releases
+            (version, title, release_notes, release_date, stable, force_update,
+             min_required_version, release_file_path, debug_file_path,
+             s7_tool_file_path, release_sha256, debug_sha256,
+             s7_tool_sha256, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                version,
+                f"{version} {channel}",
+                notes_json,
+                now,
+                stable,
+                False,
+                "",
+                release_path,
+                debug_path,
+                "",
+                release_sha,
+                debug_sha,
+                "",
+                now,
+                now,
+            ),
+        )
+
+
+def upload_client_update(payload, files=None):
+    version = str(payload.get("version") or "").strip()
+    channel = str(payload.get("channel") or "stable").strip().lower()
+    original_name = str(payload.get("file_filename") or "").strip()
+    uploaded_by = str(payload.get("_uploaded_by") or "").strip()
+    is_active = str(payload.get("is_active", "true")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    notes = _release_notes(payload.get("release_notes"))
+    file_obj = (files or {}).get("file")
+    if not version:
+        raise ValueError("版本号不能为空")
+    _safe_release_dir(version)
+    if channel not in {"stable", "debug"}:
+        raise ValueError("channel 只能是 stable 或 debug")
+    if not file_obj or not original_name:
+        raise ValueError("请选择要上传的客户端程序")
+    suffix = Path(original_name).suffix.lower()
+    if suffix not in {".exe", ".zip"}:
+        raise ValueError("只支持 EXE 或 ZIP 更新包")
+
+    update_dir = ensure_client_updates_dir()
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+    temp_path = update_dir / f".uploading_{os.getpid()}_{timestamp}{suffix}"
+    source_package_path = None
+    final_path = None
+    completed = False
+    try:
+        source_size = _copy_limited_upload(file_obj, temp_path)
+        expected_executable = (
+            "QualityControlSystem.exe"
+            if channel == "stable"
+            else "QualityControlSystem_Debug.exe"
+        )
+        executable_temp = temp_path
+        if suffix == ".zip":
+            if not zipfile.is_zipfile(temp_path):
+                raise ValueError("ZIP文件格式无效")
+            source_sha = _sha256_file(temp_path)
+            source_package_path = update_dir / (
+                f"source_{channel}_{version}_{source_sha[:8]}_{timestamp}.zip"
+            )
+            temp_path.replace(source_package_path)
+            executable_temp = update_dir / (
+                f".extracting_{os.getpid()}_{timestamp}.exe"
+            )
+            with zipfile.ZipFile(source_package_path) as archive:
+                member = next(
+                    (
+                        info
+                        for info in archive.infolist()
+                        if not info.is_dir()
+                        and Path(info.filename).name == expected_executable
+                    ),
+                    None,
+                )
+                if member is None:
+                    raise ValueError(f"ZIP中缺少 {expected_executable}")
+                with archive.open(member) as source:
+                    with executable_temp.open("wb") as target:
+                        shutil.copyfileobj(source, target)
+        safe_version = "".join(
+            char if char.isalnum() or char in ".-_" else "_"
+            for char in version
+        )
+        executable_sha = _sha256_file(executable_temp)
+        stored_name = (
+            f"{channel}_{safe_version}_{executable_sha[:8]}_"
+            f"{expected_executable}"
+        )
+        final_path = update_dir / stored_name
+        executable_temp.replace(final_path)
+        file_size = final_path.stat().st_size
+        with get_conn() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO client_update_files
+                (version, channel, original_name, stored_name, file_path,
+                 file_size, sha256, download_url, release_notes, is_active,
+                 uploaded_by, uploaded_at, remark, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    version,
+                    channel,
+                    original_name,
+                    stored_name,
+                    str(final_path),
+                    file_size,
+                    executable_sha,
+                    "",
+                    json.dumps(notes, ensure_ascii=False),
+                    is_active,
+                    uploaded_by,
+                    now_text(),
+                    str(payload.get("remark") or "").strip(),
+                    now_text(),
+                ),
+            )
+            file_id = cursor.lastrowid
+            download_url = f"/api/client-update/download/{file_id}"
+            conn.execute(
+                "UPDATE client_update_files SET download_url = ? WHERE id = ?",
+                (download_url, file_id),
+            )
+            if is_active:
+                conn.execute(
+                    """
+                    UPDATE client_update_files SET is_active = ?
+                    WHERE channel = ? AND id <> ?
+                    """,
+                    (False, channel, file_id),
+                )
+            _sync_client_release(
+                conn,
+                version,
+                channel,
+                final_path,
+                executable_sha,
+                notes,
+            )
+        logging.info(
+            "客户端更新上传成功 user=%s version=%s channel=%s original=%s "
+            "source_size=%s save_path=%s file_size=%s sha256=%s id=%s "
+            "download_url=%s",
+            uploaded_by,
+            version,
+            channel,
+            original_name,
+            source_size,
+            final_path,
+            file_size,
+            executable_sha,
+            file_id,
+            download_url,
+        )
+        completed = True
+        return {
+            "ok": True,
+            "data": {
+                "id": file_id,
+                "version": version,
+                "channel": channel,
+                "file_name": stored_name,
+                "original_name": original_name,
+                "download_url": download_url,
+                "sha256": executable_sha,
+                "file_size": file_size,
+                "is_active": is_active,
+            },
+        }
+    except PermissionError as exc:
+        logging.exception(
+            "客户端更新上传失败：保存目录无权限 dir=%s", update_dir
+        )
+        raise ValueError(f"保存目录无写入权限：{update_dir}") from exc
+    except Exception:
+        logging.exception(
+            "客户端更新上传失败 user=%s version=%s channel=%s "
+            "original=%s dir=%s",
+            uploaded_by,
+            version,
+            channel,
+            original_name,
+            update_dir,
+        )
+        raise
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+        extracting_path = update_dir / (
+            f".extracting_{os.getpid()}_{timestamp}.exe"
+        )
+        if extracting_path.exists():
+            extracting_path.unlink()
+        if not completed and final_path is not None and final_path.exists():
+            final_path.unlink()
+        if not completed and source_package_path is not None:
+            source_package_path.unlink(missing_ok=True)
 
 
 def get_client_release(version):
@@ -2992,10 +3311,65 @@ def delete_client_release(version):
 def latest_client_release(query):
     client_version = str(query.get("client_version", [""])[0]).strip()
     channel = str(query.get("channel", ["stable"])[0]).strip().lower() or "stable"
+    if channel not in {"stable", "debug"}:
+        raise ValueError("channel 只能是 stable 或 debug")
     with get_conn() as conn:
+        file_row = conn.execute(
+            """
+            SELECT * FROM client_update_files
+            WHERE channel = ? AND is_active = ?
+            ORDER BY uploaded_at DESC, id DESC
+            LIMIT 1
+            """,
+            (channel, True),
+        ).fetchone()
+        channel_file_count = conn.execute(
+            "SELECT COUNT(*) AS total FROM client_update_files WHERE channel = ?",
+            (channel,),
+        ).fetchone()["total"]
         rows = conn.execute(
             "SELECT * FROM client_releases ORDER BY release_date DESC, id DESC",
         ).fetchall()
+    if file_row:
+        item = row_to_dict(file_row)
+        notes = _release_notes(item.get("release_notes"))
+        latest_version = item["version"]
+        return {
+            "code": 1,
+            "data": {
+                "has_update": (
+                    _version_key(latest_version)
+                    > _version_key(client_version)
+                ),
+                "current_version": client_version,
+                "latest_version": latest_version,
+                "channel": channel,
+                "download_url": item["download_url"]
+                or f"/api/client-update/download/{item['id']}",
+                "debug_download_url": (
+                    item["download_url"]
+                    or f"/api/client-update/download/{item['id']}"
+                    if channel == "debug"
+                    else ""
+                ),
+                "file_size": int(item["file_size"] or 0),
+                "size": int(item["file_size"] or 0),
+                "sha256": item["sha256"],
+                "release_notes": notes,
+                "force_update": False,
+                "title": latest_version,
+            },
+        }
+    if channel_file_count:
+        return {
+            "code": 1,
+            "data": {
+                "has_update": False,
+                "current_version": client_version,
+                "latest_version": client_version,
+                "channel": channel,
+            },
+        }
     if channel == "stable":
         candidates = [row for row in rows if bool(row["stable"])]
     else:
@@ -3020,6 +3394,26 @@ def latest_client_release(query):
             "size": Path(latest["release_file_path"]).stat().st_size if latest.get("release_file_path") and Path(latest["release_file_path"]).exists() else 0,
         },
     }
+
+
+def download_client_update_file(file_id):
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM client_update_files WHERE id = ?",
+            (int(file_id),),
+        ).fetchone()
+    if not row:
+        raise FileNotFoundError("客户端更新文件记录不存在")
+    item = row_to_dict(row)
+    path = Path(item["file_path"]).resolve()
+    allowed_dir = CLIENT_UPDATES_DIR.resolve()
+    try:
+        path.relative_to(allowed_dir)
+    except ValueError as exc:
+        raise FileNotFoundError("客户端更新文件路径无效") from exc
+    if not path.is_file():
+        raise FileNotFoundError("客户端更新文件不存在")
+    return path, item["stored_name"] or path.name
 
 
 def download_client_release(version, kind):

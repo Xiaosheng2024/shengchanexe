@@ -66,11 +66,13 @@ from web_admin_app.services import (
     validate_station_session,
     validate_barcode_use,
     download_client_release,
+    download_client_update_file,
     ensure_client_updates_dir,
+    upload_client_update,
     vacuum_or_analyze,
 )
 
-MAX_CLIENT_UPDATE_REQUEST_BYTES = 222 * 1024 * 1024
+MAX_CLIENT_UPDATE_REQUEST_BYTES = 502 * 1024 * 1024
 
 CLIENT_SESSION_ENDPOINTS = {
     "/api/station-completions",
@@ -117,6 +119,23 @@ def html_response(handler):
     handler.send_header("Content-Length", str(len(data)))
     handler.end_headers()
     handler.wfile.write(data)
+
+
+def file_response(handler, file_path, download_name):
+    handler.send_response(200)
+    handler.send_header("Content-Type", "application/octet-stream")
+    handler.send_header(
+        "Content-Disposition",
+        f'attachment; filename="{download_name}"',
+    )
+    handler.send_header("Content-Length", str(file_path.stat().st_size))
+    handler.end_headers()
+    with file_path.open("rb") as source:
+        while True:
+            chunk = source.read(1024 * 1024)
+            if not chunk:
+                break
+            handler.wfile.write(chunk)
 
 
 def login_html_response(handler, error="", status=200):
@@ -298,6 +317,10 @@ class AdminHandler(BaseHTTPRequestHandler):
                     {key: values[0] for key, values in query.items()}
                 )
             self.route_get()
+        except FileNotFoundError as exc:
+            json_response(self, {"error": str(exc)}, 404)
+        except ValueError as exc:
+            json_response(self, {"error": str(exc)}, 400)
         except Exception as exc:
             logging.exception("GET %s 处理失败", self.path)
             json_response(self, {"error": str(exc)}, 500)
@@ -319,7 +342,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
         if not require_api_auth(self, "POST", path):
             return
-        if path == "/api/client-releases":
+        if path in {"/api/client-releases", "/api/client-update/upload"}:
             if (self.current_user or {}).get("role") not in {
                 "admin",
                 "super_admin",
@@ -491,18 +514,18 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, latest_client_release(query))
         elif path.startswith("/api/client-update/download/"):
             parts = path.strip("/").split("/")
+            if len(parts) == 4:
+                file_path, download_name = download_client_update_file(
+                    parts[3]
+                )
+                file_response(self, file_path, download_name)
+                return
             if len(parts) != 5:
                 json_response(self, {"error": "not found"}, 404)
                 return
             version, kind = parts[3], parts[4]
             file_path, default_name = download_client_release(version, kind)
-            data = file_path.read_bytes()
-            self.send_response(200)
-            self.send_header("Content-Type", "application/octet-stream")
-            self.send_header("Content-Disposition", f'attachment; filename="{default_name}"')
-            self.send_header("Content-Length", str(len(data)))
-            self.end_headers()
-            self.wfile.write(data)
+            file_response(self, file_path, default_name)
         else:
             json_response(self, {"error": "not found"}, 404)
 
@@ -515,7 +538,7 @@ class AdminHandler(BaseHTTPRequestHandler):
             self._request_uploads.extend((files or {}).values())
         else:
             payload, files = read_json(self), None
-        if path == "/api/client-releases":
+        if path in {"/api/client-releases", "/api/client-update/upload"}:
             payload["_uploaded_by"] = (
                 (self.current_user or {}).get("username") or ""
             )
@@ -613,6 +636,8 @@ class AdminHandler(BaseHTTPRequestHandler):
             json_response(self, report_client_update(payload))
         elif path == "/api/client-releases":
             json_response(self, upsert_client_release(payload, files=files))
+        elif path == "/api/client-update/upload":
+            json_response(self, upload_client_update(payload, files=files))
         else:
             json_response(self, {"error": "not found"}, 404)
 

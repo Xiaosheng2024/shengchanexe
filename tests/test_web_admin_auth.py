@@ -237,7 +237,13 @@ class WebAdminAuthTest(unittest.TestCase):
             self.assertIn(expected, body["error"])
 
     def test_client_update_page_displays_http_upload_error(self):
-        self.assertIn('accept=".zip,application/zip"', HTML)
+        self.assertIn(
+            'accept=".exe,.zip,application/zip,application/octet-stream"',
+            HTML,
+        )
+        self.assertIn("/api/client-update/upload", HTML)
+        self.assertIn('form.append("channel"', HTML)
+        self.assertIn('form.append("file"', HTML)
         self.assertIn("正在上传更新包", HTML)
         self.assertIn("HTTP ${res.status}", HTML)
         self.assertNotIn('id="s7ToolFile"', HTML)
@@ -245,6 +251,144 @@ class WebAdminAuthTest(unittest.TestCase):
             services.MAX_CLIENT_UPDATE_FILE_BYTES,
             200 * 1024 * 1024,
         )
+
+    def test_new_client_update_upload_supports_exe_and_public_download(self):
+        fields = {
+            "version": "v0.9.3-rc8-exe",
+            "channel": "stable",
+            "release_notes": '["EXE上传测试"]',
+            "is_active": "true",
+        }
+        with self.assertRaises(HTTPError) as unauthorized:
+            self.multipart_request(
+                self.opener(),
+                "/api/client-update/upload",
+                fields,
+                "file",
+                "QualityControlSystem.exe",
+                b"MZ-stable-exe",
+            )
+        self.assertEqual(unauthorized.exception.code, 401)
+
+        opener = self.login("admin", "AdminInitial9!")
+        status, result = self.multipart_request(
+            opener,
+            "/api/client-update/upload",
+            fields,
+            "file",
+            "QualityControlSystem.exe",
+            b"MZ-stable-exe",
+        )
+        self.assertEqual(status, 200)
+        uploaded = result["data"]
+        self.assertEqual(uploaded["channel"], "stable")
+        self.assertEqual(
+            uploaded["sha256"],
+            hashlib.sha256(b"MZ-stable-exe").hexdigest(),
+        )
+        with database.get_conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM client_update_files WHERE id = ?",
+                (uploaded["id"],),
+            ).fetchone()
+        self.assertEqual(row["channel"], "stable")
+        self.assertTrue(Path(row["file_path"]).is_file())
+
+        with urlopen(
+            self.base + uploaded["download_url"], timeout=3
+        ) as response:
+            self.assertEqual(response.read(), b"MZ-stable-exe")
+            self.assertIn(
+                "QualityControlSystem.exe",
+                response.headers["Content-Disposition"],
+            )
+        Path(row["file_path"]).unlink()
+        with self.assertRaises(HTTPError) as missing_file:
+            urlopen(self.base + uploaded["download_url"], timeout=3)
+        self.assertEqual(missing_file.exception.code, 404)
+
+    def test_new_client_update_zip_and_channel_latest_are_independent(self):
+        opener = self.login("admin", "AdminInitial9!")
+        _, stable = self.multipart_request(
+            opener,
+            "/api/client-update/upload",
+            {
+                "version": "v0.9.3-rc8",
+                "channel": "stable",
+                "release_notes": '["正式版"]',
+            },
+            "file",
+            "QualityControlSystem.exe",
+            b"MZ-stable",
+        )
+        _, debug = self.multipart_request(
+            opener,
+            "/api/client-update/upload",
+            {
+                "version": "v0.9.3-rc9",
+                "channel": "debug",
+                "release_notes": '["调试版"]',
+            },
+            "file",
+            "QualityControlSystem-debug-windows.zip",
+            self.update_zip(
+                executable_name="QualityControlSystem_Debug.exe",
+                content=b"MZ-debug",
+            ),
+        )
+        with urlopen(
+            self.base
+            + "/api/client-update/latest?client_version=v0.9.3-rc1&channel=stable",
+            timeout=3,
+        ) as response:
+            stable_latest = json.loads(response.read().decode("utf-8"))
+        with urlopen(
+            self.base
+            + "/api/client-update/latest?client_version=v0.9.3-rc1&channel=debug",
+            timeout=3,
+        ) as response:
+            debug_latest = json.loads(response.read().decode("utf-8"))
+        self.assertEqual(
+            stable_latest["data"]["latest_version"], "v0.9.3-rc8"
+        )
+        self.assertEqual(
+            debug_latest["data"]["latest_version"], "v0.9.3-rc9"
+        )
+        self.assertEqual(
+            stable_latest["data"]["download_url"],
+            stable["data"]["download_url"],
+        )
+        self.assertEqual(
+            debug_latest["data"]["download_url"],
+            debug["data"]["download_url"],
+        )
+        self.assertEqual(
+            debug_latest["data"]["debug_download_url"],
+            debug["data"]["download_url"],
+        )
+        self.assertEqual(debug_latest["data"]["release_notes"], ["调试版"])
+
+    def test_new_client_update_rejects_illegal_file_and_missing_download(self):
+        opener = self.login("admin", "AdminInitial9!")
+        with self.assertRaises(HTTPError) as invalid:
+            self.multipart_request(
+                opener,
+                "/api/client-update/upload",
+                {"version": "v0.9.3-invalid", "channel": "stable"},
+                "file",
+                "update.py",
+                b"print('no')",
+            )
+        self.assertEqual(invalid.exception.code, 400)
+        body = json.loads(invalid.exception.read().decode("utf-8"))
+        self.assertIn("只支持 EXE 或 ZIP", body["error"])
+
+        with self.assertRaises(HTTPError) as missing:
+            urlopen(
+                self.base + "/api/client-update/download/999999",
+                timeout=3,
+            )
+        self.assertEqual(missing.exception.code, 404)
 
     def test_duplicate_update_filename_does_not_overwrite_old_package(self):
         opener = self.login("admin", "AdminInitial9!")

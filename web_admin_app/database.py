@@ -123,6 +123,13 @@ CLIENT_RELEASE_COLUMNS = {
     "created_at": "TEXT NOT NULL",
     "updated_at": "TEXT NOT NULL",
 }
+CLIENT_UPDATE_FILE_COLUMNS = {
+    "channel": "TEXT NOT NULL DEFAULT 'stable'",
+    "download_url": "TEXT NOT NULL DEFAULT ''",
+    "release_notes": "TEXT NOT NULL DEFAULT '[]'",
+    "is_active": "INTEGER NOT NULL DEFAULT 1",
+    "created_at": "TEXT",
+}
 
 
 def load_database_config():
@@ -670,14 +677,19 @@ def create_traceability_schema(conn):
         CREATE TABLE IF NOT EXISTS client_update_files (
             id {id_type},
             version TEXT NOT NULL,
+            channel TEXT NOT NULL DEFAULT 'stable',
             original_name TEXT NOT NULL,
             stored_name TEXT NOT NULL,
             file_path TEXT NOT NULL,
             file_size BIGINT NOT NULL,
             sha256 TEXT NOT NULL,
+            download_url TEXT NOT NULL DEFAULT '',
+            release_notes TEXT NOT NULL DEFAULT '[]',
+            is_active {bool_true_type} NOT NULL,
             uploaded_by TEXT,
             uploaded_at {ts_type} NOT NULL DEFAULT {current_ts},
-            remark TEXT
+            remark TEXT,
+            created_at {ts_type} NOT NULL DEFAULT {current_ts}
         );
         CREATE TABLE IF NOT EXISTS web_admin_users (
             id {id_type},
@@ -940,6 +952,15 @@ def migrate_sqlite_db(conn):
             CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
             """
         )
+    update_file_columns = {
+        row["name"]
+        for row in conn.execute("PRAGMA table_info(client_update_files)").fetchall()
+    }
+    for column, definition in CLIENT_UPDATE_FILE_COLUMNS.items():
+        if column not in update_file_columns:
+            conn.execute(
+                f"ALTER TABLE client_update_files ADD COLUMN {column} {definition}"
+            )
 
 
 def migrate_postgresql_db(conn):
@@ -1078,6 +1099,24 @@ def migrate_postgresql_db(conn):
             CREATE INDEX IF NOT EXISTS idx_client_update_logs_created_at ON client_update_logs(created_at);
             CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
             """
+        )
+    update_file_rows = conn.execute(
+        """
+        SELECT column_name FROM information_schema.columns
+        WHERE table_name = 'client_update_files'
+        """
+    ).fetchall()
+    update_file_columns = {row["column_name"] for row in update_file_rows}
+    for column, definition in CLIENT_UPDATE_FILE_COLUMNS.items():
+        if column in update_file_columns:
+            continue
+        pg_definition = definition
+        if column == "is_active":
+            pg_definition = "BOOLEAN NOT NULL DEFAULT true"
+        elif column == "created_at":
+            pg_definition = "TIMESTAMP"
+        conn.execute(
+            f"ALTER TABLE client_update_files ADD COLUMN {column} {pg_definition}"
         )
 
 

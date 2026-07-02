@@ -22,12 +22,13 @@ class DeployScriptTest(unittest.TestCase):
         self.assertIn("git archive", source)
         self.assertIn("--untracked-files=no", source)
 
-    def test_deploy_uses_get_health_check_and_restores_service_on_error(self):
+    def test_deploy_script_only_uploads_files(self):
         source = (ROOT / "deploy_update_to_server.sh").read_text(encoding="utf-8")
-        self.assertNotIn("curl -fsSI", source)
-        self.assertIn("-w '%{http_code}'", source)
-        self.assertIn('sudo systemctl start "${MES_SERVICE}" || true', source)
-        self.assertIn("服务器禁止 ICMP/Ping", source)
+        self.assertIn("仅上传文件，不执行任何服务器部署命令", source)
+        self.assertIn('scp "${DIST_DIR}/mes_update.tar.gz"', source)
+        self.assertNotIn("sudo ", source)
+        self.assertNotIn("systemctl", source)
+        self.assertNotIn("bash -s", source)
 
 
 if __name__ == "__main__":
