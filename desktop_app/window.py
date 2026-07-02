@@ -5037,6 +5037,7 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText("降级模式已开启，系统不进行防错控制。")
             self.refresh_work_area()
             return
+
         self.sync_workers_for_station()
         self.set_english_keyboard_layout()
         step = self.current_step()
@@ -5047,8 +5048,9 @@ class QualityControlWindow(QMainWindow):
         should_speak_step = self.last_voice_step_key != step_key
         if should_speak_step:
             self.last_voice_step_key = step_key
+
         logging.info(
-             "当前工序启动检查：name=%s type=%s PLC_MAGNET=%s current_barcode=%s "
+            "当前工序启动检查：name=%s type=%s PLC_MAGNET=%s current_barcode=%s "
             "step_index=%s station_session_id=%s online_mode=%s degraded=%s",
             step.name,
             step.step_type,
@@ -5059,14 +5061,15 @@ class QualityControlWindow(QMainWindow):
             self.online_mode,
             self.degraded_mode_checkbox.isChecked(),
         )
-        self.last_voice_step_key = step_key
+
         if step.step_type == SCREW:
             self.stop_plc_worker()
             self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(True)
             self.enter_tool_screw_step(step)
-        if should_speak_step:
-            self.speak(f"请打螺丝{step.required_count}颗")
+            if should_speak_step:
+                self.speak(f"请打螺丝{step.required_count}颗")
+
         elif step.step_type == PLC:
             self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
@@ -5075,36 +5078,59 @@ class QualityControlWindow(QMainWindow):
                 self.start_plc_worker(step)
             else:
                 self.message_label.setText("PLC接收工序需要在线模式和服务端工位占用")
+
         elif step.step_type == PLC_MAGNET:
+            logging.info(
+                "进入PLC磁通检测工序分支：step=%s type=%s current_barcode=%s "
+                "station_session_id=%s running=%s",
+                step.name,
+                step.step_type,
+                self.current_barcode,
+                self.station_session_id,
+                self.plc_magnet_thread is not None and self.plc_magnet_thread.isRunning(),
+            )
+
             self.stop_plc_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool("PLC磁通检测工序")
+
             if not self.current_barcode:
-                self.message_label.setText(
-                    "缺少当前主条码，不能启动PLC磁通检测"
+                logging.warning(
+                    "PLC磁通检测启动时 current_barcode 为空，但仍继续启动流程：step=%s type=%s",
+                    step.name,
+                    step.step_type,
                 )
+                self.message_label.setText("PLC磁通检测获取：主条码为空，继续执行PLC流程")
             else:
-                self.start_plc_magnet_worker(step)
+                self.message_label.setText("开始执行PLC磁通检测流程")
+
+            self.start_plc_magnet_worker(step)
+
         elif step.step_type == BARCODE_SWITCH:
             self.stop_plc_worker()
             self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool()
             self.message_label.setText("主条码切换：请扫描旧主条码")
-            self.speak("请扫描旧主条码")
+            if should_speak_step:
+                self.speak("请扫描旧主条码")
+
         elif step.step_type == MATERIAL_BIND:
             self.stop_plc_worker()
             self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool()
             self.message_label.setText("子物料绑定：请扫描父件主条码")
-            self.speak("请扫描父件主条码")
+            if should_speak_step:
+                self.speak("请扫描父件主条码")
+
         else:
             self.stop_plc_worker()
             self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(False)
             self.lock_tool()
-            self.speak("请扫码")
+            if should_speak_step:
+                self.speak("请扫码")
 
     def station_has_step_type(self, step_type: str) -> bool:
         return any(
