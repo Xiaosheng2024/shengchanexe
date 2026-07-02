@@ -1,18 +1,22 @@
 import ast
 import os
+import struct
 import tempfile
 import unittest
 from pathlib import Path
 
 from plc_magnet_test_tool.logic import (
     DB_ACCESS_GUIDANCE,
+    DEFAULT_RAW_READ_LENGTH,
     DB_LENGTH_GUIDANCE,
+    RAW_LENGTH_INSUFFICIENT,
     REAL_ACCESS_GUIDANCE,
     VERIFY_WARNING,
     MagnetConfig,
     MagnetFlowController,
     evaluate_magnet_result,
     format_word,
+    parse_raw_block,
 )
 from plc_magnet_test_tool.paths import (
     ensure_config_file,
@@ -46,6 +50,7 @@ class FakePlcClient:
         self.failures = dict(failures or {})
         self.raw_length = raw_length
         self.writes = []
+        self.read_bytes_calls = []
 
     def read_word(self, db_number, offset):
         if ("word", offset) in self.failures:
@@ -72,6 +77,7 @@ class FakePlcClient:
         return {10: 123456, 18: 122980}.get(offset, 0)
 
     def read_bytes(self, db_number, offset, length):
+        self.read_bytes_calls.append((db_number, offset, length))
         if ("bytes", offset) in self.failures:
             raise RuntimeError(self.failures[("bytes", offset)])
         return bytes(min(length, self.raw_length))
@@ -277,6 +283,85 @@ class PlcMagnetLogicTest(unittest.TestCase):
         ).precheck_db_length()
         self.assertFalse(result["ok"])
         self.assertEqual(result["message"], DB_LENGTH_GUIDANCE)
+
+    @staticmethod
+    def sample_raw_block():
+        raw = bytearray(26)
+        for offset, value in (
+            (0, 1),
+            (2, 2),
+            (4, 3),
+            (6, 4),
+            (8, 5),
+            (14, 6),
+            (16, 1),
+            (22, 7),
+            (24, 0),
+        ):
+            raw[offset:offset + 2] = value.to_bytes(2, "big")
+        raw[10:14] = struct.pack(">f", 12.5)
+        raw[18:22] = struct.pack(">f", -3.25)
+        return bytes(raw)
+
+    def test_raw_length_26_parses_all_addresses(self):
+        parsed = parse_raw_block(self.sample_raw_block())
+        self.assertTrue(all(point["ok"] for point in parsed.values()))
+        self.assertEqual(len(parsed), 11)
+
+    def test_short_raw_marks_dbw24_as_insufficient(self):
+        parsed = parse_raw_block(self.sample_raw_block()[:25])
+        self.assertFalse(parsed["right_result"]["ok"])
+        self.assertEqual(
+            parsed["right_result"]["display"],
+            RAW_LENGTH_INSUFFICIENT,
+        )
+
+    def test_dbw0_is_parsed_from_raw_zero_to_two(self):
+        raw = bytearray(self.sample_raw_block())
+        raw[0:2] = b"\x12\x34"
+        parsed = parse_raw_block(raw)
+        self.assertEqual(parsed["barcode_ok"]["value"], 0x1234)
+        self.assertEqual(parsed["barcode_ok"]["raw_hex"], "12 34")
+
+    def test_dbd10_is_parsed_from_raw_ten_to_fourteen(self):
+        raw = bytearray(self.sample_raw_block())
+        raw[10:14] = struct.pack(">f", 98.75)
+        parsed = parse_raw_block(raw)
+        self.assertAlmostEqual(parsed["left_flux"]["value"], 98.75)
+
+    def test_default_raw_read_length_is_26(self):
+        self.assertEqual(DEFAULT_RAW_READ_LENGTH, 26)
+
+    def test_raw_read_passes_third_argument_as_size(self):
+        client = FakePlcClient(raw_length=100)
+        result = self.make_controller(client).read_raw_block(221, 0, 26)
+        self.assertTrue(result["ok"])
+        self.assertEqual(client.read_bytes_calls, [(221, 0, 26)])
+        self.assertEqual(result["size"], 26)
+
+    def test_probe_failure_has_clear_error(self):
+        class FailingProbeClient(FakePlcClient):
+            def read_bytes(self, db_number, offset, length):
+                self.read_bytes_calls.append((db_number, offset, length))
+                raise RuntimeError(f"拒绝读取{length}字节")
+
+        result = self.make_controller(
+            FailingProbeClient()
+        ).probe_readable_length()
+        self.assertFalse(result["ok"])
+        self.assertIn("无法读取 DB221 原始数据块", result["message"])
+        self.assertIn("不足 26 字节", result["message"])
+
+    def test_probe_uses_descending_lengths_and_returns_first_success(self):
+        client = FakePlcClient(raw_length=40)
+        result = self.make_controller(client).probe_readable_length()
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["readable_length"], 40)
+        self.assertTrue(result["complete_address_table"])
+        self.assertEqual(
+            [length for _, _, length in client.read_bytes_calls],
+            [100, 80, 64, 50, 40],
+        )
 
 
 class PlcMagnetToolPackagingTest(unittest.TestCase):

@@ -31,12 +31,15 @@ from PyQt5.QtWidgets import (
 )
 
 from plc_magnet_test_tool.logic import (
+    DEFAULT_RAW_READ_LENGTH,
     DB_LENGTH_GUIDANCE,
+    MIN_RAW_ADDRESS_TABLE_LENGTH,
     MagnetAddresses,
     MagnetConfig,
     MagnetFlowController,
     evaluate_magnet_result,
     format_word,
+    parse_raw_block,
 )
 from plc_magnet_test_tool.paths import (
     configure_file_logging,
@@ -223,6 +226,10 @@ class MagnetTestWindow(QMainWindow):
         self.parser = load_parser()
         self.runner = TaskRunner()
         self.last_snapshot = {}
+        self.current_raw_data = b""
+        self.current_raw_start = 0
+        self.current_raw_db = 221
+        self.raw_minimum_26_confirmed = False
         self.auto_timer = QTimer(self)
         self.auto_timer.timeout.connect(self.read_all)
         self.build_ui()
@@ -332,6 +339,73 @@ class MagnetTestWindow(QMainWindow):
             write_row.addWidget(button)
         layout.addWidget(write_group)
 
+        raw_group = QGroupBox("原始DB读取")
+        raw_layout = QVBoxLayout(raw_group)
+        raw_controls = QHBoxLayout()
+        self.raw_db_input = QSpinBox()
+        self.raw_db_input.setRange(1, 65535)
+        self.raw_db_input.setValue(221)
+        self.raw_start_input = QSpinBox()
+        self.raw_start_input.setRange(0, 65535)
+        self.raw_length_input = QSpinBox()
+        self.raw_length_input.setRange(1, 65535)
+        self.raw_length_input.setValue(DEFAULT_RAW_READ_LENGTH)
+        raw_controls.addWidget(QLabel("DB号"))
+        raw_controls.addWidget(self.raw_db_input)
+        raw_controls.addWidget(QLabel("起始偏移"))
+        raw_controls.addWidget(self.raw_start_input)
+        raw_controls.addWidget(QLabel("读取长度"))
+        raw_controls.addWidget(self.raw_length_input)
+        raw_controls.addWidget(QLabel("快捷长度"))
+        for length in (26, 32, 40, 50, 100):
+            button = QPushButton(str(length))
+            button.setMaximumWidth(48)
+            button.clicked.connect(
+                lambda checked=False, value=length: self.raw_length_input.setValue(
+                    value
+                )
+            )
+            raw_controls.addWidget(button)
+        self.raw_read_btn = QPushButton("读取原始DB")
+        self.raw_probe_btn = QPushButton("自动探测可读长度")
+        self.raw_parse_btn = QPushButton("按地址表解析当前原始数据")
+        raw_controls.addWidget(self.raw_read_btn)
+        raw_controls.addWidget(self.raw_probe_btn)
+        raw_controls.addWidget(self.raw_parse_btn)
+        raw_controls.addStretch(1)
+        raw_layout.addLayout(raw_controls)
+
+        raw_hint = QLabel(
+            "当前地址表最小需要读取长度：26 字节。原因：最后一个地址 "
+            "DB221.DBW24 是 Word，占 Byte24~Byte25，所以最小长度 = 24 + 2 = 26。"
+        )
+        raw_hint.setWordWrap(True)
+        raw_hint.setStyleSheet("color:#1d4ed8;font-weight:700;")
+        raw_layout.addWidget(raw_hint)
+
+        raw_displays = QHBoxLayout()
+        self.raw_hex_edit = QTextEdit()
+        self.raw_hex_edit.setReadOnly(True)
+        self.raw_hex_edit.setPlaceholderText("原始 HEX")
+        self.raw_bytes_edit = QTextEdit()
+        self.raw_bytes_edit.setReadOnly(True)
+        self.raw_bytes_edit.setPlaceholderText("按字节显示：Byte0、Byte1...")
+        self.raw_parsed_edit = QTextEdit()
+        self.raw_parsed_edit.setReadOnly(True)
+        self.raw_parsed_edit.setPlaceholderText("按地址表本地解析")
+        for title, editor in (
+            ("原始 HEX", self.raw_hex_edit),
+            ("字节分组", self.raw_bytes_edit),
+            ("地址表解析", self.raw_parsed_edit),
+        ):
+            pane = QVBoxLayout()
+            pane.addWidget(QLabel(title))
+            editor.setMaximumHeight(115)
+            pane.addWidget(editor)
+            raw_displays.addLayout(pane, 1)
+        raw_layout.addLayout(raw_displays)
+        layout.addWidget(raw_group)
+
         content = QHBoxLayout()
         read_group = QGroupBox("PLC读取显示")
         read_layout = QVBoxLayout(read_group)
@@ -411,6 +485,9 @@ class MagnetTestWindow(QMainWindow):
         )
         self.db_length_btn.clicked.connect(self.precheck_db_length)
         self.read_btn.clicked.connect(self.read_all)
+        self.raw_read_btn.clicked.connect(self.read_raw_db)
+        self.raw_probe_btn.clicked.connect(self.probe_raw_length)
+        self.raw_parse_btn.clicked.connect(self.parse_current_raw)
         self.auto_start_btn.clicked.connect(self.start_auto_refresh)
         self.auto_stop_btn.clicked.connect(self.stop_auto_refresh)
         self.write_dbw0_btn.clicked.connect(lambda: self.write_one(0))
@@ -553,6 +630,44 @@ class MagnetTestWindow(QMainWindow):
             lambda controller: controller.precheck_db_length(),
         )
 
+    def read_raw_db(self):
+        db_number = self.raw_db_input.value()
+        start = self.raw_start_input.value()
+        size = self.raw_length_input.value()
+        self.runner.run_controller(
+            "读取原始DB",
+            lambda controller: controller.read_raw_block(
+                db_number=db_number,
+                start=start,
+                size=size,
+                flux_mode=self.flux_mode(),
+            ),
+        )
+
+    def probe_raw_length(self):
+        db_number = self.raw_db_input.value()
+        start = self.raw_start_input.value()
+        self.runner.run_controller(
+            "自动探测可读长度",
+            lambda controller: controller.probe_readable_length(
+                db_number=db_number,
+                start=start,
+            ),
+        )
+
+    def parse_current_raw(self):
+        if not self.current_raw_data:
+            self.error_label.setText("尚未读取原始DB数据")
+            return
+        parsed = parse_raw_block(
+            self.current_raw_data,
+            start_offset=self.current_raw_start,
+            flux_mode=self.flux_mode(),
+            addresses=self.magnet_config().addresses,
+        )
+        self.render_raw_parsed(parsed)
+        self.append_log("已按当前地址表重新解析原始DB数据")
+
     def finish_if_ok(self):
         if evaluate_magnet_result(
             self.last_snapshot.get("left_result"),
@@ -615,6 +730,44 @@ class MagnetTestWindow(QMainWindow):
                 )
             )
             self.append_log(result.get("message", "DB长度预检完成"))
+        if name == "读取原始DB" and isinstance(result, dict):
+            if result.get("ok"):
+                self.render_raw_result(result)
+                self.error_label.setText("")
+                if (
+                    result.get("start") == 0
+                    and result.get("size", 0) >= MIN_RAW_ADDRESS_TABLE_LENGTH
+                ):
+                    self.raw_minimum_26_confirmed = True
+            else:
+                size = result.get("size", self.raw_length_input.value())
+                db_number = result.get("db_number", self.raw_db_input.value())
+                start = result.get("start", self.raw_start_input.value())
+                if size == 26 and start == 0:
+                    message = (
+                        f"读取 DB{db_number} 0~25 失败。可能原因："
+                        "1. DB221实际长度不足26字节；2. DB221未关闭优化块访问；"
+                        "3. DB221未下载到PLC；4. PUT/GET未开启；5. DB号不是221。"
+                    )
+                elif size > 26 and self.raw_minimum_26_confirmed:
+                    message = (
+                        f"DB{db_number} 至少有26字节，但可能不足{size}字节。"
+                        "当前磁吸地址表可用。"
+                    )
+                else:
+                    message = result.get("message", "原始DB读取失败")
+                self.error_label.setText(message)
+                self.append_log(message)
+        if name == "自动探测可读长度" and isinstance(result, dict):
+            message = result.get("message", "自动探测完成")
+            if result.get("ok"):
+                readable_length = int(result.get("readable_length", 0))
+                self.raw_length_input.setValue(readable_length)
+                self.raw_minimum_26_confirmed = bool(
+                    result.get("complete_address_table")
+                )
+            self.error_label.setText("" if result.get("ok") else message)
+            self.append_log(message)
         if name == "一键流程测试" and isinstance(result, dict):
             values = result.get("values")
             if values:
@@ -644,6 +797,40 @@ class MagnetTestWindow(QMainWindow):
             self.last_snapshot[key] = result["value"]
         self.render_snapshot(values, update_overall=False)
         self.error_label.setText("")
+
+    def render_raw_result(self, result):
+        self.current_raw_data = bytes(result["raw"])
+        self.current_raw_start = int(result["start"])
+        self.current_raw_db = int(result["db_number"])
+        self.raw_hex_edit.setPlainText(result["hex"])
+        self.raw_bytes_edit.setPlainText(
+            "\n".join(
+                f"Byte{item['index']}: {item['value']:3d} / "
+                f"16#{item['value']:02X}"
+                for item in result["bytes"]
+            )
+        )
+        self.render_raw_parsed(result["parsed"])
+        self.append_log(
+            f"已显示 DB{self.current_raw_db} 起始{self.current_raw_start} "
+            f"长度{len(self.current_raw_data)}的原始数据"
+        )
+
+    def render_raw_parsed(self, parsed):
+        lines = []
+        snapshot = {"flux_mode": self.flux_mode()}
+        for key, _, _ in self.DISPLAY_ROWS:
+            point = parsed.get(key, {})
+            address = point.get("address", "")
+            display = point.get("display", "长度不足，无法解析")
+            lines.append(f"{address}: {display}")
+            if point.get("ok"):
+                snapshot[key] = point["value"]
+            elif key in self.value_items:
+                self.value_items[key].setText(display)
+        self.raw_parsed_edit.setPlainText("\n".join(lines))
+        if len(snapshot) > 1:
+            self.render_snapshot(snapshot, update_overall=False)
 
     def render_snapshot(self, values, update_overall=True):
         self.last_snapshot.update(

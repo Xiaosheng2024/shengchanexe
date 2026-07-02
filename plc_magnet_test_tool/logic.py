@@ -1,6 +1,7 @@
 from dataclasses import dataclass
+import struct
 from time import monotonic, sleep
-from typing import Callable, Dict
+from typing import Callable, Dict, Iterable
 
 
 WRITE_ONE_OFFSETS = {0, 4, 8}
@@ -15,6 +16,10 @@ REAL_ACCESS_GUIDANCE = (
     "Word读取成功，REAL读取失败，请检查 DBD10 地址、DB长度、REAL类型。"
 )
 DB_LENGTH_GUIDANCE = "DB221 块长度不足或外部访问失败。"
+DEFAULT_RAW_READ_LENGTH = 26
+MIN_RAW_ADDRESS_TABLE_LENGTH = 26
+RAW_PROBE_LENGTHS = (100, 80, 64, 50, 40, 32, 26, 24, 20, 10, 2)
+RAW_LENGTH_INSUFFICIENT = "长度不足，无法解析"
 
 POINT_DEFINITIONS = (
     ("barcode_ok", "barcode_ok", "DBW", "WORD", 2),
@@ -65,6 +70,61 @@ def format_word(value: int) -> str:
     return f"{value} / 16#{value:04X}"
 
 
+def format_raw_hex(raw: bytes) -> str:
+    return bytes(raw).hex(" ").upper()
+
+
+def parse_raw_block(
+    raw: bytes,
+    start_offset: int = 0,
+    flux_mode: str = "REAL",
+    addresses: MagnetAddresses = None,
+) -> Dict:
+    data = bytes(raw)
+    address_config = addresses or MagnetAddresses()
+    mode = flux_mode.upper()
+    parsed = {}
+
+    for key, address_attr, prefix, point_type, length in POINT_DEFINITIONS:
+        absolute_offset = int(getattr(address_config, address_attr))
+        relative_offset = absolute_offset - int(start_offset)
+        address = f"{prefix}{absolute_offset}"
+        if (
+            relative_offset < 0
+            or relative_offset + length > len(data)
+        ):
+            parsed[key] = {
+                "ok": False,
+                "address": address,
+                "offset": absolute_offset,
+                "length": length,
+                "display": RAW_LENGTH_INSUFFICIENT,
+            }
+            continue
+
+        point_data = data[relative_offset:relative_offset + length]
+        if point_type == "WORD":
+            value = int.from_bytes(point_data, byteorder="big", signed=False)
+            display = format_word(value)
+        elif mode == "DWORD":
+            value = int.from_bytes(point_data, byteorder="big", signed=False)
+            display = str(value)
+        else:
+            value = float(struct.unpack(">f", point_data)[0])
+            display = f"{value:.4f}"
+        parsed[key] = {
+            "ok": True,
+            "address": address,
+            "offset": absolute_offset,
+            "length": length,
+            "value": value,
+            "display": display,
+            "raw_hex": format_raw_hex(point_data),
+        }
+
+    return parsed
+
+
 def evaluate_magnet_result(left_result: int, right_result: int) -> str:
     if left_result == 1 and right_result == 1:
         return "OK"
@@ -108,14 +168,148 @@ class MagnetFlowController:
         address_label: str,
         length: int,
         exc: Exception,
+        db_number: int = None,
     ) -> str:
+        target_db = self.config.db_number if db_number is None else db_number
         return (
             f"读取失败 PLC IP={getattr(self.client, 'ip', '未知')} "
             f"Rack={getattr(self.client, 'rack', '未知')} "
             f"Slot={getattr(self.client, 'slot', '未知')} "
-            f"DB={self.config.db_number} 地址={address_label} "
+            f"DB={target_db} 地址={address_label} "
             f"读取长度={length} 错误原文={exc}"
         )
+
+    def read_raw_block(
+        self,
+        db_number: int = None,
+        start: int = 0,
+        size: int = DEFAULT_RAW_READ_LENGTH,
+        flux_mode: str = "REAL",
+    ) -> Dict:
+        target_db = self.config.db_number if db_number is None else int(db_number)
+        start = int(start)
+        size = int(size)
+        if start < 0:
+            raise ValueError("起始偏移不能小于0")
+        if size <= 0:
+            raise ValueError("读取长度必须大于0")
+
+        address_label = f"DB{target_db}.DBB{start}-{start + size - 1}"
+        try:
+            # S7 db_read 的第三个参数是读取字节数 size，不是结束地址。
+            raw = bytes(self.client.read_bytes(target_db, start, size))
+            if len(raw) < size:
+                raise ValueError(f"请求{size}字节，实际只读取到{len(raw)}字节")
+        except Exception as exc:
+            failure = self._read_failure_text(
+                address_label,
+                size,
+                exc,
+                db_number=target_db,
+            )
+            self.log(failure)
+            return {
+                "ok": False,
+                "db_number": target_db,
+                "start": start,
+                "size": size,
+                "error": str(exc),
+                "message": failure,
+            }
+
+        parsed = parse_raw_block(
+            raw,
+            start_offset=start,
+            flux_mode=flux_mode,
+            addresses=self.config.addresses,
+        )
+        self.log(
+            f"原始DB读取成功 DB={target_db} 起始偏移={start} "
+            f"读取长度={size} HEX={format_raw_hex(raw)}"
+        )
+        return {
+            "ok": True,
+            "db_number": target_db,
+            "start": start,
+            "size": size,
+            "raw": raw,
+            "hex": format_raw_hex(raw),
+            "bytes": [
+                {"index": start + index, "value": value}
+                for index, value in enumerate(raw)
+            ],
+            "parsed": parsed,
+            "flux_mode": flux_mode.upper(),
+        }
+
+    def probe_readable_length(
+        self,
+        db_number: int = None,
+        start: int = 0,
+        lengths: Iterable[int] = RAW_PROBE_LENGTHS,
+    ) -> Dict:
+        target_db = self.config.db_number if db_number is None else int(db_number)
+        start = int(start)
+        attempts = []
+        for size in lengths:
+            size = int(size)
+            try:
+                raw = bytes(self.client.read_bytes(target_db, start, size))
+                if len(raw) < size:
+                    raise ValueError(
+                        f"请求{size}字节，实际只读取到{len(raw)}字节"
+                    )
+                if size >= MIN_RAW_ADDRESS_TABLE_LENGTH and start == 0:
+                    message = f"当前可读长度至少为 {size} 字节。"
+                else:
+                    message = (
+                        f"当前可读长度至少为 {size} 字节。\n"
+                        "DB221 当前可读长度不足 26 字节，无法读取完整磁吸地址表。\n"
+                        "请 PLC 工程师确认 DB221 实际长度是否至少包含 Byte0~Byte25。"
+                    )
+                self.log(
+                    f"DB可读长度探测成功 DB={target_db} 起始偏移={start} "
+                    f"读取长度={size}"
+                )
+                return {
+                    "ok": True,
+                    "db_number": target_db,
+                    "start": start,
+                    "readable_length": size,
+                    "complete_address_table": (
+                        start == 0
+                        and size >= MIN_RAW_ADDRESS_TABLE_LENGTH
+                    ),
+                    "attempts": attempts + [{"size": size, "ok": True}],
+                    "message": message,
+                }
+            except Exception as exc:
+                attempts.append(
+                    {"size": size, "ok": False, "error": str(exc)}
+                )
+                self.log(
+                    self._read_failure_text(
+                        f"DB{target_db}.DBB{start}-{start + size - 1}",
+                        size,
+                        exc,
+                        db_number=target_db,
+                    )
+                )
+
+        message = (
+            f"无法读取 DB{target_db} 原始数据块。\n"
+            "DB221 当前可读长度不足 26 字节，无法读取完整磁吸地址表。\n"
+            "请 PLC 工程师确认 DB221 实际长度是否至少包含 Byte0~Byte25。"
+        )
+        self.log(message)
+        return {
+            "ok": False,
+            "db_number": target_db,
+            "start": start,
+            "attempts": attempts,
+            "message": message,
+            "error": attempts[-1]["error"] if attempts else "未执行探测",
+        }
 
     def read_point(self, key: str, flux_mode: str = "REAL") -> Dict:
         _, address_attr, prefix, point_type, length = self._point_definition(key)
