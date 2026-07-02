@@ -1,0 +1,35 @@
+# PLC 磁吸流程调试工具
+
+该工具用于现场与 PLC 工程师逐点联调 DB221 磁吸流程，不参与 MES
+主流程。默认连接参数为：
+
+- PLC IP：`192.168.111.50`
+- Rack：`0`
+- Slot：`1`
+- DB：`221`
+
+## 运行
+
+在项目根目录执行：
+
+```bash
+python3 plc_magnet_test_tool/main.py
+```
+
+首次启动会在程序目录根据 `config.example.ini` 创建本地
+`config.ini`。本地配置已被 Git 忽略。
+
+## 安全规则
+
+- MES 只向 `DBW0`、`DBW4`、`DBW8` 写整数 `1`。
+- 工具不提供写 `0`、清零或清全部按钮。
+- 每次写入后最多读回 3 次，默认间隔 100ms。
+- 左右磁吸结果必须同时为 `1`，才允许写 `DBW8=1` 通知 PLC 解锁。
+- `DBD10`、`DBD18` 默认按 Siemens REAL 读取，也可切换为 DWORD
+  排查 PLC 数据类型。
+
+## 独立 Windows 构建
+
+本工具使用独立工作流
+`.github/workflows/plc-magnet-tool-build.yml` 构建
+`PLC_Magnet_Test_Tool.exe`。它不会加入正式客户端工作流或正式发布包。

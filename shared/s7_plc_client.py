@@ -103,11 +103,23 @@ class S7PlcClient:
             return int(self.snap7_util.get_int(bytearray(raw), 0))
         return int.from_bytes(raw, byte_order="big", signed=True)
 
+    def read_word(self, db_number: int, offset: int) -> int:
+        raw = self.read_bytes(db_number, offset, 2)
+        if self.snap7_util and hasattr(self.snap7_util, "get_word"):
+            return int(self.snap7_util.get_word(bytearray(raw), 0))
+        return int.from_bytes(raw, byteorder="big", signed=False)
+
     def read_dint(self, db_number: int, offset: int) -> int:
         raw = self.read_bytes(db_number, offset, 4)
         if self.snap7_util:
             return int(self.snap7_util.get_dint(bytearray(raw), 0))
         return int.from_bytes(raw, byte_order="big", signed=True)
+
+    def read_dword(self, db_number: int, offset: int) -> int:
+        raw = self.read_bytes(db_number, offset, 4)
+        if self.snap7_util and hasattr(self.snap7_util, "get_dword"):
+            return int(self.snap7_util.get_dword(bytearray(raw), 0))
+        return int.from_bytes(raw, byteorder="big", signed=False)
 
     def read_real(self, db_number: int, offset: int) -> float:
         raw = self.read_bytes(db_number, offset, 4)
@@ -122,6 +134,19 @@ class S7PlcClient:
         if self.snap7_util:
             return bool(self.snap7_util.get_bool(bytearray(raw), 0, bit_index))
         return bool(raw[0] & (1 << bit_index))
+
+    def write_word(self, db_number: int, offset: int, value: int):
+        if not self.client or not self.is_connected():
+            raise RuntimeError("PLC未连接")
+        value = int(value)
+        if not 0 <= value <= 0xFFFF:
+            raise ValueError("Word写入值必须在0-65535之间")
+        data = bytearray(2)
+        if self.snap7_util and hasattr(self.snap7_util, "set_word"):
+            self.snap7_util.set_word(data, 0, value)
+        else:
+            data[:] = value.to_bytes(2, byteorder="big", signed=False)
+        self.client.db_write(db_number, offset, data)
 
     def read_snapshot(
         self,
