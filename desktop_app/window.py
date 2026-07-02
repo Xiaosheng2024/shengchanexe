@@ -3730,12 +3730,19 @@ class QualityControlWindow(QMainWindow):
         self.plc_worker_generation += 1
 
     def start_plc_magnet_worker(self, step: ProcessStep):
+        logging.info(
+            "准备启动PLC磁通检测worker：step=%s type=%s config=%s",
+            step.name,
+            step.step_type,
+            step.plc_magnet_config,
+        )
         if not self.ensure_station_session_for_production():
             return
         if (
             self.plc_magnet_thread is not None
             and self.plc_magnet_thread.isRunning()
         ):
+            logging.info("PLC磁通检测worker已在运行，跳过重复启动")
             return
         config = PlcMagnetConfig.from_dict(step.plc_magnet_config)
         if self.local_plc_override_checkbox.isChecked():
@@ -5035,15 +5042,30 @@ class QualityControlWindow(QMainWindow):
         step = self.current_step()
         if step is None:
             return
+
         step_key = (self.current_product.name, self.current_step_index, step.name)
-        if self.last_voice_step_key == step_key:
-            return
+        should_speak_step = self.last_voice_step_key != step_key
+        if should_speak_step:
+            self.last_voice_step_key = step_key
+        logging.info(
+             "当前工序启动检查：name=%s type=%s PLC_MAGNET=%s current_barcode=%s "
+            "step_index=%s station_session_id=%s online_mode=%s degraded=%s",
+            step.name,
+            step.step_type,
+            PLC_MAGNET,
+            self.current_barcode,
+            self.current_step_index,
+            self.station_session_id,
+            self.online_mode,
+            self.degraded_mode_checkbox.isChecked(),
+        )
         self.last_voice_step_key = step_key
         if step.step_type == SCREW:
             self.stop_plc_worker()
             self.stop_plc_magnet_worker()
             self.tool_worker_active_requested.emit(True)
             self.enter_tool_screw_step(step)
+        if should_speak_step:
             self.speak(f"请打螺丝{step.required_count}颗")
         elif step.step_type == PLC:
             self.stop_plc_magnet_worker()
