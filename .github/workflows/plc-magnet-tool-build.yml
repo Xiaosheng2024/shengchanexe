@@ -31,8 +31,15 @@ jobs:
           python -m pip install -r requirements-client.txt -r requirements-dev.txt
 
       - name: Run magnet tool tests
+        shell: pwsh
         run: |
-          python -m unittest tests.test_plc_magnet_test_tool
+          python -m unittest -v tests.test_plc_magnet_test_tool *>&1 |
+            Tee-Object -FilePath magnet-test-output.txt
+          $testExitCode = $LASTEXITCODE
+          Get-Content magnet-test-output.txt >> $env:GITHUB_STEP_SUMMARY
+          if ($testExitCode -ne 0) {
+            exit $testExitCode
+          }
 
       - name: Build PLC magnet test tool
         shell: cmd
