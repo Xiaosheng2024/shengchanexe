@@ -314,8 +314,8 @@ class PlcMagnetPathTest(unittest.TestCase):
 
     def test_paths_do_not_depend_on_current_working_directory(self):
         original_cwd = Path.cwd()
-        try:
-            with tempfile.TemporaryDirectory() as other_dir:
+        with tempfile.TemporaryDirectory() as other_dir:
+            try:
                 os.chdir(other_dir)
                 self.assertEqual(
                     get_resource_path("config.example.ini"),
@@ -325,8 +325,8 @@ class PlcMagnetPathTest(unittest.TestCase):
                         / "config.example.ini"
                     ).resolve(),
                 )
-        finally:
-            os.chdir(original_cwd)
+            finally:
+                os.chdir(original_cwd)
 
     def test_missing_template_has_clear_error(self):
         with tempfile.TemporaryDirectory() as base_dir:
