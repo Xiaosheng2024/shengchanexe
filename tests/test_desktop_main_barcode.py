@@ -860,6 +860,10 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(window.tool_reverse_value_input.value(), 2)
             self.assertEqual(window.tool_command_delay_input.value(), 50)
             self.assertEqual(window.tool_poll_interval_input.value(), 800)
+            self.assertEqual(
+                window.tool_active_poll_interval_input.value(),
+                100,
+            )
             self.assertTrue(config_path.exists())
             generated = configparser.ConfigParser()
             generated.read(config_path, encoding="utf-8")
@@ -868,6 +872,14 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(generated.getint("TOOL", "reverse_value"), 2)
             self.assertEqual(generated.getint("TOOL", "command_delay_ms"), 50)
             self.assertEqual(generated.getint("TOOL", "poll_interval_ms"), 800)
+            self.assertEqual(
+                generated.getint("TOOL", "active_poll_interval_ms"),
+                100,
+            )
+            self.assertEqual(
+                generated.getint("TOOL", "fast_capture_poll_ms"),
+                50,
+            )
 
     def test_restore_defaults_uses_new_direction_protocol(self):
         window = self.make_window()
@@ -885,8 +897,9 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.tool_command_delay_input.value(), 50)
         self.assertEqual(window.tool_poll_interval_input.value(), 800)
         self.assertEqual(window.tool_pending_status_values, {1})
-        self.assertEqual(window.tool_final_status_wait_ms, 1500)
-        self.assertEqual(window.tool_final_status_poll_ms, 100)
+        self.assertEqual(window.tool_final_status_wait_ms, 1000)
+        self.assertEqual(window.tool_final_status_poll_ms, 50)
+        self.assertEqual(window.tool_active_poll_interval_ms, 100)
         self.assertEqual(window.tool_direction_stable_reads, 2)
 
     def test_old_tool_config_gets_command_delay_without_overwriting_values(self):
@@ -904,8 +917,9 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(window.tool_reverse_value_input.value(), 8)
             self.assertEqual(window.tool_command_delay_input.value(), 50)
             self.assertEqual(window.tool_pending_status_values, {1})
-            self.assertEqual(window.tool_final_status_wait_ms, 1500)
-            self.assertEqual(window.tool_final_status_poll_ms, 100)
+            self.assertEqual(window.tool_final_status_wait_ms, 1000)
+            self.assertEqual(window.tool_final_status_poll_ms, 50)
+            self.assertEqual(window.tool_active_poll_interval_ms, 100)
             self.assertEqual(window.tool_direction_stable_reads, 2)
             updated = configparser.ConfigParser()
             updated.read(config_path, encoding="utf-8")
@@ -937,6 +951,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             window.tool_pending_status_input.setText("1,5")
             window.tool_final_status_wait_input.setValue(1800)
             window.tool_final_status_poll_input.setValue(150)
+            window.tool_active_poll_interval_input.setValue(250)
             window.tool_direction_stable_reads_input.setValue(3)
             window.tool_clear_trigger_when_reverse_checkbox.setChecked(False)
             window.tool_poll_interval_input.setValue(1200)
@@ -968,6 +983,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             self.assertEqual(loaded.tool_pending_status_values, {1, 5})
             self.assertEqual(loaded.tool_final_status_wait_ms, 1800)
             self.assertEqual(loaded.tool_final_status_poll_ms, 150)
+            self.assertEqual(loaded.tool_active_poll_interval_ms, 250)
             self.assertEqual(loaded.tool_direction_stable_reads, 3)
             self.assertFalse(loaded.tool_clear_trigger_when_reverse_checkbox.isChecked())
             self.assertEqual(loaded.tool_poll_interval_input.value(), 1200)
@@ -1163,6 +1179,161 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(writes, [])
         self.assertFalse(window.reverse_lock_active)
 
+    def test_trigger_zero_status_four_is_residual_and_does_not_lock(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value)) or True
+        )
+
+        with self.assertLogs(level="INFO") as captured:
+            window.process_tool_poll_result(
+                status=4,
+                trigger=0,
+                direction=3,
+            )
+
+        self.assertFalse(window.tool_ng_locked)
+        self.assertNotIn((4, 2), writes)
+        self.assertIn(
+            "status=4残留，trigger=0，忽略，不判NG",
+            "\n".join(captured.output),
+        )
+
+    def test_running_direction_never_locks_without_trigger(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value)) or True
+        )
+
+        window.process_tool_poll_result(
+            status=4,
+            trigger=0,
+            direction=1,
+        )
+
+        self.assertFalse(window.reverse_lock_active)
+        self.assertNotIn((4, 2), writes)
+        self.assertIn("运行中", window.message_label.text())
+
+    def test_running_direction_trigger_waits_without_clearing(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        writes = []
+        window.write_tool_register = (
+            lambda register, value: writes.append((register, value)) or True
+        )
+        window.scanner_now_ms = lambda: 1000.0
+
+        window.process_tool_poll_result(
+            status=4,
+            trigger=1,
+            direction=1,
+        )
+
+        self.assertTrue(window.tool_pending_result_active)
+        self.assertNotIn((4, 2), writes)
+        self.assertNotIn((53, 0), writes)
+
+    def test_running_trigger_then_forward_ok_counts_and_clears(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"ok": 0, "writes": []}
+        window.handle_screw_ok = lambda: calls.__setitem__(
+            "ok", calls["ok"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 1050.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        window.process_tool_poll_result(
+            status=4,
+            trigger=1,
+            direction=1,
+        )
+        window.process_tool_poll_result(
+            status=2,
+            trigger=1,
+            direction=3,
+        )
+
+        self.assertEqual(calls["ok"], 1)
+        self.assertIn((53, 0), calls["writes"])
+        self.assertFalse(window.tool_ng_locked)
+
+    def test_running_trigger_then_forward_ng_locks_and_clears(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        calls = {"dialog": 0, "writes": []}
+        window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+            "dialog", calls["dialog"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 1050.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        window.process_tool_poll_result(
+            status=4,
+            trigger=1,
+            direction=1,
+        )
+        window.process_tool_poll_result(
+            status=4,
+            trigger=1,
+            direction=3,
+        )
+
+        self.assertTrue(window.tool_ng_locked)
+        self.assertEqual(calls["dialog"], 1)
+        self.assertIn((4, 2), calls["writes"])
+        self.assertIn((53, 0), calls["writes"])
+
+    def test_running_trigger_timeout_locks_and_clears(self):
+        window = self.make_window()
+        self.set_current_step_to_screw(window)
+        window.tool_final_status_wait_ms = 1000
+        calls = {"dialog": 0, "writes": []}
+        window.show_tool_ng_unlock_dialog = lambda: calls.__setitem__(
+            "dialog", calls["dialog"] + 1
+        )
+        window.write_tool_register = (
+            lambda register, value: calls["writes"].append(
+                (register, value)
+            )
+            or True
+        )
+        times = iter([1000.0, 2001.0])
+        window.scanner_now_ms = lambda: next(times)
+
+        window.process_tool_poll_result(
+            status=1,
+            trigger=1,
+            direction=1,
+        )
+        window.process_tool_poll_result(
+            status=1,
+            trigger=1,
+            direction=1,
+        )
+
+        self.assertTrue(window.manual_lock_active)
+        self.assertEqual(calls["dialog"], 1)
+        self.assertIn((4, 2), calls["writes"])
+        self.assertIn((53, 0), calls["writes"])
+
     def test_degraded_mode_ignores_direction_changes(self):
         window = self.make_window()
         self.set_current_step_to_screw(window)
@@ -1325,7 +1496,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertIn((4, 2), calls["writes"])
         self.assertIn((53, 0), calls["writes"])
         self.assertIn("结果状态未确认", window.message_label.text())
-        self.assertIn("进入等待最终结果", "\n".join(captured.output))
+        self.assertIn("进入快速等待最终结果", "\n".join(captured.output))
 
     def test_reverse_direction_blocks_admin_unlock(self):
         window = self.make_window()
@@ -1796,7 +1967,7 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertIn((53, 0), calls["writes"])
         self.assertTrue(window.waiting_tool_trigger_reset)
 
-    def test_trigger_reset_write_success_releases_waiting_lock(self):
+    def test_trigger_reset_write_success_waits_for_zero_readback(self):
         window = self.make_window()
         window.waiting_tool_trigger_reset = True
         window.tool_connection_rearming = True
@@ -1807,6 +1978,15 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             window.tool_trigger_reset_value_input.value(),
         )
 
+        self.assertTrue(window.waiting_tool_trigger_reset)
+        self.assertTrue(window.tool_connection_rearming)
+        self.set_current_step_to_screw(window)
+        window.write_tool_register = lambda register, value: True
+        window.process_tool_poll_result(
+            status=4,
+            trigger=0,
+            direction=3,
+        )
         self.assertFalse(window.waiting_tool_trigger_reset)
         self.assertFalse(window.tool_connection_rearming)
 

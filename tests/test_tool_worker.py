@@ -86,11 +86,11 @@ class ToolPollWorkerTest(unittest.TestCase):
 
         worker.poll_once()
 
-        self.assertEqual(client.reads, [54, 100, 53])
+        self.assertEqual(client.reads, [53, 54, 100])
         self.assertEqual(results, [(2, 1, 3)])
 
         worker.poll_once()
-        self.assertEqual(client.reads, [54, 100, 53, 54, 100, 53])
+        self.assertEqual(client.reads, [53, 54, 100, 53, 54, 100])
         self.assertEqual(results, [(2, 1, 3), (2, 1, 3)])
 
     def test_start_keeps_100ms_poll_timer_active(self):
@@ -107,7 +107,8 @@ class ToolPollWorkerTest(unittest.TestCase):
     def test_pending_status_temporarily_uses_fast_poll_interval(self):
         config = make_config()
         config.poll_interval_ms = 800
-        config.final_status_poll_ms = 100
+        config.active_poll_interval_ms = 100
+        config.final_status_poll_ms = 50
         worker = ToolPollWorker(config)
         client = FakeConnectedClient()
         client.values[100] = 1
@@ -116,11 +117,42 @@ class ToolPollWorkerTest(unittest.TestCase):
         worker.start()
 
         self.assertTrue(worker.pending_result_active)
-        self.assertEqual(worker.timer.interval(), 100)
+        self.assertEqual(worker.timer.interval(), 50)
         client.values[100] = 3
         worker.poll_once()
         self.assertFalse(worker.pending_result_active)
+        self.assertEqual(worker.timer.interval(), 100)
+        worker.stop()
+
+    def test_idle_and_active_poll_intervals_are_applied(self):
+        config = make_config()
+        config.poll_interval_ms = 800
+        config.active_poll_interval_ms = 100
+        worker = ToolPollWorker(config)
+        worker.client = FakeConnectedClient()
+
+        worker.start()
+        self.assertEqual(worker.timer.interval(), 100)
+        worker.set_active_polling(False)
         self.assertEqual(worker.timer.interval(), 800)
+        worker.set_active_polling(True)
+        self.assertEqual(worker.timer.interval(), 100)
+        worker.stop()
+
+    def test_running_direction_with_trigger_uses_fast_capture(self):
+        config = make_config()
+        config.poll_interval_ms = 800
+        config.active_poll_interval_ms = 100
+        config.final_status_poll_ms = 50
+        worker = ToolPollWorker(config)
+        client = FakeConnectedClient()
+        client.values.update({54: 1, 53: 1, 100: 4})
+        worker.client = client
+
+        worker.start()
+
+        self.assertTrue(worker.pending_result_active)
+        self.assertEqual(worker.timer.interval(), 50)
         worker.stop()
 
     def test_stop_locks_tool_then_disconnects_long_connection(self):

@@ -25,7 +25,9 @@ class ToolPollConfig:
     reconnect_interval_seconds: float = 2.0
     pending_status_values: Tuple[int, ...] = (1,)
     final_status_values: Tuple[int, ...] = (2, 3, 4)
-    final_status_poll_ms: int = 100
+    final_status_poll_ms: int = 50
+    active_poll_interval_ms: int = 100
+    transitional_direction_values: Tuple[int, ...] = (1,)
 
 
 class ToolPollWorker(QObject):
@@ -53,6 +55,7 @@ class ToolPollWorker(QObject):
         self.reconnecting = False
         self.bypass = False
         self.pending_result_active = False
+        self.active_polling = True
 
     @pyqtSlot()
     def start(self):
@@ -60,7 +63,7 @@ class ToolPollWorker(QObject):
             return
         self.polling = True
         self.timer = QTimer(self)
-        self.timer.setInterval(max(self.config.poll_interval_ms, 50))
+        self.timer.setInterval(max(self.config.active_poll_interval_ms, 50))
         self.timer.timeout.connect(self.poll_once)
         self.timer.start()
         self.poll_once()
@@ -130,17 +133,26 @@ class ToolPollWorker(QObject):
         try:
             if not self.ensure_connection_for_poll():
                 return
+            trigger = self.client.read_register(self.config.trigger_register)
             direction = self.client.read_register(self.config.direction_register)
             status = self.client.read_register(self.config.status_register)
-            trigger = self.client.read_register(self.config.trigger_register)
+            transitional_directions = set(
+                self.config.transitional_direction_values
+            )
             if (
                 trigger == 1
-                and status in set(self.config.pending_status_values)
+                and (
+                    status in set(self.config.pending_status_values)
+                    or direction in transitional_directions
+                )
             ):
                 self.pending_result_active = True
             elif (
                 trigger != 1
-                or status in set(self.config.final_status_values)
+                or (
+                    status in set(self.config.final_status_values)
+                    and direction not in transitional_directions
+                )
             ):
                 self.pending_result_active = False
             pending_result = self.pending_result_active and trigger == 1
@@ -148,7 +160,11 @@ class ToolPollWorker(QObject):
                 interval = (
                     self.config.final_status_poll_ms
                     if pending_result
-                    else self.config.poll_interval_ms
+                    else (
+                        self.config.active_poll_interval_ms
+                        if self.active_polling
+                        else self.config.poll_interval_ms
+                    )
                 )
                 self.timer.setInterval(max(int(interval), 50))
             if trigger == 1:
@@ -165,6 +181,18 @@ class ToolPollWorker(QObject):
             self.error.emit(str(exc))
         finally:
             self.reading = False
+
+    @pyqtSlot(bool)
+    def set_active_polling(self, enabled: bool):
+        self.active_polling = bool(enabled)
+        if self.timer is None or self.pending_result_active:
+            return
+        interval = (
+            self.config.active_poll_interval_ms
+            if self.active_polling
+            else self.config.poll_interval_ms
+        )
+        self.timer.setInterval(max(int(interval), 50))
 
     @pyqtSlot(bool)
     def set_bypass(self, enabled: bool):
