@@ -485,7 +485,9 @@ class DesktopMainBarcodeTest(unittest.TestCase):
             MATERIAL_BIND,
             step_id=401,
             bind_child_project_id=2,
+            bind_mode="completed_step_barcode",
             bind_child_material_type="B",
+            bind_child_route="B子线",
             bind_required_count=1,
             bind_required_station_ids=[21, 22],
         )
@@ -513,6 +515,8 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         )
         self.assertEqual(bind_payload["required_station_ids"], [21, 22])
         self.assertEqual(bind_payload["child_barcode"], "B001")
+        self.assertEqual(bind_payload["child_route"], "B子线")
+        self.assertEqual(bind_payload["bind_mode"], "completed_step_barcode")
 
     def test_old_main_barcode_is_rejected_before_station_entry_check(self):
         window = self.make_window()

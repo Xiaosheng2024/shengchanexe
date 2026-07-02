@@ -18,7 +18,7 @@ cd "${PROJECT_DIR}"
 echo "== Git 状态 =="
 git status
 DIRTY_SOURCE_FILES="$(
-  git status --porcelain \
+  git status --porcelain --untracked-files=no \
     | awk '$2 != "s7_plc_test_tool/config.ini" {print}'
 )"
 if [ -n "${DIRTY_SOURCE_FILES}" ]; then
@@ -28,6 +28,9 @@ if [ -n "${DIRTY_SOURCE_FILES}" ]; then
 fi
 if ! git diff --quiet -- s7_plc_test_tool/config.ini; then
   echo "提示：保留本机 S7 测试工具配置变化；该 config.ini 不会进入服务器更新包。"
+fi
+if [ -n "$(git ls-files --others --exclude-standard)" ]; then
+  echo "提示：未跟踪文件不会进入更新包，服务器包只取已提交 commit。"
 fi
 
 echo "== 更新 main 分支 =="
@@ -95,8 +98,8 @@ tar -czf "${DIST_DIR}/offline_wheels.tar.gz" \
 printf '%s\n' "${DEPLOY_COMMIT}" > "${DIST_DIR}/deploy_commit.txt"
 cat > "${DIST_DIR}/DEPLOY_NOTES.txt" <<EOF
 commit=${DEPLOY_COMMIT}
-version=v0.9.3-rc4
-database_migration=steps.plc_magnet_config, plc_magnet_logs
+version=v0.9.3-rc8
+database_migration=steps.plc_magnet_config, plc_magnet_logs, route_based_material_binding
 server_restart=mes-web
 windows_artifacts=QualityControlSystem.exe, QualityControlSystem_Debug.exe
 EOF

@@ -63,7 +63,7 @@ from shared.models import (
 )
 
 
-APP_VERSION = "v0.9.3-rc4"
+APP_VERSION = "v0.9.3-rc8"
 SYSTEM_NAME = "关键工位防错追溯系统"
 DEFAULT_MES_SERVER_URL = "http://10.162.70.53:8000"
 DEFAULT_TOOL_DIRECTION_ADDRESS = 54
@@ -1273,6 +1273,7 @@ class QualityControlWindow(QMainWindow):
                     switch_set_current=as_bool(item.get("switch_set_current", True), True),
                     switch_disable_old=as_bool(item.get("switch_disable_old", True), True),
                     bind_child_project_id=as_optional_int(item.get("bind_child_project_id")),
+                    bind_mode=item.get("bind_mode", "material_type"),
                     bind_child_material_type=item.get("bind_child_material_type", ""),
                     bind_child_route=item.get("bind_child_route", ""),
                     bind_required_count=int(item.get("bind_required_count", 1)),
@@ -3375,7 +3376,7 @@ class QualityControlWindow(QMainWindow):
                 return
             self.pending_bind_parent_barcode = barcode
             self.barcode_input.clear()
-            self.message_label.setText("父件主条码已确认，请扫描子物料主条码")
+            self.message_label.setText("父件主条码已确认，请扫描要绑定的主条码")
             self.refresh_work_area()
             return
         if barcode in self.bound_child_barcodes:
@@ -3392,7 +3393,9 @@ class QualityControlWindow(QMainWindow):
                         "parent_barcode": self.pending_bind_parent_barcode,
                         "child_barcode": barcode,
                         "child_project_id": step.bind_child_project_id,
+                        "bind_mode": step.bind_mode,
                         "child_material_type": step.bind_child_material_type,
+                        "child_route": step.bind_child_route,
                         "required_station_ids": step.bind_required_station_ids,
                         "require_parent_switch": step.bind_require_parent_switch,
                         "allow_duplicate": step.bind_allow_duplicate,
@@ -3408,15 +3411,18 @@ class QualityControlWindow(QMainWindow):
             step,
             "完成",
             barcode,
-            f"子物料 {barcode} 已绑定到 {self.current_barcode}",
+            f"主条码 {barcode} 已绑定到 {self.current_barcode}",
             completed=step.completed_count >= step.bind_required_count,
         )
         if step.completed_count >= step.bind_required_count:
             step.done = True
             self.pending_bind_parent_barcode = ""
-            self.message_label.setText(
-                f"B物料 {barcode} 已绑定到 A物料 {self.current_barcode}"
-            )
+            if step.bind_mode == "completed_step_barcode":
+                self.message_label.setText("主条码绑定成功")
+            else:
+                self.message_label.setText(
+                    f"B物料 {barcode} 已绑定到 A物料 {self.current_barcode}"
+                )
             self.play_ok_sound()
             self.advance_step()
         else:

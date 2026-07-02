@@ -270,7 +270,7 @@ HTML = r"""<!doctype html>
               <label>写入读回次数</label><input id="magnetVerifyRetries" type="number" min="1" value="3">
               <label>读回间隔ms</label><input id="magnetVerifyInterval" type="number" value="100">
             </div>
-            <p class="hint">MES只写整数1且必须读回确认；DBW0、DBW4、DBW8由PLC复位，原始块最少读取26字节。</p>
+            <p class="hint">DBW0、DBW4写1后读回确认；DBW8只写1不回读，由PLC立即复位。原始块最少读取26字节。</p>
           </div>
           <div id="switchFields" style="display:none">
             <div class="toolbar">
@@ -282,14 +282,19 @@ HTML = r"""<!doctype html>
           </div>
           <div id="bindFields" style="display:none">
             <div class="toolbar">
+              <label>绑定模式</label>
+              <select id="bindMode" onchange="toggleBindMode()">
+                <option value="material_type">按子物料类型绑定</option>
+                <option value="completed_step_barcode">按完成工序绑定主条码</option>
+              </select>
               <label>父件物料类型</label><select id="bindParentType" disabled></select>
-              <label>子物料项目</label><select id="bindChildProject" onchange="refreshBindingOptions()"><option value="">请选择</option></select>
+              <label>子物料项目</label><select id="bindChildProject" onchange="refreshBindingOptions()"><option value="">同当前项目</option></select>
               <label>子件物料类型</label><select id="bindChildType"></select>
-              <label>子件路线</label><input id="bindChildRoute" placeholder="例如：B子线">
+              <label>子件路线</label><select id="bindChildRoute" onchange="refreshBindingOptions()"></select>
               <label>子物料数量</label><input id="bindRequiredCount" type="number" min="1" value="1">
               <label>子物料必完工位</label><select id="bindRequiredStationIds" multiple></select>
             </div>
-            <p class="hint">父件物料类型直接读取当前工位配置；父件和子件物料类型均使用下拉选项，不能手工输入。</p>
+            <p class="hint">A/B并行路线优先按子件路线和必完工位校验；绑定时扫描B线路当前主条码。物料类型仅用于分类和旧配置兼容。</p>
             <div class="toolbar">
               <label class="checkbox-label"><input id="bindRequireSwitch" type="checkbox" checked> 父件必须已切换主条码</label>
               <label class="checkbox-label"><input id="bindAllowDuplicate" type="checkbox"> 允许重复绑定</label>
@@ -703,6 +708,7 @@ HTML = r"""<!doctype html>
         });
         return `<div><strong>${htmlEscape(step.name)}</strong><br>
           父件路线：${htmlEscape(station.route_name || "A主线")}；父件物料：${htmlEscape(station.material_type || "")}；父件条码：当前有效主条码<br>
+          绑定模式：${step.bind_mode === "completed_step_barcode" ? "按完成工序绑定主条码" : "按子物料类型绑定"}；
           子件路线：${htmlEscape(step.bind_child_route || "未设置")}；子件物料：${htmlEscape(step.bind_child_material_type || "")}；数量：${step.bind_required_count || 1}<br>
           子件必须完成：${htmlEscape(stationNames.join("、") || "未设置")}；
           ${step.bind_require_parent_switch ? "父件必须完成主条码切换；" : ""}
@@ -940,7 +946,8 @@ HTML = r"""<!doctype html>
       ["depChildProject", "bindChildProject"].forEach(id => {
         const select = document.getElementById(id);
         const current = select.value;
-        select.innerHTML = `<option value="">不限制</option>` + fullData.projects.map(
+        const emptyLabel = id === "bindChildProject" ? "同当前项目" : "不限制";
+        select.innerHTML = `<option value="">${emptyLabel}</option>` + fullData.projects.map(
           project => `<option value="${project.id}">${htmlEscape(project.name)}</option>`
         ).join("");
         if (current) select.value = current;
@@ -1132,9 +1139,16 @@ HTML = r"""<!doctype html>
       document.getElementById("plcMagnetFields").style.display = isMagnet ? "block" : "none";
       document.getElementById("switchFields").style.display = isSwitch ? "block" : "none";
       document.getElementById("bindFields").style.display = isBind ? "block" : "none";
+      if (isBind) toggleBindMode();
       const mainBarcode = document.getElementById("isMainBarcode");
       mainBarcode.disabled = !isScan;
       if (!isScan) mainBarcode.checked = false;
+    }
+
+    function toggleBindMode() {
+      const completedStepMode = document.getElementById("bindMode").value === "completed_step_barcode";
+      document.getElementById("bindChildType").disabled = completedStepMode;
+      document.getElementById("bindChildRoute").disabled = !completedStepMode;
     }
 
     async function addStep() {
@@ -1221,6 +1235,7 @@ HTML = r"""<!doctype html>
         switch_set_current: document.getElementById("switchSetCurrent").checked,
         switch_disable_old: document.getElementById("switchDisableOld").checked,
         bind_child_project_id: Number(document.getElementById("bindChildProject").value || 0) || null,
+        bind_mode: document.getElementById("bindMode").value || "material_type",
         bind_child_material_type: document.getElementById("bindChildType").value,
         bind_child_route: document.getElementById("bindChildRoute").value.trim(),
         bind_required_count: Number(document.getElementById("bindRequiredCount").value || 1),
@@ -1290,9 +1305,12 @@ HTML = r"""<!doctype html>
       document.getElementById("switchSetCurrent").checked = step.switch_set_current ?? true;
       document.getElementById("switchDisableOld").checked = step.switch_disable_old ?? true;
       document.getElementById("bindChildProject").value = step.bind_child_project_id || "";
-      document.getElementById("bindChildRoute").value = step.bind_child_route || "";
+      document.getElementById("bindMode").value = step.bind_mode || "material_type";
       document.getElementById("bindRequiredCount").value = step.bind_required_count ?? 1;
-      refreshBindingOptions(step.bind_child_material_type || "");
+      refreshBindingOptions(
+        step.bind_child_material_type || "",
+        step.bind_child_route || ""
+      );
       setSelectedIds("bindRequiredStationIds", step.bind_required_station_ids || []);
       document.getElementById("bindRequireSwitch").checked = step.bind_require_parent_switch ?? true;
       document.getElementById("bindAllowDuplicate").checked = !!step.bind_allow_duplicate;
@@ -1424,11 +1442,33 @@ HTML = r"""<!doctype html>
       setSelectedIds("depChildStationIds", childSelected);
     }
 
-    function refreshBindingOptions(selectedChildType = null) {
+    function refreshBindingOptions(selectedChildType = null, requestedRoute = null) {
       const select = document.getElementById("bindRequiredStationIds");
       const selected = selectedIds("bindRequiredStationIds");
-      const childProjectId = document.getElementById("bindChildProject").value || null;
-      select.innerHTML = stationOptions(childProjectId);
+      const configuredChildProjectId = document.getElementById("bindChildProject").value || null;
+      const childProjectId = configuredChildProjectId || selectedProjectId;
+      const childProject = fullData.projects.find(
+        project => project.id === Number(childProjectId)
+      );
+      const routeSelect = document.getElementById("bindChildRoute");
+      const routeValue = requestedRoute === null ? routeSelect.value : requestedRoute;
+      const routes = Array.from(new Set(
+        (childProject ? childProject.stations : [])
+          .map(station => station.route_name || "A主线")
+      ));
+      routeSelect.innerHTML = `<option value="">请选择路线</option>` + routes.map(
+        route => `<option value="${htmlEscape(route)}">${htmlEscape(route)}</option>`
+      ).join("");
+      routeSelect.value = routes.includes(routeValue) ? routeValue : "";
+      select.innerHTML = (childProject ? childProject.stations : [])
+        .filter(station =>
+          !routeSelect.value
+          || (station.route_name || "A主线") === routeSelect.value
+        )
+        .map(station =>
+          `<option value="${station.id}">${htmlEscape(childProject.name)} / ${htmlEscape(station.name)}</option>`
+        )
+        .join("");
       setSelectedIds("bindRequiredStationIds", selected);
       const station = currentStation();
       setMaterialTypeOptions(
@@ -1440,7 +1480,7 @@ HTML = r"""<!doctype html>
       const childType = selectedChildType === null
         ? document.getElementById("bindChildType").value
         : selectedChildType;
-      setMaterialTypeOptions("bindChildType", childProjectId, childType);
+      setMaterialTypeOptions("bindChildType", childProjectId, childType, true);
     }
 
     async function loadStationDependency() {

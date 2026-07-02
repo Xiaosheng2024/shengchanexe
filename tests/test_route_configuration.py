@@ -198,7 +198,7 @@ class RouteConfigurationTest(unittest.TestCase):
         self.prepare_b()
         self.bind()
         self.prepare_switched_a("AOLD002", "ANEW002")
-        with self.assertRaisesRegex(ValueError, "已绑定到其他产品"):
+        with self.assertRaisesRegex(ValueError, "已被绑定，禁止重复绑定"):
             self.bind("ANEW002", "B001")
 
     def test_a_follow_station_requires_bound_b(self):
@@ -324,9 +324,19 @@ class RouteConfigurationTest(unittest.TestCase):
         self.assertIn('<select id="routeMaterialType">', HTML)
         self.assertIn('<select id="bindParentType" disabled>', HTML)
         self.assertIn('<select id="bindChildType"></select>', HTML)
+        self.assertIn(
+            '<select id="bindChildRoute" onchange="refreshBindingOptions()">',
+            HTML,
+        )
+        self.assertIn('<select id="bindMode" onchange="toggleBindMode()">', HTML)
+        self.assertIn(
+            '<option value="completed_step_barcode">按完成工序绑定主条码</option>',
+            HTML,
+        )
         self.assertNotIn('<input id="routeMaterialType"', HTML)
         self.assertNotIn('<input id="bindChildType"', HTML)
-        self.assertIn("refreshBindingOptions(step.bind_child_material_type", HTML)
+        self.assertIn("step.bind_child_material_type ||", HTML)
+        self.assertIn("step.bind_child_route ||", HTML)
 
     def test_station_route_order_is_project_route_then_order(self):
         services.add_station(

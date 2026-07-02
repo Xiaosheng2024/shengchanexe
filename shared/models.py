@@ -56,6 +56,7 @@ class ProcessStep:
     switch_set_current: bool = True
     switch_disable_old: bool = True
     bind_child_project_id: Optional[int] = None
+    bind_mode: str = "material_type"
     bind_child_material_type: str = ""
     bind_child_route: str = ""
     bind_required_count: int = 1

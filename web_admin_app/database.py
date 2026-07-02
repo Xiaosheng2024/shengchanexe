@@ -50,6 +50,7 @@ FLOW_STEP_COLUMNS = {
     "switch_set_current": "INTEGER NOT NULL DEFAULT 1",
     "switch_disable_old": "INTEGER NOT NULL DEFAULT 1",
     "bind_child_project_id": "INTEGER",
+    "bind_mode": "TEXT NOT NULL DEFAULT 'material_type'",
     "bind_child_material_type": "TEXT NOT NULL DEFAULT ''",
     "bind_child_route": "TEXT NOT NULL DEFAULT ''",
     "bind_required_count": "INTEGER NOT NULL DEFAULT 1",

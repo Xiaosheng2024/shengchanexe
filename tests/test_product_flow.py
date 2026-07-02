@@ -144,6 +144,7 @@ class ProductFlowTest(unittest.TestCase):
                 "parent_barcode": "ANEW001",
                 "child_barcode": "B001",
                 "child_project_id": self.b_project["id"],
+                "child_project_id": self.b_project["id"],
                 "child_material_type": "B",
                 "required_station_ids": [
                     station["id"] for station in self.b_stations
@@ -164,9 +165,10 @@ class ProductFlowTest(unittest.TestCase):
     def test_incomplete_child_cannot_be_bound(self):
         self.prepare_switched_a()
         self.prepare_completed_b(complete_second=False)
-        with self.assertRaisesRegex(ValueError, "B物料未完成要求工位"):
+        with self.assertRaisesRegex(ValueError, "该主条码未完成指定工序"):
             product_flow.bind_child_material(
                 {
+                    "bind_mode": "completed_step_barcode",
                     "project_id": self.a_project["id"],
                     "station_id": self.a_stations[3]["id"],
                     "parent_barcode": "ANEW001",
@@ -184,10 +186,12 @@ class ProductFlowTest(unittest.TestCase):
         self.prepare_completed_b()
         product_flow.bind_child_material(
             {
+                "bind_mode": "completed_step_barcode",
                 "project_id": self.a_project["id"],
                 "station_id": self.a_stations[3]["id"],
                 "parent_barcode": "ANEW001",
                 "child_barcode": "B001",
+                "child_project_id": self.b_project["id"],
                 "required_station_ids": [
                     station["id"] for station in self.b_stations
                 ],
@@ -205,19 +209,169 @@ class ProductFlowTest(unittest.TestCase):
                 "new_barcode": "ANEW002",
             }
         )
-        with self.assertRaisesRegex(ValueError, "已绑定到其他产品"):
+        with self.assertRaisesRegex(ValueError, "已被绑定，禁止重复绑定"):
             product_flow.bind_child_material(
                 {
+                    "bind_mode": "completed_step_barcode",
                     "project_id": self.a_project["id"],
                     "station_id": self.a_stations[3]["id"],
                     "parent_barcode": "ANEW002",
                     "child_barcode": "B001",
+                    "child_project_id": self.b_project["id"],
                     "required_station_ids": [
                         station["id"] for station in self.b_stations
                     ],
                 }
             )
         self.assertNotEqual(first_a["product_instance_id"], second_a["product_instance_id"])
+
+    def test_same_project_b_route_main_barcode_binding_ignores_type_label(self):
+        project = services.add_project({"name": "X04C"})
+        a_station = services.add_station(
+            {
+                "project_id": project["id"],
+                "name": "A合并工位",
+                "route_name": "A主线",
+                "route_order": 5,
+            }
+        )
+        b_stations = [
+            services.add_station(
+                {
+                    "project_id": project["id"],
+                    "name": f"B工位{index}",
+                    "route_name": "B子线",
+                    "route_order": index,
+                }
+            )
+            for index in range(1, 3)
+        ]
+        parent = self.create_product(project, "A-OLD", "A物料")
+        product_flow.switch_main_barcode(
+            {
+                "project_id": project["id"],
+                "station_id": a_station["id"],
+                "product_instance_id": parent["product_instance_id"],
+                "old_barcode": "A-OLD",
+                "new_barcode": "A-NEW",
+            }
+        )
+        child = self.create_product(project, "B-MAIN", "X04C")
+        for station in b_stations:
+            self.complete(project, station, child, "B-MAIN")
+        bind_step = services.add_step(
+            {
+                "station_id": a_station["id"],
+                "name": "绑定B线主条码",
+                "type": "子物料绑定",
+                "step_order": 1,
+                "bind_mode": "completed_step_barcode",
+                "bind_child_project_id": None,
+                "bind_child_route": "B子线",
+                "bind_child_material_type": "故意不一致",
+                "bind_required_station_ids": [
+                    station["id"] for station in b_stations
+                ],
+            }
+        )
+
+        result = product_flow.bind_child_material(
+            {
+                "project_id": project["id"],
+                "station_id": a_station["id"],
+                "step_id": bind_step["id"],
+                "parent_barcode": "A-NEW",
+                "child_barcode": "B-MAIN",
+            }
+        )
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["message"], "主条码绑定成功")
+        with database.get_conn() as conn:
+            binding = conn.execute(
+                "SELECT binding_type FROM material_bindings WHERE id = ?",
+                (result["binding_id"],),
+            ).fetchone()
+        self.assertEqual(binding["binding_type"], "completed_step_barcode")
+
+    def test_material_type_mode_still_rejects_mismatch(self):
+        self.prepare_switched_a()
+        self.prepare_completed_b()
+        with self.assertRaisesRegex(
+            ValueError,
+            "子物料类型不符合配置，要求：错误类型，实际：B",
+        ):
+            product_flow.bind_child_material(
+                {
+                    "bind_mode": "material_type",
+                    "project_id": self.a_project["id"],
+                    "station_id": self.a_stations[3]["id"],
+                    "parent_barcode": "ANEW001",
+                    "child_barcode": "B001",
+                    "child_project_id": self.b_project["id"],
+                    "child_material_type": "错误类型",
+                }
+            )
+
+    def test_completed_step_mode_without_route_only_checks_completion(self):
+        self.prepare_switched_a()
+        self.prepare_completed_b()
+        result = product_flow.bind_child_material(
+            {
+                "bind_mode": "completed_step_barcode",
+                "project_id": self.a_project["id"],
+                "station_id": self.a_stations[3]["id"],
+                "parent_barcode": "ANEW001",
+                "child_barcode": "B001",
+                "child_project_id": self.b_project["id"],
+                "child_material_type": "故意不一致",
+                "required_station_ids": [
+                    station["id"] for station in self.b_stations
+                ],
+            }
+        )
+        self.assertTrue(result["ok"])
+
+    def test_b_route_rejects_required_station_from_a_route(self):
+        project = services.add_project({"name": "路线工位校验"})
+        a_station = services.add_station(
+            {
+                "project_id": project["id"],
+                "name": "A工位",
+                "route_name": "A主线",
+            }
+        )
+        b_station = services.add_station(
+            {
+                "project_id": project["id"],
+                "name": "B工位",
+                "route_name": "B子线",
+            }
+        )
+        parent = self.create_product(project, "A-ROUTE-OLD", "A物料")
+        product_flow.switch_main_barcode(
+            {
+                "project_id": project["id"],
+                "station_id": a_station["id"],
+                "product_instance_id": parent["product_instance_id"],
+                "old_barcode": "A-ROUTE-OLD",
+                "new_barcode": "A-ROUTE-NEW",
+            }
+        )
+        child = self.create_product(project, "NOT-B-ROUTE", "B物料")
+        self.complete(project, a_station, child, "NOT-B-ROUTE")
+        with self.assertRaisesRegex(ValueError, "主条码路线不符合配置"):
+            product_flow.bind_child_material(
+                {
+                    "bind_mode": "completed_step_barcode",
+                    "project_id": project["id"],
+                    "station_id": a_station["id"],
+                    "parent_barcode": "A-ROUTE-NEW",
+                    "child_barcode": "NOT-B-ROUTE",
+                    "child_project_id": project["id"],
+                    "child_route": "B子线",
+                    "required_station_ids": [b_station["id"]],
+                }
+            )
 
     def test_trace_by_old_new_and_child_barcode(self):
         self.prepare_switched_a()
@@ -259,6 +413,7 @@ class ProductFlowTest(unittest.TestCase):
                 "type": "子物料绑定",
                 "step_order": 2,
                 "bind_child_project_id": self.b_project["id"],
+                "bind_mode": "completed_step_barcode",
                 "bind_child_material_type": "B",
                 "bind_required_station_ids": [
                     station["id"] for station in self.b_stations
@@ -273,6 +428,10 @@ class ProductFlowTest(unittest.TestCase):
         self.assertEqual(
             exported[bind_step["id"]]["bind_required_station_ids"],
             [station["id"] for station in self.b_stations],
+        )
+        self.assertEqual(
+            exported[bind_step["id"]]["bind_mode"],
+            "completed_step_barcode",
         )
 
     def test_flow_identity_step_does_not_force_part_scan_to_be_main_barcode(self):

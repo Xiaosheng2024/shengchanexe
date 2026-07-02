@@ -391,6 +391,7 @@ def _verify_station_entry(conn, product, station_id, barcode=""):
                 continue
             if (
                 dependency["required_child_material_type"]
+                and binding["binding_type"] != "completed_step_barcode"
                 and binding["child_product_type"]
                 != dependency["required_child_material_type"]
             ):
@@ -544,34 +545,150 @@ def switch_main_barcode(payload):
     }
 
 
+def binding_rule(conn, payload):
+    rule = {
+        "bind_mode": str(payload.get("bind_mode") or "material_type").strip(),
+        "child_project_id": int(payload.get("child_project_id") or 0) or None,
+        "child_material_type": str(
+            payload.get("child_material_type") or ""
+        ).strip(),
+        "child_route": str(payload.get("child_route") or "").strip(),
+        "required_station_ids": int_list(payload.get("required_station_ids")),
+        "require_parent_switch": as_bool(
+            payload.get("require_parent_switch"), True
+        ),
+        "allow_duplicate": as_bool(payload.get("allow_duplicate"), False),
+    }
+    step_id = int(payload.get("step_id") or 0)
+    if not step_id:
+        return rule
+    step = conn.execute(
+        """
+        SELECT type, bind_mode, bind_child_project_id,
+               bind_child_material_type, bind_child_route,
+               bind_required_station_ids, bind_require_parent_switch,
+               bind_allow_duplicate
+        FROM steps WHERE id = ?
+        """,
+        (step_id,),
+    ).fetchone()
+    if not step:
+        raise ValueError("子物料绑定工序不存在，请重新下载配置")
+    if step["type"] != "子物料绑定":
+        raise ValueError("当前工序不是子物料绑定工序")
+    return {
+        "bind_mode": step["bind_mode"] or "material_type",
+        "child_project_id": (
+            int(step["bind_child_project_id"])
+            if step["bind_child_project_id"] else None
+        ),
+        "child_material_type": step["bind_child_material_type"] or "",
+        "child_route": step["bind_child_route"] or "",
+        "required_station_ids": int_list(step["bind_required_station_ids"]),
+        "require_parent_switch": bool(step["bind_require_parent_switch"]),
+        "allow_duplicate": bool(step["bind_allow_duplicate"]),
+    }
+
+
+def product_route_names(conn, product_instance_id, current_barcode):
+    rows = conn.execute(
+        """
+        SELECT DISTINCT stations.route_name
+        FROM stations
+        WHERE stations.id IN (
+            SELECT station_id FROM station_completions
+            WHERE product_instance_id = ?
+               OR (product_instance_id IS NULL AND barcode = ?)
+            UNION
+            SELECT station_id FROM scan_records
+            WHERE product_instance_id = ?
+              AND is_main_barcode = ?
+              AND is_cancelled = ?
+        )
+        """,
+        (
+            product_instance_id,
+            current_barcode,
+            product_instance_id,
+            True,
+            False,
+        ),
+    ).fetchall()
+    return {str(row["route_name"] or "A主线") for row in rows}
+
+
 def bind_child_material(payload):
     parent_barcode = str(payload.get("parent_barcode", "")).strip()
     child_barcode = str(payload.get("child_barcode", "")).strip()
     if not parent_barcode or not child_barcode:
         raise ValueError("父件主条码和子件主条码不能为空")
     with get_conn() as conn:
+        rule = binding_rule(conn, payload)
+        bind_mode = rule["bind_mode"]
+        if bind_mode not in {"material_type", "completed_step_barcode"}:
+            raise ValueError("绑定模式无效，请重新配置工序")
         parent = alias_row(conn, parent_barcode)
         child = alias_row(conn, child_barcode)
         if not parent or not public_identity(parent)["allowed_production"]:
             raise ValueError("父件主条码无效或不是当前主条码")
         if not child or not public_identity(child)["allowed_production"]:
-            raise ValueError("子物料主条码无效或不是当前主条码")
+            raise ValueError("扫描条码不存在或不是有效主条码")
         if parent["product_instance_id"] == child["product_instance_id"]:
             raise ValueError("父件和子件不能是同一个产品实体")
-        if as_bool(payload.get("require_parent_switch"), True):
+        if rule["require_parent_switch"]:
             switched = conn.execute(
                 "SELECT 1 FROM barcode_switch_records WHERE product_instance_id = ? LIMIT 1",
                 (parent["product_instance_id"],),
             ).fetchone()
             if not switched:
                 raise ValueError("父件尚未完成主条码切换，不能绑定子物料")
-        required_project_id = int(payload.get("child_project_id") or 0)
+        required_project_id = int(rule["child_project_id"] or 0)
+        if bind_mode == "completed_step_barcode" and not required_project_id:
+            required_project_id = int(parent["project_id"])
         if required_project_id and int(child["project_id"]) != required_project_id:
-            raise ValueError("子物料项目不符合配置")
-        required_type = str(payload.get("child_material_type", "")).strip()
-        if required_type and child["product_type"] != required_type:
-            raise ValueError("子物料类型不符合配置")
-        for station_id in int_list(payload.get("required_station_ids")):
+            raise ValueError("主条码项目不符合配置")
+        child_project_id = required_project_id or int(child["project_id"])
+        required_route = rule["child_route"]
+        required_station_ids = rule["required_station_ids"]
+        if bind_mode == "completed_step_barcode" and required_route:
+            route_stations = conn.execute(
+                """
+                SELECT id, name FROM stations
+                WHERE project_id = ? AND route_name = ?
+                ORDER BY route_order, id
+                """,
+                (child_project_id, required_route),
+            ).fetchall()
+            route_station_ids = {int(row["id"]) for row in route_stations}
+            if not route_station_ids:
+                raise ValueError(f"未找到子件路线：{required_route}")
+            if any(
+                station_id not in route_station_ids
+                for station_id in required_station_ids
+            ):
+                raise ValueError("指定工位不属于配置的子路线")
+            actual_routes = product_route_names(
+                conn,
+                child["product_instance_id"],
+                child["current_barcode"],
+            )
+            if required_route not in actual_routes:
+                actual = "、".join(sorted(actual_routes)) or "无路线记录"
+                raise ValueError(
+                    "主条码路线不符合配置，"
+                    f"要求：{required_route}，实际：{actual}"
+                )
+        required_type = rule["child_material_type"]
+        if (
+            bind_mode == "material_type"
+            and required_type
+            and child["product_type"] != required_type
+        ):
+            raise ValueError(
+                "子物料类型不符合配置，"
+                f"要求：{required_type}，实际：{child['product_type']}"
+            )
+        for station_id in required_station_ids:
             if not completion_exists(
                 conn,
                 child["product_instance_id"],
@@ -583,8 +700,8 @@ def bind_child_material(payload):
                     (station_id,),
                 ).fetchone()
                 raise ValueError(
-                    f"B物料未完成要求工位"
-                    f"{'：' + station['name'] if station else ''}，不能绑定"
+                    "该主条码未完成指定工序，禁止绑定"
+                    f"{'：' + station['name'] if station else ''}"
                 )
         existing = conn.execute(
             """
@@ -598,9 +715,9 @@ def bind_child_material(payload):
             if int(existing["parent_product_instance_id"]) != int(
                 parent["product_instance_id"]
             ):
-                raise ValueError("该子物料已绑定到其他产品")
-            if not as_bool(payload.get("allow_duplicate"), False):
-                raise ValueError("该子物料已绑定到当前产品")
+                raise ValueError("该主条码已被绑定，禁止重复绑定")
+            if not rule["allow_duplicate"]:
+                raise ValueError("该主条码已被绑定，禁止重复绑定")
             return {"ok": True, "binding_id": existing["id"], "message": "绑定关系已存在"}
         cursor = conn.execute(
             """
@@ -615,7 +732,7 @@ def bind_child_material(payload):
                 child["product_instance_id"],
                 parent_barcode,
                 child_barcode,
-                payload.get("binding_type", required_type),
+                payload.get("binding_type", bind_mode),
                 int(payload.get("project_id") or parent["project_id"]),
                 int(payload.get("station_id") or 0),
                 int(payload.get("step_id") or 0) or None,
@@ -637,7 +754,11 @@ def bind_child_material(payload):
         "binding_id": cursor.lastrowid,
         "parent_product_instance_id": parent["product_instance_id"],
         "child_product_instance_id": child["product_instance_id"],
-        "message": f"B物料 {child_barcode} 已绑定到 A物料 {parent_barcode}",
+        "message": (
+            "主条码绑定成功"
+            if bind_mode == "completed_step_barcode"
+            else f"B物料 {child_barcode} 已绑定到 A物料 {parent_barcode}"
+        ),
     }
 
 

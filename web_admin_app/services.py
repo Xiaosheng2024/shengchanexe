@@ -703,6 +703,7 @@ def create_route_template(project_id, template_name):
                         """
                         UPDATE steps
                         SET bind_child_project_id = ?,
+                            bind_mode = 'completed_step_barcode',
                             bind_child_material_type = 'B物料',
                             bind_child_route = 'B子线',
                             bind_required_count = 1,
@@ -1188,7 +1189,8 @@ def update_step_flow_config(conn, step_id, payload):
         UPDATE steps
         SET switch_require_old = ?, switch_require_new = ?,
             switch_set_current = ?, switch_disable_old = ?,
-            bind_child_project_id = ?, bind_child_material_type = ?,
+            bind_child_project_id = ?, bind_mode = ?,
+            bind_child_material_type = ?,
             bind_child_route = ?,
             bind_required_count = ?, bind_required_station_ids = ?,
             bind_require_parent_switch = ?, bind_allow_duplicate = ?,
@@ -1201,6 +1203,7 @@ def update_step_flow_config(conn, step_id, payload):
             bool(payload.get("switch_set_current", True)),
             bool(payload.get("switch_disable_old", True)),
             int(payload.get("bind_child_project_id") or 0) or None,
+            payload.get("bind_mode", "material_type"),
             payload.get("bind_child_material_type", ""),
             payload.get("bind_child_route", ""),
             max(int(payload.get("bind_required_count") or 1), 1),
@@ -1270,28 +1273,50 @@ def validate_flow_step_payload(conn, payload, step_type):
     if step_type != MATERIAL_BIND_TYPE:
         return
     child_project_id = int(payload.get("bind_child_project_id") or 0)
+    bind_mode = str(payload.get("bind_mode") or "material_type").strip()
     child_type = str(payload.get("bind_child_material_type", "")).strip()
     child_route = str(payload.get("bind_child_route", "")).strip()
-    if not child_project_id:
+    if bind_mode not in {"material_type", "completed_step_barcode"}:
+        raise ValueError("绑定模式无效")
+    if bind_mode == "material_type" and not child_project_id:
         raise ValueError("子物料绑定工序必须选择子物料项目")
-    if not child_type:
-        raise ValueError("子物料绑定工序必须填写子物料类型")
-    if not conn.execute(
+    if bind_mode == "material_type" and not child_type:
+        raise ValueError("按子物料类型绑定必须选择子物料类型")
+    if child_project_id and not conn.execute(
         "SELECT 1 FROM projects WHERE id = ?", (child_project_id,)
     ).fetchone():
         raise ValueError("子物料项目不存在")
-    for station_id in product_flow.int_list(
+    required_station_ids = product_flow.int_list(
         payload.get("bind_required_station_ids")
-    ):
+    )
+    if bind_mode == "completed_step_barcode" and not required_station_ids:
+        raise ValueError("按完成工序绑定主条码必须选择指定工位")
+    effective_child_project_id = child_project_id
+    if bind_mode == "completed_step_barcode" and not effective_child_project_id:
+        parent_station = conn.execute(
+            "SELECT project_id FROM stations WHERE id = ?",
+            (int(payload.get("station_id") or 0),),
+        ).fetchone()
+        effective_child_project_id = (
+            int(parent_station["project_id"]) if parent_station else 0
+        )
+    for station_id in required_station_ids:
         station = conn.execute(
             "SELECT project_id, route_name FROM stations WHERE id = ?",
             (station_id,),
         ).fetchone()
         if not station:
             raise ValueError(f"子物料要求工位不存在：{station_id}")
-        if int(station["project_id"]) != child_project_id:
+        if (
+            effective_child_project_id
+            and int(station["project_id"]) != effective_child_project_id
+        ):
             raise ValueError("子物料要求工位不属于所选子物料项目")
-        if child_route and station["route_name"] != child_route:
+        if (
+            bind_mode == "completed_step_barcode"
+            and child_route
+            and station["route_name"] != child_route
+        ):
             raise ValueError("子物料要求工位不属于所选子件路线")
 
 
@@ -1307,6 +1332,7 @@ def flow_step_config(step):
         "switch_set_current": bool(value("switch_set_current", True)),
         "switch_disable_old": bool(value("switch_disable_old", True)),
         "bind_child_project_id": value("bind_child_project_id", None),
+        "bind_mode": value("bind_mode", "material_type"),
         "bind_child_material_type": value("bind_child_material_type", ""),
         "bind_child_route": value("bind_child_route", ""),
         "bind_required_count": int(value("bind_required_count", 1)),
