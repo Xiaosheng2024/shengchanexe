@@ -41,12 +41,36 @@ jobs:
       - name: Verify executable
         shell: pwsh
         run: |
-          $exe = "plc_magnet_test_tool/dist/PLC_Magnet_Test_Tool.exe"
-          if (-not (Test-Path $exe)) {
+          $exePath = "plc_magnet_test_tool/dist/PLC_Magnet_Test_Tool.exe"
+          if (-not (Test-Path $exePath)) {
             throw "PLC_Magnet_Test_Tool.exe was not generated"
           }
+          $exe = (Resolve-Path $exePath).Path
           if ((Get-Item $exe).Length -le 0) {
             throw "PLC_Magnet_Test_Tool.exe is empty"
+          }
+          $exeDir = Split-Path $exe -Parent
+          Remove-Item "$exeDir/config.ini" -Force -ErrorAction SilentlyContinue
+          Remove-Item "$exeDir/logs" -Recurse -Force -ErrorAction SilentlyContinue
+          $otherCwd = Join-Path $env:RUNNER_TEMP "plc-magnet-other-cwd"
+          New-Item -ItemType Directory -Path $otherCwd -Force | Out-Null
+          $process = Start-Process `
+            -FilePath $exe `
+            -ArgumentList "--path-self-check" `
+            -WorkingDirectory $otherCwd `
+            -Wait `
+            -PassThru
+          if ($process.ExitCode -ne 0) {
+            throw "Packaged path self-check failed with exit code $($process.ExitCode)"
+          }
+          if (-not (Test-Path "$exeDir/config.ini")) {
+            throw "config.ini was not created next to the executable"
+          }
+          if (-not (Test-Path "$exeDir/logs/plc_magnet_test.log")) {
+            throw "log file was not created next to the executable"
+          }
+          if (Test-Path "$otherCwd/config.ini") {
+            throw "config.ini was incorrectly created under the working directory"
           }
 
       - name: Upload standalone test tool

@@ -7,10 +7,9 @@ python -m PyInstaller --noconfirm --clean --onefile --windowed ^
   --paths . ^
   --hidden-import shared ^
   --hidden-import shared.s7_plc_client ^
-  --add-data "config.example.ini;." ^
+  --add-data "plc_magnet_test_tool/config.example.ini;." ^
   --distpath plc_magnet_test_tool\dist ^
   --workpath plc_magnet_test_tool\build ^
-  --specpath plc_magnet_test_tool ^
   plc_magnet_test_tool\main.py
 
 if errorlevel 1 exit /b 1

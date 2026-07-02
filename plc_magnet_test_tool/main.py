@@ -1,6 +1,5 @@
 import configparser
-import os
-import shutil
+import logging
 import sys
 import threading
 from datetime import datetime
@@ -21,6 +20,7 @@ from PyQt5.QtWidgets import (
     QLabel,
     QLineEdit,
     QMainWindow,
+    QMessageBox,
     QPushButton,
     QSpinBox,
     QTableWidget,
@@ -37,32 +37,21 @@ from plc_magnet_test_tool.logic import (
     evaluate_magnet_result,
     format_word,
 )
-from shared.s7_plc_client import S7PlcClient
-
-
-def runtime_dir() -> Path:
-    if getattr(sys, "frozen", False):
-        return Path(sys.executable).resolve().parent
-    return CURRENT_DIR
-
-
-BASE_DIR = runtime_dir()
-CONFIG_PATH = BASE_DIR / "config.ini"
-EXAMPLE_CONFIG_PATH = (
-    Path(getattr(sys, "_MEIPASS", CURRENT_DIR))
-    / "config.example.ini"
+from plc_magnet_test_tool.paths import (
+    configure_file_logging,
+    ensure_config_file,
 )
 
+try:
+    from shared.s7_plc_client import S7PlcClient
+except Exception as exc:
+    S7PlcClient = None
+    SHARED_IMPORT_ERROR = exc
+else:
+    SHARED_IMPORT_ERROR = None
 
-def ensure_config_file() -> Path:
-    if not CONFIG_PATH.exists():
-        source = (
-            EXAMPLE_CONFIG_PATH
-            if EXAMPLE_CONFIG_PATH.exists()
-            else CURRENT_DIR / "config.example.ini"
-        )
-        shutil.copyfile(source, CONFIG_PATH)
-    return CONFIG_PATH
+
+LOGGER = logging.getLogger("plc_magnet_test_tool")
 
 
 def load_parser() -> configparser.ConfigParser:
@@ -115,6 +104,10 @@ class TaskRunner(QObject):
 
     def connect_plc(self, settings, magnet_config):
         def action():
+            if S7PlcClient is None:
+                raise RuntimeError(
+                    "无法加载 shared.s7_plc_client，请检查程序打包内容。"
+                ) from SHARED_IMPORT_ERROR
             self.connection_state.emit("连接中", "")
             if self.client:
                 self.client.disconnect()
@@ -139,6 +132,10 @@ class TaskRunner(QObject):
 
     def test_connection(self, settings):
         def action():
+            if S7PlcClient is None:
+                raise RuntimeError(
+                    "无法加载 shared.s7_plc_client，请检查程序打包内容。"
+                ) from SHARED_IMPORT_ERROR
             client = S7PlcClient(
                 settings["ip"],
                 settings["rack"],
@@ -526,6 +523,7 @@ class MagnetTestWindow(QMainWindow):
         self.append_log("已停止自动刷新")
 
     def append_log(self, message):
+        LOGGER.info(message)
         self.log_edit.append(
             f"[{datetime.now().strftime('%H:%M:%S')}] {message}"
         )
@@ -598,11 +596,36 @@ class MagnetTestWindow(QMainWindow):
 
 
 def main():
+    if "--path-self-check" in sys.argv:
+        configure_file_logging()
+        ensure_config_file()
+        if S7PlcClient is None:
+            raise RuntimeError(
+                "无法加载 shared.s7_plc_client，请检查程序打包内容。"
+            ) from SHARED_IMPORT_ERROR
+        try:
+            import snap7  # noqa: F401
+        except Exception as exc:
+            raise RuntimeError(
+                "snap7 DLL缺失或 python-snap7 未正确打包。"
+            ) from exc
+        LOGGER.info("路径和打包依赖自检通过")
+        return 0
+
     app = QApplication(sys.argv)
-    window = MagnetTestWindow()
+    try:
+        configure_file_logging()
+        window = MagnetTestWindow()
+    except Exception as exc:
+        QMessageBox.critical(
+            None,
+            "PLC磁吸流程调试工具启动失败",
+            str(exc),
+        )
+        raise SystemExit(1) from exc
     window.show()
-    sys.exit(app.exec_())
+    return app.exec_()
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

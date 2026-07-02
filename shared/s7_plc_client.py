@@ -54,7 +54,9 @@ class S7PlcClient:
             import snap7
             from snap7 import util as snap7_util
         except Exception as exc:
-            raise RuntimeError("未安装 python-snap7，请先安装依赖") from exc
+            raise RuntimeError(
+                "未安装 python-snap7 或 snap7 DLL 缺失，请检查程序打包内容"
+            ) from exc
 
         self.snap7 = snap7
         self.snap7_util = snap7_util

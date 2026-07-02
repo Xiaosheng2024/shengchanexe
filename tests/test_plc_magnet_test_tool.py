@@ -1,4 +1,6 @@
 import ast
+import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -8,6 +10,13 @@ from plc_magnet_test_tool.logic import (
     MagnetFlowController,
     evaluate_magnet_result,
     format_word,
+)
+from plc_magnet_test_tool.paths import (
+    ensure_config_file,
+    ensure_log_dir,
+    get_base_dir,
+    get_config_path,
+    get_resource_path,
 )
 from shared.s7_plc_client import S7PlcClient
 
@@ -225,17 +234,111 @@ class PlcMagnetToolPackagingTest(unittest.TestCase):
         ).read_text(encoding="utf-8")
         self.assertIn("PLC_Magnet_Test_Tool-windows", standalone)
         self.assertIn("PLC_Magnet_Test_Tool.exe", standalone)
+        self.assertIn("--path-self-check", standalone)
+        self.assertIn("WorkingDirectory $otherCwd", standalone)
+        self.assertIn("$exeDir/config.ini", standalone)
+        self.assertIn("$exeDir/logs/plc_magnet_test.log", standalone)
         self.assertNotIn("PLC_Magnet_Test_Tool", formal)
 
     def test_pyinstaller_data_path_is_relative_to_spec_directory(self):
         build_script = (
             ROOT / "plc_magnet_test_tool" / "build_exe.bat"
         ).read_text(encoding="utf-8")
-        self.assertIn('--add-data "config.example.ini;."', build_script)
-        self.assertNotIn(
+        self.assertIn(
             '--add-data "plc_magnet_test_tool/config.example.ini;."',
             build_script,
         )
+        self.assertNotIn("--specpath", build_script)
+
+
+class PlcMagnetPathTest(unittest.TestCase):
+    def test_source_base_dir_is_tool_directory(self):
+        expected = ROOT / "plc_magnet_test_tool"
+        self.assertEqual(get_base_dir(), expected.resolve())
+
+    def test_frozen_base_dir_is_executable_directory(self):
+        executable = Path("C:/MES/PLC_Magnet_Test_Tool.exe")
+        expected = executable.resolve().parent
+        self.assertEqual(
+            get_base_dir(
+                frozen=True,
+                executable=executable,
+            ),
+            expected,
+        )
+
+    def test_config_path_is_always_under_base_dir(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            executable = Path(temp_dir) / "PLC_Magnet_Test_Tool.exe"
+            self.assertEqual(
+                get_config_path(
+                    frozen=True,
+                    executable=executable,
+                ),
+                Path(temp_dir).resolve() / "config.ini",
+            )
+
+    def test_missing_config_is_copied_from_embedded_template(self):
+        with tempfile.TemporaryDirectory() as base_dir:
+            with tempfile.TemporaryDirectory() as resource_dir:
+                template = Path(resource_dir) / "config.example.ini"
+                template.write_text("[PLC]\nip=192.168.111.50\n", encoding="utf-8")
+                target = ensure_config_file(
+                    base_dir=base_dir,
+                    resource_path=template,
+                )
+                self.assertEqual(target, Path(base_dir).resolve() / "config.ini")
+                self.assertEqual(
+                    target.read_text(encoding="utf-8"),
+                    template.read_text(encoding="utf-8"),
+                )
+
+    def test_existing_config_is_never_overwritten(self):
+        with tempfile.TemporaryDirectory() as base_dir:
+            with tempfile.TemporaryDirectory() as resource_dir:
+                target = Path(base_dir) / "config.ini"
+                target.write_text("user_value=keep", encoding="utf-8")
+                template = Path(resource_dir) / "config.example.ini"
+                template.write_text("user_value=replace", encoding="utf-8")
+                result = ensure_config_file(
+                    base_dir=base_dir,
+                    resource_path=template,
+                )
+                self.assertEqual(result.read_text(encoding="utf-8"), "user_value=keep")
+
+    def test_log_directory_is_created_next_to_executable(self):
+        with tempfile.TemporaryDirectory() as base_dir:
+            log_dir = ensure_log_dir(base_dir=base_dir)
+            self.assertEqual(log_dir, Path(base_dir).resolve() / "logs")
+            self.assertTrue(log_dir.is_dir())
+
+    def test_paths_do_not_depend_on_current_working_directory(self):
+        original_cwd = Path.cwd()
+        try:
+            with tempfile.TemporaryDirectory() as other_dir:
+                os.chdir(other_dir)
+                self.assertEqual(
+                    get_resource_path("config.example.ini"),
+                    (
+                        ROOT
+                        / "plc_magnet_test_tool"
+                        / "config.example.ini"
+                    ).resolve(),
+                )
+        finally:
+            os.chdir(original_cwd)
+
+    def test_missing_template_has_clear_error(self):
+        with tempfile.TemporaryDirectory() as base_dir:
+            missing = Path(base_dir) / "missing-config.example.ini"
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "config.example.ini 未打包或不存在",
+            ):
+                ensure_config_file(
+                    base_dir=base_dir,
+                    resource_path=missing,
+                )
 
 
 if __name__ == "__main__":

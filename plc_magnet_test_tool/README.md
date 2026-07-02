@@ -19,6 +19,13 @@ python3 plc_magnet_test_tool/main.py
 首次启动会在程序目录根据 `config.example.ini` 创建本地
 `config.ini`。本地配置已被 Git 忽略。
 
+Windows EXE 运行时，`config.ini` 和 `logs/plc_magnet_test.log`
+均保存在 EXE 同级目录。内置模板只从 PyInstaller 的资源目录读取，
+不会向临时目录写配置，也不依赖启动时的当前工作目录。
+
+构建工作流会从另一个工作目录实际启动 EXE 执行路径自检，并检查
+`shared.s7_plc_client`、python-snap7、配置生成位置和日志生成位置。
+
 ## 安全规则
 
 - MES 只向 `DBW0`、`DBW4`、`DBW8` 写整数 `1`。
