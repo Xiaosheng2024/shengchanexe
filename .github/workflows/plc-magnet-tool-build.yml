@@ -38,6 +38,11 @@ jobs:
           $testExitCode = $LASTEXITCODE
           Get-Content magnet-test-output.txt >> $env:GITHUB_STEP_SUMMARY
           if ($testExitCode -ne 0) {
+            $details = (Get-Content magnet-test-output.txt -Raw)
+            $details = $details.Replace("%", "%25")
+            $details = $details.Replace("`r", "%0D")
+            $details = $details.Replace("`n", "%0A")
+            Write-Output "::error file=tests/test_plc_magnet_test_tool.py,title=Windows magnet tests failed::$details"
             exit $testExitCode
           }
 
