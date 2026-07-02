@@ -5,6 +5,7 @@ on:
     paths:
       - "plc_magnet_test_tool/**"
       - "shared/s7_plc_client.py"
+      - "tests/test_plc_magnet_test_tool.py"
       - "requirements-client.txt"
       - ".github/workflows/plc-magnet-tool-build.yml"
   workflow_dispatch:
