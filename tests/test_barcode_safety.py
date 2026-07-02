@@ -130,6 +130,33 @@ class BarcodeSafetyTest(unittest.TestCase):
 
         self.assertTrue(result["ok"])
         self.assertEqual(result["cancel_type"], "non_main_barcode")
+        self.assertEqual(result["matched_step_id"], 20)
+
+    def test_cancel_auto_detects_current_station_component_barcode(self):
+        record = self.scan_payload(
+            self.station1,
+            "PART-AUTO",
+            False,
+            step_id=21,
+        )
+        services.add_scan_record(record)
+
+        result = services.cancel_barcode_record(
+            {
+                "project_id": str(self.project["id"]),
+                "station_id": str(self.station1["id"]),
+                "current_step_id": "99",
+                "current_product_id": self.product["product_instance_id"],
+                "current_main_barcode": "MAIN001",
+                "barcode_to_cancel": "PART-AUTO",
+                "cancel_type": "auto",
+                "reason": "cancelcode",
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cancel_type"], "non_main_barcode")
+        self.assertEqual(result["matched_step_id"], 21)
 
     def test_cancel_prefers_current_station_and_rejects_other_station(self):
         other = self.scan_payload(
@@ -198,11 +225,24 @@ class BarcodeSafetyTest(unittest.TestCase):
                     **current,
                     "station_id": 999999,
                     "barcode_to_cancel": "PART-MULTI",
+                    "current_main_barcode": "MAIN001",
                 }
             )
         self.assertEqual(
             raised.exception.details["record_station_id"],
             self.station2["id"],
+        )
+        self.assertEqual(
+            raised.exception.details["found_record_station_id"],
+            self.station2["id"],
+        )
+        self.assertEqual(
+            raised.exception.details["barcode_to_cancel"],
+            "PART-MULTI",
+        )
+        self.assertEqual(
+            raised.exception.details["current_main_barcode"],
+            "MAIN001",
         )
 
     def test_degrade_mode_log_and_migration_are_available(self):

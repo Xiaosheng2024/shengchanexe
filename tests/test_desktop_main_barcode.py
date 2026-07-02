@@ -14,6 +14,7 @@ from PyQt5.QtWidgets import QApplication, QDialog, QLabel
 import desktop_app.window as window_module
 from desktop_app.window import (
     APP_VERSION,
+    CancelBarcodeDialog,
     DEFAULT_MES_SERVER_URL,
     NumericPasswordDialog,
     QualityControlWindow,
@@ -1289,6 +1290,101 @@ class DesktopMainBarcodeTest(unittest.TestCase):
         self.assertEqual(window.current_barcode, "")
         self.assertEqual(posted[0][0], "/api/client/barcode/cancel")
         self.assertTrue(posted[0][1]["is_main_barcode"])
+        self.assertEqual(posted[0][1]["cancel_type"], "main_barcode")
+        self.assertEqual(posted[0][1]["reason"], "cancelcode")
+        self.assertEqual(posted[0][1]["station_session_id"], 1)
+
+    def test_cancelcode_correct_password_opens_cancel_barcode_dialog(self):
+        window = self.make_window()
+        window.prompt_admin_password = lambda title: ("0000", True)
+        opened = []
+        window.show_cancel_barcode_dialog = (
+            lambda: opened.append("cancel-dialog") or True
+        )
+
+        self.assertTrue(window.handle_scanned_barcode("cancelcode"))
+
+        self.assertTrue(window.cancel_mode_active)
+        self.assertTrue(window.cancel_requested_by_admin)
+        self.assertIsNotNone(window.cancel_mode_started_at)
+        self.assertEqual(opened, ["cancel-dialog"])
+        self.assertIn("扫描或输入", window.message_label.text())
+
+    def test_cancelcode_wrong_password_does_not_enter_cancel_mode(self):
+        window = self.make_window()
+        window.prompt_admin_password = lambda title: ("9999", True)
+        window.show_cancel_barcode_dialog = lambda: self.fail(
+            "密码错误时不应打开取消条码输入框"
+        )
+
+        self.assertFalse(window.handle_scanned_barcode("cancelcode"))
+        self.assertFalse(window.cancel_mode_active)
+        self.assertFalse(window.cancel_requested_by_admin)
+
+    def test_cancel_dialog_reject_exits_cancel_mode(self):
+        window = self.make_window()
+        window.cancel_requires_admin = False
+        self.assertTrue(window.enter_cancel_barcode_mode())
+        dialog = window.cancel_barcode_dialog
+        self.assertIsInstance(dialog, CancelBarcodeDialog)
+
+        dialog.reject()
+        self.app.processEvents()
+
+        self.assertFalse(window.cancel_mode_active)
+        self.assertIn("已退出取消模式", window.message_label.text())
+
+    def test_cancel_dialog_rejects_empty_and_cancelcode_values(self):
+        dialog = CancelBarcodeDialog("cancelcode")
+        self.addCleanup(dialog.close)
+        submitted = []
+        dialog.barcode_submitted.connect(submitted.append)
+
+        self.assertFalse(dialog.submit_barcode())
+        self.assertIn("不能为空", dialog.error_label.text())
+        dialog.barcode_input.setText("cancelcode")
+        self.assertFalse(dialog.submit_barcode())
+        self.assertIn("不能取消", dialog.error_label.text())
+        self.assertEqual(submitted, [])
+
+    def test_cancel_dialog_scan_is_not_processed_as_production_scan(self):
+        window = self.make_window()
+        window.cancel_requires_admin = False
+        window.online_mode = True
+        window.current_project.id = 1
+        window.current_station.id = 2
+        production_scans = []
+        window._process_scanned_barcode = lambda: production_scans.append(True)
+        posted = []
+        window.api_post = lambda path, payload: (
+            posted.append((path, payload))
+            or {
+                "ok": True,
+                "cancel_type": "non_main_barcode",
+                "matched_step_id": None,
+            }
+        )
+        window.enter_cancel_barcode_mode()
+
+        self.assertTrue(window.handle_scanned_barcode("PART-CANCEL"))
+
+        self.assertEqual(production_scans, [])
+        self.assertEqual(posted[0][1]["barcode_to_cancel"], "PART-CANCEL")
+
+    def test_cancel_without_station_session_does_not_call_api(self):
+        window = self.make_window()
+        window.cancel_mode_active = True
+        window.online_mode = True
+        window.station_session_id = None
+        called = []
+        window.api_post = lambda *args: called.append(args)
+        window.show_flow_error = lambda message: None
+
+        self.assertFalse(window.cancel_scanned_barcode("PART-CANCEL"))
+
+        self.assertEqual(called, [])
+        self.assertFalse(window.cancel_mode_active)
+        self.assertIn("重新同步配置", window.message_label.text())
 
     def test_cancelcode_mode_expires(self):
         window = self.make_window()

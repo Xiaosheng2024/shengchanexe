@@ -1573,10 +1573,50 @@ def cancel_barcode_record(payload):
     current_main_barcode = str(
         payload.get("current_main_barcode") or ""
     ).strip()
-    is_main = bool(payload.get("is_main_barcode"))
+    requested_cancel_type = str(
+        payload.get("cancel_type") or "auto"
+    ).strip().lower()
+    if requested_cancel_type not in {
+        "auto",
+        "main_barcode",
+        "component_barcode",
+        "non_main_barcode",
+    }:
+        raise ValueError("取消条码类型不正确")
+    raw_is_main = payload.get("is_main_barcode")
+    is_main = (
+        raw_is_main
+        if isinstance(raw_is_main, bool)
+        else str(raw_is_main or "").strip().lower()
+        in {"1", "true", "yes", "是"}
+    )
+    if requested_cancel_type == "main_barcode":
+        is_main = True
+    elif requested_cancel_type in {
+        "component_barcode",
+        "non_main_barcode",
+    }:
+        is_main = False
     operator = str(payload.get("operator") or "管理员").strip()
+    reason_text = str(payload.get("reason") or "cancelcode").strip()
     if not barcode or not station_id or not project_id:
         raise ValueError("取消条码缺少项目、工位或条码")
+    logging.info(
+        "收到取消条码请求 client_id=%s project_id=%s station_id=%s "
+        "session_id=%s current_step_id=%s current_product_id=%s "
+        "current_main_barcode=%s barcode_to_cancel=%s cancel_type=%s "
+        "reason=%s",
+        payload.get("client_id"),
+        project_id,
+        station_id,
+        payload.get("station_session_id"),
+        step_id,
+        product_instance_id,
+        current_main_barcode,
+        barcode,
+        requested_cancel_type,
+        reason_text,
+    )
     with get_conn() as conn:
         def cancel_mismatch(message):
             other = conn.execute(
@@ -1593,15 +1633,45 @@ def cancel_barcode_record(payload):
             details = {
                 "request_station_id": station_id,
                 "record_station_id": other["station_id"] if other else None,
+                "found_record_station_id": (
+                    other["station_id"] if other else None
+                ),
                 "record_step_id": other["step_id"] if other else None,
                 "record_project_id": other["project_id"] if other else None,
                 "barcode": barcode,
+                "barcode_to_cancel": barcode,
+                "current_main_barcode": current_main_barcode,
                 "matched_record_id": other["id"] if other else None,
                 "reason": message,
             }
             logging.warning("取消条码拒绝：%s", details)
             raise ClientValidationError(message, details)
 
+        if requested_cancel_type == "auto":
+            if current_main_barcode and barcode == current_main_barcode:
+                is_main = True
+            else:
+                auto_record = conn.execute(
+                    """
+                    SELECT id, is_main_barcode
+                    FROM scan_records
+                    WHERE project_id = ? AND station_id = ?
+                      AND barcode = ? AND is_cancelled = 0
+                      AND result IN ('完成', 'OK')
+                    ORDER BY id DESC
+                    LIMIT 1
+                    """,
+                    (project_id, station_id, barcode),
+                ).fetchone()
+                if auto_record:
+                    is_main = bool(auto_record["is_main_barcode"])
+                    logging.info(
+                        "取消条码auto匹配 record_id=%s is_main=%s",
+                        auto_record["id"],
+                        is_main,
+                    )
+
+        affected_record_ids = []
         if is_main:
             record = conn.execute(
                 """
@@ -1645,6 +1715,26 @@ def cancel_barcode_record(payload):
                 conn.execute(
                     "DELETE FROM station_completions WHERE id = ?", (record["id"],)
                 )
+                affected_record_ids.append(
+                    f"station_completion:{record['id']}"
+                )
+            scan_rows = conn.execute(
+                """
+                SELECT id FROM scan_records
+                WHERE project_id = ? AND station_id = ?
+                  AND is_main_barcode = 1 AND is_cancelled = 0
+                  AND (barcode = ? OR barcode_used = ?
+                       OR (? IS NOT NULL AND product_instance_id = ?))
+                """,
+                (
+                    project_id,
+                    station_id,
+                    barcode,
+                    barcode,
+                    product_instance_id,
+                    product_instance_id,
+                ),
+            ).fetchall()
             conn.execute(
                 """
                 UPDATE scan_records SET is_cancelled = 1, cancelled_at = ?
@@ -1662,6 +1752,9 @@ def cancel_barcode_record(payload):
                     product_instance_id,
                     product_instance_id,
                 ),
+            )
+            affected_record_ids.extend(
+                f"scan_record:{row['id']}" for row in scan_rows
             )
             old_record_id = record["id"] if record else scan_record["id"]
             matched_step_id = (
@@ -1703,6 +1796,15 @@ def cancel_barcode_record(payload):
             old_record_id = record["id"]
             matched_step_id = record["step_id"]
             cancel_type = "non_main_barcode"
+            affected_record_ids.append(f"scan_record:{record['id']}")
+            logging.info(
+                "取消条码匹配当前工位记录 id=%s station_id=%s step_id=%s "
+                "product_instance_id=%s",
+                record["id"],
+                record["station_id"],
+                record["step_id"],
+                record["product_instance_id"],
+            )
         cursor = conn.execute(
             """
             INSERT INTO barcode_cancel_logs
@@ -1722,7 +1824,21 @@ def cancel_barcode_record(payload):
                 now_text(),
             ),
         )
-    return {"ok": True, "cancel_type": cancel_type, "log_id": cursor.lastrowid}
+        logging.info(
+            "取消条码完成 barcode=%s cancel_type=%s affected=%s "
+            "cancel_log_id=%s",
+            barcode,
+            cancel_type,
+            affected_record_ids,
+            cursor.lastrowid,
+        )
+    return {
+        "ok": True,
+        "cancel_type": cancel_type,
+        "matched_step_id": matched_step_id,
+        "old_record_id": old_record_id,
+        "log_id": cursor.lastrowid,
+    }
 
 
 def report_degrade_mode(payload):

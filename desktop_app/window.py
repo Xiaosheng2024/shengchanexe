@@ -209,6 +209,69 @@ class NumericPasswordDialog(QDialog):
             )
 
 
+class CancelBarcodeDialog(QDialog):
+    barcode_submitted = pyqtSignal(str)
+
+    def __init__(self, cancel_barcode_value: str, parent=None):
+        super().__init__(parent)
+        self.cancel_barcode_value = str(cancel_barcode_value or "cancelcode")
+        self.setWindowTitle("取消条码")
+        self.setModal(True)
+        self.setFixedSize(520, 230)
+
+        layout = QVBoxLayout(self)
+        prompt = QLabel("请输入或扫描需要取消的条码")
+        prompt.setAlignment(Qt.AlignCenter)
+        prompt.setStyleSheet("font-size:20px;font-weight:700;")
+        layout.addWidget(prompt)
+
+        self.barcode_input = QLineEdit()
+        self.barcode_input.setPlaceholderText("扫描条码后按回车，或手工输入")
+        self.barcode_input.setMinimumHeight(48)
+        self.barcode_input.setStyleSheet("font-size:20px;")
+        layout.addWidget(self.barcode_input)
+
+        self.error_label = QLabel("")
+        self.error_label.setStyleSheet("color:#dc2626;font-size:14px;")
+        layout.addWidget(self.error_label)
+
+        button_row = QHBoxLayout()
+        self.cancel_button = QPushButton("取消")
+        self.confirm_button = QPushButton("确认")
+        self.cancel_button.setMinimumHeight(44)
+        self.confirm_button.setMinimumHeight(44)
+        button_row.addWidget(self.cancel_button)
+        button_row.addWidget(self.confirm_button)
+        layout.addLayout(button_row)
+
+        self.cancel_button.clicked.connect(self.reject)
+        self.confirm_button.clicked.connect(self.submit_barcode)
+        self.barcode_input.returnPressed.connect(self.submit_barcode)
+        self.barcode_input.setFocus()
+
+    def submit_barcode(self) -> bool:
+        barcode = QualityControlWindow.clean_scanned_barcode(
+            self.barcode_input.text()
+        )
+        if not barcode:
+            self.error_label.setText("待取消条码不能为空")
+            self.barcode_input.setFocus()
+            return False
+        if barcode.lower() == self.cancel_barcode_value.lower():
+            self.error_label.setText("不能取消 cancelcode 本身")
+            self.barcode_input.selectAll()
+            self.barcode_input.setFocus()
+            return False
+        self.error_label.clear()
+        self.accept()
+        self.barcode_submitted.emit(barcode)
+        return True
+
+    def submit_scanned_barcode(self, barcode: str) -> bool:
+        self.barcode_input.setText(barcode)
+        return self.submit_barcode()
+
+
 class QualityControlWindow(QMainWindow):
     tool_worker_write_requested = pyqtSignal(int, int)
     tool_worker_bypass_requested = pyqtSignal(bool)
@@ -274,6 +337,10 @@ class QualityControlWindow(QMainWindow):
         self.cancel_requires_admin = True
         self.cancel_mode_active = False
         self.cancel_mode_started_ms = 0.0
+        self.cancel_mode_started_at: Optional[datetime] = None
+        self.cancel_requested_by_admin = False
+        self.pending_cancel_barcode: Optional[str] = None
+        self.cancel_barcode_dialog: Optional[CancelBarcodeDialog] = None
         self._scanner_event_filter_installed = False
         self.last_voice_step_key = None
         self.say_command = shutil.which("say")
@@ -2546,8 +2613,15 @@ class QualityControlWindow(QMainWindow):
             self.message_label.setText("请先输入或扫描条码")
             return False
         if self.cancel_mode_active:
+            dialog = self.cancel_barcode_dialog
+            if dialog is not None and dialog.isVisible():
+                return dialog.submit_scanned_barcode(barcode)
             return self.cancel_scanned_barcode(barcode)
         if barcode.lower() == self.cancel_barcode_value.lower():
+            self.message_label.setText(
+                "已识别取消条码，请输入管理员密码。"
+            )
+            logging.info("扫描到 cancelcode，等待管理员密码校验")
             return self.enter_cancel_barcode_mode()
         if (
             not self.scanner_allow_chinese_chars
@@ -2583,16 +2657,89 @@ class QualityControlWindow(QMainWindow):
             password, accepted = self.prompt_admin_password("取消条码授权")
             if not accepted or password != self.tool_admin_password_input.text():
                 self.message_label.setText("管理员授权失败，未进入取消条码模式")
+                logging.warning(
+                    "cancelcode 管理员密码校验失败 accepted=%s",
+                    accepted,
+                )
+                self.exit_cancel_barcode_mode(
+                    "管理员授权失败，未进入取消条码模式",
+                    close_dialog=True,
+                )
                 return False
+        logging.info("cancelcode 管理员密码校验通过")
         self.cancel_mode_active = True
         self.cancel_mode_started_ms = self.scanner_now_ms()
+        self.cancel_mode_started_at = datetime.now()
+        self.cancel_requested_by_admin = True
+        self.pending_cancel_barcode = None
         self.barcode_input.clear()
-        self.message_label.setText("已进入取消条码模式，请扫描需要取消的条码。")
+        self.message_label.setText("请扫描或输入需要取消的条码。")
+        logging.info(
+            "进入 cancel_mode timeout_seconds=%s",
+            self.cancel_mode_timeout_seconds,
+        )
         self.schedule_callback(
             self.cancel_mode_timeout_seconds * 1000,
             self.expire_cancel_barcode_mode,
         )
+        return self.show_cancel_barcode_dialog()
+
+    def show_cancel_barcode_dialog(self) -> bool:
+        if not self.cancel_mode_active:
+            return False
+        existing = self.cancel_barcode_dialog
+        if existing is not None and existing.isVisible():
+            existing.raise_()
+            existing.activateWindow()
+            existing.barcode_input.setFocus()
+            return True
+        dialog = CancelBarcodeDialog(self.cancel_barcode_value, self)
+        self.cancel_barcode_dialog = dialog
+        dialog.barcode_submitted.connect(self.cancel_scanned_barcode)
+        dialog.rejected.connect(self.cancel_cancel_barcode_dialog)
+        dialog.finished.connect(
+            lambda _result, current=dialog: self.clear_cancel_dialog_reference(
+                current
+            )
+        )
+        logging.info("弹出待取消条码输入框")
+        dialog.show()
+        dialog.raise_()
+        dialog.activateWindow()
+        dialog.barcode_input.setFocus()
         return True
+
+    def clear_cancel_dialog_reference(self, dialog):
+        if self.cancel_barcode_dialog is dialog:
+            self.cancel_barcode_dialog = None
+
+    def cancel_cancel_barcode_dialog(self):
+        if not self.cancel_mode_active:
+            return
+        self.exit_cancel_barcode_mode(
+            "已退出取消模式。",
+            close_dialog=False,
+        )
+
+    def exit_cancel_barcode_mode(
+        self,
+        message: str = "",
+        close_dialog: bool = True,
+    ):
+        self.cancel_mode_active = False
+        self.cancel_mode_started_ms = 0.0
+        self.cancel_mode_started_at = None
+        self.cancel_requested_by_admin = False
+        self.pending_cancel_barcode = None
+        dialog = self.cancel_barcode_dialog
+        self.cancel_barcode_dialog = None
+        if close_dialog and dialog is not None and dialog.isVisible():
+            dialog.blockSignals(True)
+            dialog.reject()
+            dialog.blockSignals(False)
+        if message:
+            self.message_label.setText(message)
+        logging.info("退出 cancel_mode message=%s", message)
 
     def expire_cancel_barcode_mode(self):
         if not self.cancel_mode_active:
@@ -2602,22 +2749,36 @@ class QualityControlWindow(QMainWindow):
             < self.cancel_mode_timeout_seconds * 1000
         ):
             return
-        self.cancel_mode_active = False
-        self.message_label.setText("取消条码模式已超时退出")
+        self.exit_cancel_barcode_mode("取消条码模式已超时退出")
 
     def cancel_scanned_barcode(self, barcode: str) -> bool:
-        self.cancel_mode_active = False
+        barcode = self.clean_scanned_barcode(barcode)
+        if not barcode:
+            self.message_label.setText("待取消条码不能为空")
+            return False
+        if barcode.lower() == self.cancel_barcode_value.lower():
+            self.message_label.setText("不能取消 cancelcode 本身")
+            return False
+        self.pending_cancel_barcode = barcode
+        logging.info("收到待取消条码 barcode=%s", barcode)
         step = self.current_step()
         is_main = bool(self.current_barcode and barcode == self.current_barcode)
         if not self.online_mode:
-            self.message_label.setText("取消条码需要在线模式")
+            self.exit_cancel_barcode_mode("取消条码需要在线模式")
             return False
+        if not self.station_session_id:
+            message = "当前工位未占用成功，请重新同步配置。"
+            self.exit_cancel_barcode_mode(message)
+            self.show_flow_error(message)
+            return False
+        cancel_type = "main_barcode" if is_main else "auto"
         try:
-            result = self.api_post(
-                "/api/client/barcode/cancel",
+            payload = self.with_station_session(
                 {
+                    "client_id": self.station_session_client_id,
                     "project_id": getattr(self.current_project, "id", None),
                     "station_id": getattr(self.current_station, "id", None),
+                    "station_session_id": self.station_session_id,
                     "step_id": getattr(step, "step_id", None),
                     "current_step_id": getattr(step, "step_id", None),
                     "product_instance_id": self.current_product_instance_id,
@@ -2626,25 +2787,64 @@ class QualityControlWindow(QMainWindow):
                     "barcode": barcode,
                     "barcode_to_cancel": barcode,
                     "is_main_barcode": is_main,
+                    "cancel_type": cancel_type,
+                    "reason": "cancelcode",
                     "operator": "管理员",
-                },
+                }
             )
         except Exception as exc:
-            self.show_flow_error(f"取消条码失败：{exc}")
+            message = str(exc)
+            self.exit_cancel_barcode_mode(message)
+            self.show_flow_error(message)
             return False
+        logging.info(
+            "调用取消接口 path=/api/client/barcode/cancel "
+            "client_id=%s project_id=%s station_id=%s session_id=%s "
+            "step_id=%s current_product_id=%s current_main_barcode=%s "
+            "barcode_to_cancel=%s cancel_type=%s reason=cancelcode",
+            payload.get("client_id"),
+            payload.get("project_id"),
+            payload.get("station_id"),
+            payload.get("station_session_id"),
+            payload.get("current_step_id"),
+            payload.get("current_product_id"),
+            payload.get("current_main_barcode"),
+            payload.get("barcode_to_cancel"),
+            payload.get("cancel_type"),
+        )
+        try:
+            result = self.api_post(
+                "/api/client/barcode/cancel",
+                payload,
+            )
+        except Exception as exc:
+            logging.exception("取消接口失败 barcode=%s", barcode)
+            message = f"条码取消失败：{exc}"
+            self.exit_cancel_barcode_mode(message)
+            self.show_flow_error(message)
+            return False
+        logging.info("取消接口响应 status=200 response=%s", result)
+        self.exit_cancel_barcode_mode()
         if result.get("cancel_type") == "main_barcode":
             self.reset_current_product(update_table=True)
         else:
+            matched_step_id = result.get("matched_step_id")
             for index, candidate in enumerate(self.current_product.steps):
-                if candidate.step_id == getattr(step, "step_id", None):
+                if candidate.step_id == matched_step_id:
                     candidate.done = False
                     candidate.completed_count = 0
                     self.current_step_index = index
                     break
             self.refresh_work_area()
         self.last_barcode = ""
+        self.last_barcode_time = 0.0
         self.barcode_input.clear()
-        self.message_label.setText(f"条码 {barcode} 已取消，可重新扫描")
+        self.message_label.setText("条码取消成功，可以重新扫描。")
+        logging.info(
+            "条码取消成功 barcode=%s cancel_type=%s",
+            barcode,
+            result.get("cancel_type"),
+        )
         return True
 
     def handle_scan(self):
