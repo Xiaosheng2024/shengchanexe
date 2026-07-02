@@ -445,14 +445,14 @@ HTML = r"""<!doctype html>
             <input id="releaseNotes" placeholder="更新说明，多条用 | 分隔" style="min-width:320px; flex:1">
           </div>
           <div class="toolbar">
-            <label>正式版文件</label><input id="releaseFile" type="file" accept=".exe,.zip">
-            <label>Debug版文件</label><input id="debugFile" type="file" accept=".exe,.zip">
-            <label>S7工具</label><input id="s7ToolFile" type="file" accept=".exe,.zip">
-            <button class="primary" onclick="saveClientRelease()">保存版本</button>
+            <label>正式版ZIP</label><input id="releaseFile" type="file" accept=".zip,application/zip">
+            <label>Debug版ZIP</label><input id="debugFile" type="file" accept=".zip,application/zip">
+            <button id="saveClientReleaseBtn" class="primary" onclick="saveClientRelease()">保存版本</button>
             <button class="secondary" onclick="refreshClientReleases()">刷新版本</button>
           </div>
+          <div class="hint">ZIP中必须包含 QualityControlSystem.exe；Debug ZIP中必须包含 QualityControlSystem_Debug.exe。单个文件最大220MB。</div>
           <table>
-            <thead><tr><th>版本</th><th>标题</th><th>发布时间</th><th>稳定</th><th>强制</th><th>说明</th><th>操作</th></tr></thead>
+            <thead><tr><th>版本</th><th>标题</th><th>发布时间</th><th>稳定</th><th>强制</th><th>说明</th><th>上传文件</th><th>操作</th></tr></thead>
             <tbody id="clientReleaseRows"></tbody>
           </table>
         </div>
@@ -514,9 +514,9 @@ HTML = r"""<!doctype html>
     const expandedProjects = new Set();
     const expandedStations = new Set();
 
-    function showStatus(text) {
+    function showStatus(text, timeout = 3000) {
       document.getElementById("status").textContent = text || "";
-      if (text) setTimeout(() => showStatus(""), 3000);
+      if (text && timeout > 0) setTimeout(() => showStatus(""), timeout);
     }
 
     async function api(path, options = {}) {
@@ -1528,8 +1528,8 @@ HTML = r"""<!doctype html>
     async function refreshClientReleases() {
       const data = await api("/api/client-releases");
       document.getElementById("clientReleaseRows").innerHTML = data.releases.map(row =>
-        `<tr><td>${htmlEscape(row.version)}</td><td>${htmlEscape(row.title || "")}</td><td>${htmlEscape(row.release_date || "")}</td><td>${row.stable ? "是" : "否"}</td><td>${row.force_update ? "是" : "否"}</td><td>${htmlEscape((row.release_notes || []).join(" | "))}</td><td><button class="secondary" onclick="downloadClientRelease('${htmlEscape(row.version)}','release')">下载正式版</button> <button class="secondary" onclick="downloadClientRelease('${htmlEscape(row.version)}','debug')">下载Debug版</button> <button class="danger" onclick="deleteClientRelease('${htmlEscape(row.version)}')">删除</button></td></tr>`
-      ).join("") || `<tr><td colspan="7">暂无版本</td></tr>`;
+        `<tr><td>${htmlEscape(row.version)}</td><td>${htmlEscape(row.title || "")}</td><td>${htmlEscape(row.release_date || "")}</td><td>${row.stable ? "是" : "否"}</td><td>${row.force_update ? "是" : "否"}</td><td>${htmlEscape((row.release_notes || []).join(" | "))}</td><td>${(row.update_files || []).map(file => `${htmlEscape(file.original_name)}<br><small>${Math.ceil(Number(file.file_size || 0) / 1024)} KB / ${htmlEscape(String(file.sha256 || "").slice(0, 12))}</small>`).join("<br>") || "无"}</td><td><button class="secondary" onclick="downloadClientRelease('${htmlEscape(row.version)}','release')">下载正式版</button> <button class="secondary" onclick="downloadClientRelease('${htmlEscape(row.version)}','debug')">下载Debug版</button> <button class="danger" onclick="deleteClientRelease('${htmlEscape(row.version)}')">删除</button></td></tr>`
+      ).join("") || `<tr><td colspan="8">暂无版本</td></tr>`;
     }
 
     async function refreshClientUpdateLogs() {
@@ -1547,6 +1547,7 @@ HTML = r"""<!doctype html>
     async function saveClientRelease() {
       const version = document.getElementById("releaseVersion").value.trim();
       if (!version) return showStatus("版本号不能为空");
+      const saveButton = document.getElementById("saveClientReleaseBtn");
       const form = new FormData();
       form.append("version", version);
       form.append("title", document.getElementById("releaseTitle").value.trim());
@@ -1559,19 +1560,35 @@ HTML = r"""<!doctype html>
       ));
       const releaseFile = readFileInput("releaseFile");
       const debugFile = readFileInput("debugFile");
-      const s7ToolFile = readFileInput("s7ToolFile");
+      for (const file of [releaseFile, debugFile].filter(Boolean)) {
+        if (!file.name.toLowerCase().endsWith(".zip")) {
+          return showStatus("只支持 ZIP 更新包");
+        }
+      }
       if (releaseFile) form.append("release_file", releaseFile);
       if (debugFile) form.append("debug_file", debugFile);
-      if (s7ToolFile) form.append("s7_tool_file", s7ToolFile);
-      const res = await fetch("/api/client-releases", {method:"POST", body: form});
-      const data = await res.json().catch(() => ({}));
-      if (res.status === 401) {
-        window.location.href = "/login";
-        return;
+      saveButton.disabled = true;
+      showStatus("正在上传更新包，请稍候...", 0);
+      try {
+        const res = await fetch("/api/client-releases", {method:"POST", body: form});
+        const responseText = await res.text();
+        let data = {};
+        try { data = responseText ? JSON.parse(responseText) : {}; } catch (_) {}
+        if (res.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok) {
+          const detail = data.error || data.msg || data.message || responseText || "保存失败";
+          throw new Error(`HTTP ${res.status}：${detail}`);
+        }
+        showStatus(`版本已保存，上传文件 ${Number((data.files || []).length)} 个`);
+        await refreshClientReleases();
+      } catch (error) {
+        showStatus(`上传失败：${error.message || error}`);
+      } finally {
+        saveButton.disabled = false;
       }
-      if (!res.ok) throw new Error(data.error || "保存失败");
-      showStatus("版本已保存");
-      await refreshClientReleases();
     }
 
     async function deleteClientRelease(version) {

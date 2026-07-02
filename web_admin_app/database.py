@@ -274,6 +274,7 @@ def needs_returning_id(sql):
             "insert into station_dependencies ",
             "insert into barcode_cancel_logs ",
             "insert into degrade_mode_logs ",
+            "insert into client_update_files ",
         )
     )
 
@@ -639,6 +640,18 @@ def create_traceability_schema(conn):
             message TEXT,
             created_at {ts_type} NOT NULL DEFAULT {current_ts}
         );
+        CREATE TABLE IF NOT EXISTS client_update_files (
+            id {id_type},
+            version TEXT NOT NULL,
+            original_name TEXT NOT NULL,
+            stored_name TEXT NOT NULL,
+            file_path TEXT NOT NULL,
+            file_size BIGINT NOT NULL,
+            sha256 TEXT NOT NULL,
+            uploaded_by TEXT,
+            uploaded_at {ts_type} NOT NULL DEFAULT {current_ts},
+            remark TEXT
+        );
         CREATE TABLE IF NOT EXISTS web_admin_users (
             id {id_type},
             username TEXT NOT NULL UNIQUE,
@@ -685,6 +698,8 @@ def create_traceability_schema(conn):
         );
         CREATE INDEX IF NOT EXISTS idx_client_update_logs_created_at ON client_update_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_client_update_logs_client_id ON client_update_logs(client_id);
+        CREATE INDEX IF NOT EXISTS idx_client_update_files_version ON client_update_files(version);
+        CREATE INDEX IF NOT EXISTS idx_client_update_files_uploaded_at ON client_update_files(uploaded_at);
         CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_created_at ON web_admin_login_logs(created_at);
         CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_username ON web_admin_login_logs(username);
         CREATE INDEX IF NOT EXISTS idx_web_admin_login_logs_ip ON web_admin_login_logs(ip_address);

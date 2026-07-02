@@ -35,28 +35,6 @@ jobs:
         run: |
           pyinstaller --noconfirm --clean --onefile --console --name QualityControlSystem_Debug main.py
 
-      - name: Build S7 PLC test tool exe
-        run: |
-          pyinstaller --noconfirm --clean --onefile --windowed --name S7_PLC_Test_Tool --paths . --hidden-import shared --hidden-import shared.s7_plc_client --add-data "s7_plc_test_tool/config.ini;." --distpath s7_plc_test_tool/dist --workpath s7_plc_test_tool/build s7_plc_test_tool/main.py
-
-      - name: Smoke test S7 PLC test tool
-        shell: pwsh
-        run: |
-          $exe = Resolve-Path "s7_plc_test_tool/dist/S7_PLC_Test_Tool.exe"
-          $process = Start-Process -FilePath $exe -PassThru
-          try {
-            Start-Sleep -Seconds 8
-            if ($process.HasExited) {
-              throw "S7_PLC_Test_Tool.exe exited during startup with code $($process.ExitCode)"
-            }
-            Write-Host "S7_PLC_Test_Tool.exe startup smoke test passed"
-          }
-          finally {
-            if (-not $process.HasExited) {
-              Stop-Process -Id $process.Id -Force
-            }
-          }
-
       - name: Upload quality control artifact
         uses: actions/upload-artifact@v4
         with:
@@ -69,11 +47,11 @@ jobs:
           name: QualityControlSystem-debug-windows
           path: dist/QualityControlSystem_Debug.exe
 
-      - name: Upload S7 PLC test tool artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: S7_PLC_Test_Tool-windows
-          path: s7_plc_test_tool/dist/S7_PLC_Test_Tool.exe
+      - name: Remove deprecated S7 release asset
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release delete-asset windows-latest S7_PLC_Test_Tool.exe --yes || true
 
       - name: Publish latest Windows exe
         uses: softprops/action-gh-release@v2
@@ -84,4 +62,3 @@ jobs:
           files: |
             dist/QualityControlSystem.exe
             dist/QualityControlSystem_Debug.exe
-            s7_plc_test_tool/dist/S7_PLC_Test_Tool.exe

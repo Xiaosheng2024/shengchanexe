@@ -1,8 +1,12 @@
 import http.cookiejar
+import hashlib
+import io
 import json
 import tempfile
 import threading
 import unittest
+import zipfile
+from unittest.mock import patch
 from http.server import ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -10,6 +14,7 @@ from urllib.parse import quote, urlencode
 from urllib.request import HTTPCookieProcessor, Request, build_opener, urlopen
 
 from web_admin_app import auth, database, services
+from web_admin_app.admin_page import HTML
 from web_admin_app.server import AdminHandler
 
 
@@ -18,6 +23,12 @@ class WebAdminAuthTest(unittest.TestCase):
         self.old_db_path = database.DB_PATH
         self.old_config_path = database.CONFIG_PATH
         self.temp_dir = tempfile.TemporaryDirectory()
+        self.old_releases_dir = services.RELEASES_DIR
+        self.old_client_updates_dir = services.CLIENT_UPDATES_DIR
+        services.RELEASES_DIR = Path(self.temp_dir.name) / "releases"
+        services.CLIENT_UPDATES_DIR = (
+            services.RELEASES_DIR / "client_updates"
+        )
         database.DB_PATH = Path(self.temp_dir.name) / "quality_control.db"
         database.CONFIG_PATH = Path(self.temp_dir.name) / "config.ini"
         database.CONFIG_PATH.write_text(
@@ -38,6 +49,8 @@ class WebAdminAuthTest(unittest.TestCase):
         self.thread.join(timeout=3)
         database.DB_PATH = self.old_db_path
         database.CONFIG_PATH = self.old_config_path
+        services.RELEASES_DIR = self.old_releases_dir
+        services.CLIENT_UPDATES_DIR = self.old_client_updates_dir
         self.temp_dir.cleanup()
 
     def opener(self):
@@ -89,6 +102,55 @@ class WebAdminAuthTest(unittest.TestCase):
         payload["station_session_id"] = acquired["session_id"]
         return payload
 
+    @staticmethod
+    def update_zip(executable_name="QualityControlSystem.exe", content=b"exe"):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", zipfile.ZIP_DEFLATED) as archive:
+            archive.writestr(executable_name, content)
+        return buffer.getvalue()
+
+    def multipart_request(
+        self,
+        opener,
+        path,
+        fields,
+        file_field,
+        filename,
+        content,
+    ):
+        boundary = "----CodexMesBoundary"
+        body = bytearray()
+        for key, value in fields.items():
+            body.extend(f"--{boundary}\r\n".encode())
+            body.extend(
+                f'Content-Disposition: form-data; name="{key}"\r\n\r\n'.encode()
+            )
+            body.extend(str(value).encode())
+            body.extend(b"\r\n")
+        body.extend(f"--{boundary}\r\n".encode())
+        body.extend(
+            (
+                f'Content-Disposition: form-data; name="{file_field}"; '
+                f'filename="{filename}"\r\n'
+                "Content-Type: application/zip\r\n\r\n"
+            ).encode()
+        )
+        body.extend(content)
+        body.extend(b"\r\n")
+        body.extend(f"--{boundary}--\r\n".encode())
+        request = Request(
+            self.base + path,
+            data=bytes(body),
+            headers={
+                "Content-Type": f"multipart/form-data; boundary={boundary}",
+            },
+            method="POST",
+        )
+        with opener.open(request, timeout=5) as response:
+            return response.status, json.loads(
+                response.read().decode("utf-8")
+            )
+
     def test_unauthenticated_admin_is_redirected_and_api_returns_401(self):
         with urlopen(self.base + "/", timeout=3) as response:
             self.assertEqual(response.geturl(), self.base + "/login")
@@ -98,6 +160,117 @@ class WebAdminAuthTest(unittest.TestCase):
         with self.assertRaises(HTTPError) as projects_error:
             urlopen(self.base + "/api/projects", timeout=3)
         self.assertEqual(projects_error.exception.code, 401)
+
+    def test_client_update_zip_upload_requires_login_and_saves_file(self):
+        package = self.update_zip(
+            content=b"quality-control-v0.9.3-rc2"
+        )
+        fields = {
+            "version": "v0.9.3-rc2-upload",
+            "title": "现场更新",
+            "release_notes": "[]",
+        }
+        with self.assertRaises(HTTPError) as unauthorized:
+            self.multipart_request(
+                self.opener(),
+                "/api/client-releases",
+                fields,
+                "release_file",
+                "中文 更新包.zip",
+                package,
+            )
+        self.assertEqual(unauthorized.exception.code, 401)
+
+        opener = self.login("admin", "AdminInitial9!")
+        status, result = self.multipart_request(
+            opener,
+            "/api/client-releases",
+            fields,
+            "release_file",
+            "中文 更新包.zip",
+            package,
+        )
+        self.assertEqual(status, 200)
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["files"]), 1)
+        stored = Path(result["files"][0]["file_path"])
+        self.assertTrue(stored.is_file())
+        self.assertEqual(
+            result["files"][0]["sha256"],
+            hashlib.sha256(package).hexdigest(),
+        )
+        self.assertEqual(stored.parent, services.CLIENT_UPDATES_DIR)
+        self.assertNotEqual(stored.name, "中文 更新包.zip")
+        release = next(
+            item
+            for item in services.list_client_releases()
+            if item["version"] == fields["version"]
+        )
+        self.assertEqual(
+            release["update_files"][0]["original_name"],
+            "中文 更新包.zip",
+        )
+        self.assertEqual(
+            Path(release["release_file_path"]).read_bytes(),
+            b"quality-control-v0.9.3-rc2",
+        )
+
+    def test_client_update_upload_rejects_non_zip_and_empty_file(self):
+        opener = self.login("admin", "AdminInitial9!")
+        fields = {"version": "v0.9.3-invalid"}
+        for filename, content, expected in (
+            ("invalid.exe", b"not zip", "只支持 ZIP"),
+            ("fake.zip", b"not a zip archive", "只支持 ZIP"),
+            ("empty.zip", b"", "上传文件为空"),
+        ):
+            with self.assertRaises(HTTPError) as raised:
+                self.multipart_request(
+                    opener,
+                    "/api/client-releases",
+                    fields,
+                    "release_file",
+                    filename,
+                    content,
+                )
+            self.assertEqual(raised.exception.code, 400)
+            body = json.loads(raised.exception.read().decode("utf-8"))
+            self.assertIn(expected, body["error"])
+
+    def test_client_update_page_displays_http_upload_error(self):
+        self.assertIn('accept=".zip,application/zip"', HTML)
+        self.assertIn("正在上传更新包", HTML)
+        self.assertIn("HTTP ${res.status}", HTML)
+        self.assertNotIn('id="s7ToolFile"', HTML)
+        self.assertGreaterEqual(
+            services.MAX_CLIENT_UPDATE_FILE_BYTES,
+            200 * 1024 * 1024,
+        )
+
+    def test_duplicate_update_filename_does_not_overwrite_old_package(self):
+        opener = self.login("admin", "AdminInitial9!")
+        fields = {"version": "v0.9.3-duplicate"}
+        stored_paths = []
+        for content in (b"first", b"second"):
+            _, result = self.multipart_request(
+                opener,
+                "/api/client-releases",
+                fields,
+                "release_file",
+                "same-name.zip",
+                self.update_zip(content=content),
+            )
+            stored_paths.append(Path(result["files"][0]["file_path"]))
+        self.assertNotEqual(stored_paths[0], stored_paths[1])
+        self.assertTrue(all(path.exists() for path in stored_paths))
+
+    def test_update_directory_permission_error_is_explicit(self):
+        with patch.object(
+            Path,
+            "mkdir",
+            side_effect=PermissionError("denied"),
+        ):
+            with self.assertRaisesRegex(ValueError, "更新包目录无写入权限"):
+                services.ensure_client_updates_dir()
 
     def test_production_client_api_remains_public(self):
         with urlopen(self.base + "/api/client/projects", timeout=3) as response:

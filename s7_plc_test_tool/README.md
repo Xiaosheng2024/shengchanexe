@@ -1,8 +1,9 @@
-# S7 PLC 条码读取测试工具
+# S7 PLC 条码读取测试工具（已废弃）
 
-独立 PyQt5 Windows 桌面测试程序，用于现场测试 Siemens S7-1200 PLC 读取。
+PLC 参数验证工具已废弃，正式环境使用主客户端 PLC 静默监听。
+从 `v0.9.3-rc2` 起，本工具不再参与正式发布，也不再生成 EXE。
 
-本工具只读取 PLC，不写入 PLC，不集成 MES 主程序。
+本目录仅保留历史参数验证源码。
 
 ## 安装依赖
 
@@ -22,22 +23,7 @@ python s7_plc_test_tool/main.py
 
 ## 打包 EXE
 
-Windows 下双击或运行：
-
-```bat
-build_exe.bat
-```
-
-`build_exe.bat` 会安装本工具所需的 `python-snap7`、`PyQt5` 和打包依赖。
-
-打包完成后 EXE 位置：
-
-```text
-s7_plc_test_tool\dist\S7_PLC_Test_Tool.exe
-```
-
-打包命令从项目根目录执行，并显式收集 `shared` 与
-`shared.s7_plc_client`。测试工具的默认 `config.ini` 会嵌入单文件 EXE。
+已禁用。`build_exe.bat` 只显示废弃提示，不再生成可执行文件。
 
 ## 修改配置
 

@@ -126,6 +126,11 @@ sudo rsync -a --delete \
   "${UPDATE_DIR}/" \
   "${MES_DIR}/"
 
+echo "== 准备客户端更新包目录 =="
+sudo mkdir -p "${MES_DIR}/releases/client_updates"
+sudo chown -R dell:dell "${MES_DIR}/releases"
+sudo chmod -R 755 "${MES_DIR}/releases"
+
 echo "== 校验服务器依赖清单 =="
 if grep -Eiq 'PyQt5|PyQtWebEngine|PyQt5-Qt5|matplotlib|pyinstaller|python-snap7|pymodbus' \
   "${MES_DIR}/requirements-server.txt"; then

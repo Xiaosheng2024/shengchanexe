@@ -2,6 +2,8 @@ import cgi
 import configparser
 import json
 import logging
+import shutil
+import tempfile
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -63,9 +65,11 @@ from web_admin_app.services import (
     validate_station_session,
     validate_barcode_use,
     download_client_release,
+    ensure_client_updates_dir,
     vacuum_or_analyze,
 )
 
+MAX_CLIENT_UPDATE_REQUEST_BYTES = 222 * 1024 * 1024
 
 CLIENT_SESSION_ENDPOINTS = {
     "/api/station-completions",
@@ -213,6 +217,7 @@ def read_form(handler):
     environ = {
         "REQUEST_METHOD": "POST",
         "CONTENT_TYPE": content_type,
+        "CONTENT_LENGTH": handler.headers.get("Content-Length", "0"),
     }
     form = cgi.FieldStorage(fp=handler.rfile, headers=handler.headers, environ=environ, keep_blank_values=True)
     payload = {}
@@ -221,7 +226,13 @@ def read_form(handler):
         return payload, files
     for item in form.list:
         if item.filename:
-            files[item.name] = item.file
+            upload = tempfile.SpooledTemporaryFile(
+                max_size=8 * 1024 * 1024,
+                mode="w+b",
+            )
+            shutil.copyfileobj(item.file, upload)
+            upload.seek(0)
+            files[item.name] = upload
             payload[f"{item.name}_filename"] = item.filename
         else:
             payload[item.name] = item.value
@@ -306,6 +317,31 @@ class AdminHandler(BaseHTTPRequestHandler):
             return
         if not require_api_auth(self, "POST", path):
             return
+        if path == "/api/client-releases":
+            if (self.current_user or {}).get("role") not in {
+                "admin",
+                "super_admin",
+            }:
+                json_response(
+                    self,
+                    {"error": "当前账号无权上传客户端更新包"},
+                    403,
+                )
+                return
+            try:
+                content_length = int(
+                    self.headers.get("Content-Length", "0") or 0
+                )
+            except ValueError:
+                content_length = 0
+            if content_length > MAX_CLIENT_UPDATE_REQUEST_BYTES:
+                json_response(
+                    self,
+                    {"error": "文件过大，请检查上传限制"},
+                    413,
+                )
+                return
+        self._request_uploads = []
         try:
             self.route_post()
         except ClientValidationError as exc:
@@ -317,7 +353,15 @@ class AdminHandler(BaseHTTPRequestHandler):
         except ValueError as exc:
             json_response(self, {"error": str(exc)}, 400)
         except Exception as exc:
+            logging.exception("POST %s 处理失败", self.path)
             json_response(self, {"error": str(exc)}, 500)
+        finally:
+            for upload in self._request_uploads:
+                try:
+                    upload.close()
+                except Exception:
+                    pass
+            self._request_uploads = []
 
     def do_PUT(self):
         path = urlparse(self.path).path
@@ -466,8 +510,13 @@ class AdminHandler(BaseHTTPRequestHandler):
         is_multipart = content_type.startswith("multipart/form-data")
         if is_multipart:
             payload, files = read_form(self)
+            self._request_uploads.extend((files or {}).values())
         else:
             payload, files = read_json(self), None
+        if path == "/api/client-releases":
+            payload["_uploaded_by"] = (
+                (self.current_user or {}).get("username") or ""
+            )
         if requires_station_session("POST", path):
             validate_station_session(payload)
         if path == "/api/auth/change-password":
@@ -670,6 +719,7 @@ def run(host=None, port=None):
     host = server_config["host"] if host is None else host
     port = server_config["port"] if port is None else port
     init_db()
+    ensure_client_updates_dir()
     auth.ensure_session_secret()
     auth.validate_builtin_accounts()
     server = ThreadingHTTPServer((host, port), AdminHandler)

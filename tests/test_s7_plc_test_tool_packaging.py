@@ -6,7 +6,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-class S7PlcTestToolPackagingTest(unittest.TestCase):
+class S7PlcTestToolDeprecationTest(unittest.TestCase):
     def test_shared_package_and_plc_addresses_are_available(self):
         self.assertTrue((ROOT / "shared" / "__init__.py").is_file())
         self.assertTrue((ROOT / "shared" / "s7_plc_client.py").is_file())
@@ -24,19 +24,19 @@ class S7PlcTestToolPackagingTest(unittest.TestCase):
             source.index("from shared.s7_plc_client import"),
         )
 
-    def test_windows_builds_collect_shared_from_repository_root(self):
+    def test_windows_release_no_longer_builds_or_uploads_s7_tool(self):
         workflow = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text(
             encoding="utf-8"
         )
         build_script = (ROOT / "s7_plc_test_tool" / "build_exe.bat").read_text(
             encoding="utf-8"
         )
-        for content in (workflow, build_script):
-            self.assertIn("--paths .", content)
-            self.assertIn("--hidden-import shared", content)
-            self.assertIn("--hidden-import shared.s7_plc_client", content)
-            self.assertIn("s7_plc_test_tool", content)
-            self.assertNotIn("--specpath", content)
+        self.assertNotIn("--name S7_PLC_Test_Tool", workflow)
+        self.assertNotIn("S7_PLC_Test_Tool-windows", workflow)
+        self.assertIn("delete-asset windows-latest S7_PLC_Test_Tool.exe", workflow)
+        self.assertIn("deprecated", build_script.lower())
+        self.assertNotIn("pyinstaller", build_script.lower())
+        self.assertTrue((ROOT / "s7_plc_test_tool" / "DEPRECATED.md").is_file())
 
 
 if __name__ == "__main__":

@@ -6,6 +6,7 @@ import socket
 import subprocess
 import hashlib
 import os
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import unquote
@@ -21,7 +22,9 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 BACKUP_DIR = Path("/opt/mes/backup") if Path("/opt/mes").exists() else ROOT_DIR / "backup"
 ARCHIVE_DIR = Path("/opt/mes/archive") if Path("/opt/mes").exists() else ROOT_DIR / "archive"
 RELEASES_DIR = Path("/opt/mes/releases") if Path("/opt/mes").exists() else ROOT_DIR / "releases"
+CLIENT_UPDATES_DIR = RELEASES_DIR / "client_updates"
 UPLOADS_DIR = Path("/opt/mes/uploads") if Path("/opt/mes").exists() else ROOT_DIR / "uploads"
+MAX_CLIENT_UPDATE_FILE_BYTES = 220 * 1024 * 1024
 MAINTENANCE_TABLES = ["scan_records", "station_work_records", "step_work_records", "screw_action_records", "station_session_logs"]
 
 
@@ -2200,6 +2203,7 @@ def db_status():
         "maintenance_logs",
         "client_releases",
         "client_update_logs",
+        "client_update_files",
     ]
     counts = {}
     recent = {}
@@ -2356,6 +2360,22 @@ def _safe_release_dir(version):
     return RELEASES_DIR / version
 
 
+def ensure_client_updates_dir():
+    try:
+        CLIENT_UPDATES_DIR.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise ValueError(
+            f"更新包目录无写入权限：{CLIENT_UPDATES_DIR}"
+        ) from exc
+    except OSError as exc:
+        raise ValueError(
+            f"无法创建更新包目录 {CLIENT_UPDATES_DIR}：{exc}"
+        ) from exc
+    if not os.access(CLIENT_UPDATES_DIR, os.W_OK):
+        raise ValueError(f"更新包目录无写入权限：{CLIENT_UPDATES_DIR}")
+    return CLIENT_UPDATES_DIR
+
+
 def _sha256_file(path: Path):
     digest = hashlib.sha256()
     with path.open("rb") as file:
@@ -2380,7 +2400,20 @@ def _release_row_to_dict(row):
 def list_client_releases():
     with get_conn() as conn:
         rows = conn.execute("SELECT * FROM client_releases ORDER BY release_date DESC, id DESC").fetchall()
-    return [_release_row_to_dict(row) for row in rows]
+        file_rows = conn.execute(
+            "SELECT * FROM client_update_files ORDER BY uploaded_at DESC, id DESC"
+        ).fetchall()
+    files_by_version = {}
+    for row in file_rows:
+        item = row_to_dict(row)
+        files_by_version.setdefault(item["version"], []).append(item)
+    releases = [_release_row_to_dict(row) for row in rows]
+    for release in releases:
+        release["update_files"] = files_by_version.get(
+            release["version"],
+            [],
+        )
+    return releases
 
 
 def get_client_release(version):
@@ -2403,32 +2436,189 @@ def upsert_client_release(payload, files=None):
     if not isinstance(release_notes, list):
         release_notes = [str(release_notes)]
     release_date = payload.get("release_date") or now_text()
-    stable = bool(payload.get("stable", True))
-    force_update = bool(payload.get("force_update", False))
+    stable = str(payload.get("stable", "1")).strip().lower() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
+    force_update = str(
+        payload.get("force_update", "0")
+    ).strip().lower() in {"1", "true", "yes", "on"}
     min_required_version = str(payload.get("min_required_version", "")).strip()
     release_dir = _safe_release_dir(version)
-    release_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        release_dir.mkdir(parents=True, exist_ok=True)
+    except PermissionError as exc:
+        raise ValueError(f"版本发布目录无写入权限：{release_dir}") from exc
+    update_dir = ensure_client_updates_dir()
+    uploaded_by = str(payload.get("_uploaded_by") or "").strip()
+    remark = str(payload.get("remark") or title or "").strip()
 
-    def store_file(key, target_name):
+    def store_zip(key, expected_executable):
         file_obj = (files or {}).get(key)
         if not file_obj:
-            return None, None
-        target_path = release_dir / target_name
-        with target_path.open("wb") as target:
-            shutil.copyfileobj(file_obj, target)
-        return str(target_path), _sha256_file(target_path)
+            return None
+        original_name = str(
+            payload.get(f"{key}_filename") or ""
+        ).strip()
+        if not original_name.lower().endswith(".zip"):
+            logging.warning(
+                "客户端更新上传拒绝 user=%s original=%s zip_valid=false reason=扩展名不是zip",
+                uploaded_by,
+                original_name,
+            )
+            raise ValueError("只支持 ZIP 更新包")
+        temp_path = update_dir / (
+            f".uploading_{os.getpid()}_{datetime.now().strftime('%Y%m%d%H%M%S%f')}.zip"
+        )
+        package_path = None
+        file_size = 0
+        try:
+            if hasattr(file_obj, "seek"):
+                file_obj.seek(0)
+            with temp_path.open("wb") as target:
+                while True:
+                    chunk = file_obj.read(1024 * 1024)
+                    if not chunk:
+                        break
+                    file_size += len(chunk)
+                    if file_size > MAX_CLIENT_UPDATE_FILE_BYTES:
+                        raise ValueError("文件过大，请检查上传限制")
+                    target.write(chunk)
+            if file_size == 0:
+                raise ValueError("上传文件为空")
+            if not zipfile.is_zipfile(temp_path):
+                raise ValueError("只支持 ZIP 更新包")
+            package_sha256 = _sha256_file(temp_path)
+            safe_version = "".join(
+                char if char.isalnum() or char in ".-_" else "_"
+                for char in version
+            )
+            timestamp = datetime.now().strftime("%Y%m%d%H%M%S%f")
+            stored_name = (
+                f"client_update_{safe_version}_{key}_{package_sha256[:8]}_{timestamp}.zip"
+            )
+            package_path = update_dir / stored_name
+            temp_path.replace(package_path)
+
+            extracted = {}
+            with zipfile.ZipFile(package_path) as archive:
+                members = {
+                    Path(info.filename).name: info
+                    for info in archive.infolist()
+                    if not info.is_dir()
+                }
+                if expected_executable not in members:
+                    raise ValueError(
+                        f"ZIP中缺少 {expected_executable}"
+                    )
+                executable_names = [expected_executable]
+                if (
+                    key == "release_file"
+                    and "QualityControlSystem_Debug.exe" in members
+                ):
+                    executable_names.append(
+                        "QualityControlSystem_Debug.exe"
+                    )
+                for executable_name in executable_names:
+                    target_path = release_dir / executable_name
+                    with archive.open(members[executable_name]) as source:
+                        with target_path.open("wb") as target:
+                            shutil.copyfileobj(source, target)
+                    extracted[executable_name] = {
+                        "path": str(target_path),
+                        "sha256": _sha256_file(target_path),
+                    }
+            logging.info(
+                "客户端更新ZIP保存成功 user=%s original=%s size=%s dir=%s path=%s sha256=%s zip_valid=true",
+                uploaded_by,
+                original_name,
+                file_size,
+                update_dir,
+                package_path,
+                package_sha256,
+            )
+            return {
+                "version": version,
+                "original_name": original_name,
+                "stored_name": stored_name,
+                "file_path": str(package_path),
+                "file_size": file_size,
+                "sha256": package_sha256,
+                "uploaded_by": uploaded_by,
+                "uploaded_at": now_text(),
+                "remark": remark,
+                "extracted": extracted,
+            }
+        except PermissionError as exc:
+            logging.exception(
+                "客户端更新ZIP保存失败，目录无权限：%s",
+                update_dir,
+            )
+            raise ValueError(
+                f"更新包目录无写入权限：{update_dir}"
+            ) from exc
+        except Exception:
+            logging.exception(
+                "客户端更新ZIP保存失败 user=%s original=%s size=%s dir=%s",
+                uploaded_by,
+                original_name,
+                file_size,
+                update_dir,
+            )
+            raise
+        finally:
+            if temp_path.exists():
+                temp_path.unlink()
+            if package_path is not None and package_path.exists():
+                if "package_sha256" not in locals() or not extracted:
+                    package_path.unlink()
 
     with get_conn() as conn:
         existing = conn.execute("SELECT * FROM client_releases WHERE version = ?", (version,)).fetchone()
-        release_file_path, release_sha256 = store_file("release_file", payload.get("release_filename") or "QualityControlSystem.exe")
-        debug_file_path, debug_sha256 = store_file("debug_file", payload.get("debug_filename") or "QualityControlSystem_Debug.exe")
-        s7_tool_file_path, s7_tool_sha256 = store_file("s7_tool_file", payload.get("s7_tool_filename") or "S7_PLC_Test_Tool.exe")
-        release_file_path = release_file_path or (existing["release_file_path"] if existing else "")
-        debug_file_path = debug_file_path or (existing["debug_file_path"] if existing else "")
-        s7_tool_file_path = s7_tool_file_path or (existing["s7_tool_file_path"] if existing else "")
-        release_sha256 = release_sha256 or (existing["release_sha256"] if existing else "")
-        debug_sha256 = debug_sha256 or (existing["debug_sha256"] if existing else "")
-        s7_tool_sha256 = s7_tool_sha256 or (existing["s7_tool_sha256"] if existing else "")
+        uploaded_packages = []
+        release_package = store_zip(
+            "release_file",
+            "QualityControlSystem.exe",
+        )
+        debug_package = store_zip(
+            "debug_file",
+            "QualityControlSystem_Debug.exe",
+        )
+        uploaded_packages.extend(
+            package
+            for package in (release_package, debug_package)
+            if package
+        )
+        release_extracted = (
+            release_package.get("extracted", {}) if release_package else {}
+        )
+        debug_extracted = (
+            debug_package.get("extracted", {}) if debug_package else {}
+        )
+        release_data = release_extracted.get("QualityControlSystem.exe")
+        debug_data = debug_extracted.get(
+            "QualityControlSystem_Debug.exe"
+        ) or release_extracted.get("QualityControlSystem_Debug.exe")
+        release_file_path = (
+            release_data["path"] if release_data else
+            (existing["release_file_path"] if existing else "")
+        )
+        debug_file_path = (
+            debug_data["path"] if debug_data else
+            (existing["debug_file_path"] if existing else "")
+        )
+        release_sha256 = (
+            release_data["sha256"] if release_data else
+            (existing["release_sha256"] if existing else "")
+        )
+        debug_sha256 = (
+            debug_data["sha256"] if debug_data else
+            (existing["debug_sha256"] if existing else "")
+        )
+        s7_tool_file_path = existing["s7_tool_file_path"] if existing else ""
+        s7_tool_sha256 = existing["s7_tool_sha256"] if existing else ""
         if existing:
             conn.execute(
                 """
@@ -2482,7 +2672,38 @@ def upsert_client_release(payload, files=None):
                     now_text(),
                 ),
             )
-    return {"ok": True, "version": version}
+        for package in uploaded_packages:
+            conn.execute(
+                """
+                INSERT INTO client_update_files
+                (version, original_name, stored_name, file_path, file_size,
+                 sha256, uploaded_by, uploaded_at, remark)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    package["version"],
+                    package["original_name"],
+                    package["stored_name"],
+                    package["file_path"],
+                    package["file_size"],
+                    package["sha256"],
+                    package["uploaded_by"],
+                    package["uploaded_at"],
+                    package["remark"],
+                ),
+            )
+    return {
+        "ok": True,
+        "version": version,
+        "files": [
+            {
+                key: value
+                for key, value in package.items()
+                if key != "extracted"
+            }
+            for package in uploaded_packages
+        ],
+    }
 
 
 def delete_client_release(version):
@@ -2521,7 +2742,6 @@ def latest_client_release(query):
             "release_notes": latest["release_notes"],
             "download_url": f"{download_base}/release",
             "debug_download_url": f"{download_base}/debug",
-            "s7_tool_download_url": f"{download_base}/s7_tool",
             "sha256": latest["release_sha256"],
             "size": Path(latest["release_file_path"]).stat().st_size if latest.get("release_file_path") and Path(latest["release_file_path"]).exists() else 0,
         },
@@ -2535,7 +2755,6 @@ def download_client_release(version, kind):
     field_map = {
         "release": ("release_file_path", "release.exe"),
         "debug": ("debug_file_path", "debug.exe"),
-        "s7_tool": ("s7_tool_file_path", "s7_tool.exe"),
     }
     if kind not in field_map:
         raise ValueError("文件类型不正确")
