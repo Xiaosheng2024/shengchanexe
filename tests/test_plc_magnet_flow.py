@@ -137,11 +137,17 @@ class PlcMagnetFlowTest(unittest.TestCase):
         self.assertEqual(client.read_blocks, [])
         self.assertNotIn((221, 8, 1), client.writes)
 
-    def test_dbw8_readback_failure_does_not_report_success(self):
+    def test_dbw8_readback_failure_is_ignored_after_ok_results(self):
         client = FakeMagnetClient(failed_readbacks={8})
-        with self.assertRaisesRegex(RuntimeError, "DBW8"):
-            self.controller(client).run()
+
+        result = self.controller(client).run()
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["result"], "OK")
         self.assertIn((221, 8, 1), client.writes)
+        self.assertTrue(result["mes_read_done_sent"])
+        self.assertFalse(result["mes_read_done_verified"])
+        self.assertTrue(result["mes_read_done_verify_skipped"])
 
     def test_progress_contains_every_production_stage(self):
         progress = []
